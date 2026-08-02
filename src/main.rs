@@ -677,6 +677,11 @@ struct BuildCliArgs {
     /// Only run the static compose validation (no pulls/boot); print + exit.
     #[arg(long)]
     validate_only: bool,
+    /// Bypass the content-hash bake cache: force a full rebuild. The cache is keyed
+    /// on ALL bake inputs, so an unchanged stack normally HITS (near-instant, skips
+    /// pull/squash/assemble). Nightly bake-repeatability uses this to re-bake.
+    #[arg(long)]
+    no_cache: bool,
 }
 
 /// Flags shared by `boot` and `run`. On `boot` the `Option`s fall back to the
@@ -951,6 +956,7 @@ fn dispatch() -> Result<i32, Box<dyn std::error::Error>> {
             working_set: args.working_set,
             squash_threshold: args.squash_threshold,
             validate_only: args.validate_only,
+            no_cache: args.no_cache,
         }),
         Cmd::SeedBuild { config } => build::cmd_seed_build(&config),
         Cmd::AssembleInitramfs { config } => build::cmd_assemble_initramfs(&config),

@@ -1,0 +1,208 @@
+# deterministic-vmm e2e test manifest (goal-3a).
+#
+# The single source of truth for the tiered runner (scripts/test.sh). Each
+# [[test]] declares:
+#   name     unique id; also `scripts/test.sh <name>` runs just this one.
+#   tier     T0 | T1 | T2 | T3   (fast=T0+T1, merge=T0..T2, nightly=all).
+#   tags     scheduling hints:
+#              parallel-safe   -> runs in the bounded parallel POOL. Only tests
+#                                 whose assertions are functional / virtual-time
+#                                 and that touch no shared committed output.
+#              perf-exclusive  -> wall-clock / per-hop assertions (load-sensitive)
+#                                 -> NEVER in the pool; run SERIALIZED in the quiet
+#                                 section after the pool drains.
+#              needs-bake      -> runs `dvmm build`, or writes a shared per-stack
+#                                 artifact -> serialized (no shared-output races).
+#   timeout  wall-clock seconds; the runner wraps each test in `timeout`.
+#   requires (optional) space-separated repo-relative paths that must exist, else
+#            the test is reported SKIP (never silently passed).
+#   cmd      the command, run from the repo root.
+#   desc     one line for the coverage inventory.
+#
+# SCHEDULING: a test runs in the parallel pool iff it is tagged `parallel-safe`;
+# everything else runs serially in the quiet section. This keeps perf/per-hop
+# assertions off the loaded pool and prevents two bakes from clobbering the same
+# committed initramfs/lock.
+#
+# COVERAGE FLOOR (never cut, only re-tiered): boot works; FF collapses idle with
+# exact cadence; repeatability; bake rejects what it must; artifact
+# reproducibility; per-hop budget. fast (subset of) merge (subset of) nightly.
+
+# ============================ T0 — cargo test ==============================
+
+[[test]]
+name = "cargo-test"
+tier = "T0"
+tags = ["parallel-safe"]
+timeout = 300
+requires = ""
+cmd = "cargo test --release"
+desc = "unit/integration Rust tests (the only fast tier before this work)"
+
+# ============================ T1 — fast (<=~90s) ===========================
+
+[[test]]
+name = "smoke-busybox"
+tier = "T1"
+tags = ["parallel-safe"]
+timeout = 90
+requires = "guest/initramfs/initramfs.cpio.gz guest/kernel/vmlinux-6.1.128"
+cmd = "scripts/smoke_test.sh 45"
+desc = "FLOOR(boot): busybox guest boots to the DVMM_BOOT_OK serial marker"
+
+[[test]]
+name = "interactive-exit"
+tier = "T1"
+tags = ["parallel-safe"]
+timeout = 180
+requires = "guest/initramfs/initramfs.cpio.gz guest/kernel/vmlinux-6.1.128"
+cmd = "scripts/smoke_test_interactive_exit.sh 20"
+desc = "exit respawns; reboot/poweroff self-exit(0); horizon bounds wedge(3); mode line"
+
+[[test]]
+name = "bake-reject"
+tier = "T1"
+tags = ["parallel-safe"]
+timeout = 60
+requires = ""
+cmd = "scripts/bake_reject_test.sh"
+desc = "FLOOR(bake-rejects): rejection corpus via static --validate-only (no VM/bake)"
+
+[[test]]
+name = "smoke-container"
+tier = "T1"
+tags = ["parallel-safe"]
+timeout = 180
+requires = "guest/initramfs-alpine/initramfs-alpine.cpio.gz guest/kernel/vmlinux-6.1.128"
+cmd = "scripts/smoke_test_container.sh 120"
+desc = "cached base guest boots; podman runs a digest-pinned image offline"
+
+# ============================ T2 — merge ===================================
+
+[[test]]
+name = "ff-demo-short"
+tier = "T2"
+tags = ["perf-exclusive", "needs-bake"]
+timeout = 200
+requires = "guest/initramfs-alpine/initramfs-alpine-dogfood.cpio.gz guest/kernel/vmlinux-6.1.128"
+cmd = "scripts/ff_demo.sh 6 150"
+desc = "FLOOR(FF cadence + per-hop): dogfood FF workload, short horizon (6 vhours)"
+
+[[test]]
+name = "ff-repeat"
+tier = "T2"
+tags = ["perf-exclusive", "needs-bake"]
+timeout = 360
+requires = "guest/initramfs-alpine/initramfs-alpine-dogfood.cpio.gz guest/kernel/vmlinux-6.1.128"
+cmd = "scripts/ff_repeat.sh 6 150"
+desc = "FLOOR(repeatability): ff_demo twice -> identical guest row sequence"
+
+[[test]]
+name = "corpus-webstack"
+tier = "T2"
+tags = ["perf-exclusive", "needs-bake"]
+timeout = 320
+requires = "guest/initramfs-alpine/initramfs-alpine-webstack.cpio.gz guest/kernel/vmlinux-6.1.128"
+cmd = "scripts/corpus_test.sh webstack"
+desc = "representative corpus stack (chattiest: web+redis+postgres, dual health gates)"
+
+[[test]]
+name = "healthgate"
+tier = "T2"
+tags = ["perf-exclusive", "needs-bake"]
+timeout = 200
+requires = "guest/initramfs-alpine/initramfs-alpine-health-gate.cpio.gz guest/kernel/vmlinux-6.1.128"
+cmd = "scripts/smoke_test_healthgate.sh 150"
+desc = "healthcheck ticker resolves depends_on: service_healthy under FF"
+
+[[test]]
+name = "binds"
+tier = "T2"
+tags = ["perf-exclusive", "needs-bake"]
+timeout = 200
+requires = "guest/initramfs-alpine/initramfs-alpine-rwbind.cpio.gz guest/kernel/vmlinux-6.1.128"
+cmd = "scripts/smoke_test_binds.sh 150"
+desc = "relative rw bind + named volume materialized/writable under FF"
+
+# ============================ T3 — nightly =================================
+
+[[test]]
+name = "corpus-full"
+tier = "T3"
+tags = ["perf-exclusive", "needs-bake"]
+timeout = 600
+requires = "guest/initramfs-alpine/initramfs-alpine-configpipeline.cpio.gz guest/initramfs-alpine/initramfs-alpine-svcchain.cpio.gz"
+cmd = "scripts/corpus_test.sh configpipeline svcchain"
+desc = "remaining corpus (configpipeline + svcchain); with T2's webstack = full corpus"
+
+[[test]]
+name = "bake-repeat-dogfood"
+tier = "T3"
+tags = ["needs-bake"]
+timeout = 400
+requires = ""
+cmd = "scripts/bake_repeat_test.sh guest/stacks/dogfood/compose.yml"
+desc = "FLOOR(artifact repro): re-bake (--no-cache) -> identical lock + digests (dogfood)"
+
+[[test]]
+name = "bake-repeat-go-ab"
+tier = "T3"
+tags = ["needs-bake"]
+timeout = 500
+requires = ""
+cmd = "scripts/bake_repeat_test.sh guest/stacks/go-ab/compose.yml"
+desc = "FLOOR(artifact repro): re-bake (--no-cache) -> identical content-id (go build)"
+
+[[test]]
+name = "artifact-test"
+tier = "T3"
+tags = ["perf-exclusive", "needs-bake"]
+timeout = 900
+requires = ""
+cmd = "scripts/artifact_test.sh dogfood svcchain"
+desc = "FLOOR(artifact repro): .dvmm bit-identical, inspect/verify, run offline, run==boot"
+
+[[test]]
+name = "compare-stacks"
+tier = "T3"
+tags = ["perf-exclusive", "needs-bake"]
+timeout = 600
+requires = "guest/initramfs-alpine/initramfs-alpine-dogfood.cpio.gz guest/initramfs-alpine/initramfs-alpine-go-ab.cpio.gz"
+cmd = "scripts/compare_stacks.sh dogfood go-ab 6"
+desc = "FLOOR(per-hop budget): per-hop perf gate + shell-vs-Go side-by-side"
+
+[[test]]
+name = "ff-demo-long"
+tier = "T3"
+tags = ["perf-exclusive", "needs-bake"]
+timeout = 400
+requires = "guest/initramfs-alpine/initramfs-alpine-dogfood.cpio.gz guest/kernel/vmlinux-6.1.128"
+cmd = "scripts/ff_demo.sh 24 300"
+desc = "long-horizon FF (24 vhours): cadence + per-hop + speedup"
+
+[[test]]
+name = "test-scenario"
+tier = "T3"
+tags = ["needs-bake"]
+timeout = 500
+requires = ""
+cmd = "scripts/test_scenario.sh"
+desc = "TEST-1a: dvmm test verdict/exit-code contract (pass / wrong->1 / infra->2)"
+
+[[test]]
+name = "test-faults"
+tier = "T3"
+tags = ["needs-bake"]
+timeout = 500
+requires = ""
+cmd = "scripts/test_faults.sh"
+desc = "TEST-1b: fault injection (kill/recover, partition/heal, unexpected-death->1)"
+
+[[test]]
+name = "workload-realtime"
+tier = "T3"
+tags = ["perf-exclusive", "needs-bake"]
+timeout = 300
+requires = "guest/initramfs-alpine/initramfs-alpine-dogfood.cpio.gz guest/kernel/vmlinux-6.1.128"
+cmd = "scripts/smoke_test_workload.sh 240"
+desc = "FF-OFF real-time park path (the A/B counterpart; intentionally real-sleeps)"

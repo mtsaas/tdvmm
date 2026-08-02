@@ -78,6 +78,9 @@ pub struct BuildArgs {
     pub working_set: Option<u64>,
     pub squash_threshold: Option<u64>,
     pub validate_only: bool,
+    /// Bypass the content-hash bake cache: force a full rebuild (still stores the
+    /// result so later cached runs can hit). Nightly `bake_repeat` uses this.
+    pub no_cache: bool,
 }
 
 // ============================================================================
@@ -211,6 +214,54 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     eprintln!("== dvmm build: stack={stack_name} project={project} mem={mem_mib}MiB ==");
     eprintln!("   compose: {}", compose_path.display());
 
+    // Output destinations (needed early so a cache HIT can restore them). The `-o`
+    // path is NOT part of the cache key: identical inputs bake identical bytes
+    // regardless of where they land.
+    let out_dvmm = match &args.out {
+        Some(o) => PathBuf::from(o),
+        None => alpine_dir.join(format!("{stack_name}.dvmm")),
+    };
+    let out_initramfs = alpine_dir.join(format!("initramfs-alpine-{stack_name}.cpio.gz"));
+    let committed_lock = here.join("stacks").join(&stack_name).join("compose.lock.yml");
+    let stack_lock_path = here.join("stacks").join(&stack_name).join("stack.lock");
+
+    // ---- content-hash bake cache -------------------------------------------
+    // The key covers EVERY input that affects the output bytes: the whole compose
+    // dir tree (compose.yml + build contexts + bind sources + service source,
+    // excluding this bake's own committed outputs), the kernel, the agent source,
+    // the guest overlay tree, the pinned compose engine, the host podman/go
+    // toolchain, the dvmm binary itself (all compiled-in pins + bake logic), and
+    // the sizing knobs. `dvmm build` is deterministic (artifact_test gate 1), so a
+    // hit reusing the prior `.dvmm` is byte-identical to a fresh bake.
+    let cache = match compute_cache_key(
+        &self_exe, &here, &alpine_dir, &compose_dir, &stack_name, mem_mib, working_set_mib,
+        squash_threshold_mib,
+    ) {
+        Ok(c) => Some(c),
+        Err(e) => {
+            eprintln!("{}: bake cache disabled (key error: {e})", compose::WARN);
+            None
+        }
+    };
+    if let Some(c) = &cache {
+        if !args.no_cache && cache_is_hit(c) {
+            eprintln!("== BAKE CACHE HIT ==  key={}", &c.key[..16]);
+            eprintln!("   reusing baked artifacts (skipped pull/squash/assemble): {}", c.dir.display());
+            match cache_restore(c, &out_dvmm, &out_initramfs, &committed_lock, &stack_lock_path) {
+                Ok(dvmm_sha) => {
+                    eprintln!("   .dvmm:     {} (sha256 {dvmm_sha})", out_dvmm.display());
+                    println!("{dvmm_sha}  {}", out_dvmm.display());
+                    return Ok(0);
+                }
+                Err(e) => eprintln!("{}: cache restore failed ({e}); rebuilding", compose::WARN),
+            }
+        } else if args.no_cache {
+            eprintln!("== bake cache BYPASSED (--no-cache): forcing full rebuild ==  key={}", &c.key[..16]);
+        } else {
+            eprintln!("== BAKE CACHE MISS ==  key={} (full bake) ==", &c.key[..16]);
+        }
+    }
+
     // --- scratch workdir + clean CONTAINERS_CONF ---
     let work = mkdtemp()?;
     let conf = work.join("containers.conf");
@@ -340,7 +391,7 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
 
     // --- 6. assemble the per-stack initramfs (build_rootfs, stack mode) ---
     eprintln!("== assemble initramfs (Rust rootfs + cpio) ==");
-    let out_initramfs = alpine_dir.join(format!("initramfs-alpine-{stack_name}.cpio.gz"));
+    // (out_initramfs computed early, above, for the cache path)
 
     // build the dvmm-agent host-side (reproducible flags), before the unshare.
     let agent_bin = work.join("dvmm-agent");
@@ -399,15 +450,10 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     write_stack_lock(&here, &stack_name, &project, mem_mib, est_mib, &lock_sha, &art_sha, &out_initramfs, &records, &plain_refs, &plain_pin, &seedpins, &validated, &podman_version)?;
 
     // stash the emitted lock next to the manifest.
-    let committed_lock = here.join("stacks").join(&stack_name).join("compose.lock.yml");
     std::fs::copy(&lock_path, &committed_lock)?;
 
     // --- 8. pack the single-file .dvmm artifact ---
     eprintln!("== pack .dvmm artifact ==");
-    let out_dvmm = match &args.out {
-        Some(o) => PathBuf::from(o),
-        None => alpine_dir.join(format!("{stack_name}.dvmm")),
-    };
     let kernel = here.join("kernel/vmlinux-6.1.128");
     let dvmm_bytes = pack_dvmm(&self_exe, &records, &compose_version, &compose_sha256, &stack_name, &project, mem_mib, est_mib, &podman_version, &kernel, &out_initramfs, &lock_path)?;
     std::fs::write(&out_dvmm, &dvmm_bytes)?;
@@ -422,6 +468,15 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     eprintln!("   .dvmm:     {} (sha256 {dvmm_sha})", out_dvmm.display());
     // stdout: the artifact identity line (parity with the old pack-dvmm.sh).
     println!("{dvmm_sha}  {}", out_dvmm.display());
+
+    // --- 9. populate the bake cache (best-effort; never fails the build) ---
+    if let Some(c) = &cache {
+        match cache_store(c, &out_dvmm, &out_initramfs, &committed_lock, &stack_lock_path, &dvmm_sha) {
+            Ok(true) => eprintln!("   cached:    {} (key {})", c.dir.display(), &c.key[..16]),
+            Ok(false) => {} // entry already present
+            Err(e) => eprintln!("{}: could not populate bake cache ({e})", compose::WARN),
+        }
+    }
 
     let _ = std::fs::remove_dir_all(&work);
     Ok(0)
@@ -1101,4 +1156,233 @@ fn walk_files(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
         }
     }
     Ok(out)
+}
+
+// ============================================================================
+// content-hash bake cache
+//
+// The biggest e2e-speed win: `dvmm build` is deterministic (identical inputs ->
+// byte-identical `.dvmm`; see artifact_test gate 1), so a build whose inputs are
+// unchanged can REUSE the prior outputs and skip the whole pull/squash/assemble
+// pipeline. The cache key hashes EVERY input that affects the output bytes; a hit
+// restores the `.dvmm`, the per-stack initramfs (+ sha sidecar), and the committed
+// compose.lock.yml + stack.lock. `--no-cache` forces a full rebuild (still stored,
+// so later runs hit); nightly bake-repeatability uses it to re-bake unconditionally.
+// ============================================================================
+
+/// Cache-entry format version. Bump when the cached fileset or key inputs change
+/// in a way older entries can't satisfy.
+const CACHE_VERSION: u32 = 1;
+
+struct CacheCtx {
+    /// The per-key entry directory: <cache-root>/<key>.
+    dir: PathBuf,
+    /// The full hex key (sha256 over the input manifest below).
+    key: String,
+}
+
+/// `$DVMM_CACHE_DIR`, else `<repo>/.dvmm-cache` (here == `<repo>/guest`).
+fn cache_root(here: &Path) -> PathBuf {
+    if let Ok(d) = std::env::var("DVMM_CACHE_DIR") {
+        return PathBuf::from(d);
+    }
+    here.parent()
+        .map(|r| r.join(".dvmm-cache"))
+        .unwrap_or_else(|| PathBuf::from(".dvmm-cache"))
+}
+
+/// A stable content hash of a directory tree: for every regular file (recursively)
+/// `<relpath>\0<sha256(content)>\n`, sorted by relpath, then sha256 of the whole.
+/// `exclude` drops matching file BASENAMES (this bake's own committed outputs, so
+/// the first bake does not bust its own key).
+fn tree_hash(root: &Path, exclude: &[&str]) -> std::io::Result<String> {
+    if !root.exists() {
+        return Ok(format!("MISSING:{}", root.display()));
+    }
+    let mut entries: Vec<(String, String)> = Vec::new();
+    for path in walk_files(root)? {
+        let base = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if exclude.contains(&base) {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .into_owned();
+        entries.push((rel, sha256_file_hex(&path)?));
+    }
+    entries.sort();
+    let mut buf = String::new();
+    for (rel, sha) in entries {
+        buf.push_str(&rel);
+        buf.push('\0');
+        buf.push_str(&sha);
+        buf.push('\n');
+    }
+    Ok(artifact::sha256_hex(buf.as_bytes()))
+}
+
+/// Best-effort tool version string (empty on failure — still a stable key input).
+fn tool_version(prog: &str, args: &[&str]) -> String {
+    Command::new(prog)
+        .args(args)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compute_cache_key(
+    self_exe: &Path,
+    here: &Path,
+    alpine_dir: &Path,
+    compose_dir: &Path,
+    stack_name: &str,
+    mem_mib: u64,
+    working_set_mib: u64,
+    squash_threshold_mib: u64,
+) -> Result<CacheCtx, String> {
+    let self_sha = sha256_file_hex(self_exe).map_err(|x| format!("hashing dvmm binary: {x}"))?;
+    let kernel_sha = sha256_file_hex(&here.join("kernel/vmlinux-6.1.128"))
+        .map_err(|x| format!("hashing kernel: {x}"))?;
+    let agent_tree =
+        tree_hash(&here.join("agent"), &[]).map_err(|x| format!("hashing agent: {x}"))?;
+    let overlay_tree =
+        tree_hash(&alpine_dir.join("overlay"), &[]).map_err(|x| format!("hashing overlay: {x}"))?;
+    let engine_sha = sha256_file_hex(&alpine_dir.join("compose-engine.lock"))
+        .map_err(|x| format!("hashing compose-engine.lock: {x}"))?;
+    // the stack dir: compose.yml + build contexts + bind sources + service source,
+    // EXCLUDING this bake's own committed outputs.
+    let stack_tree = tree_hash(compose_dir, &["compose.lock.yml", "stack.lock"])
+        .map_err(|x| format!("hashing stack dir: {x}"))?;
+    let podman_v = tool_version("podman", &["--version"]);
+    let go_v = tool_version("go", &["version"]);
+
+    let manifest = format!(
+        "dvmm-bake-cache v{CACHE_VERSION}\n\
+         self:      {self_sha}\n\
+         podman:    {podman_v}\n\
+         go:        {go_v}\n\
+         engine:    {engine_sha}\n\
+         kernel:    {kernel_sha}\n\
+         agent:     {agent_tree}\n\
+         overlay:   {overlay_tree}\n\
+         stackdir:  {stack_tree}\n\
+         name:      {stack_name}\n\
+         mem:       {mem_mib}\n\
+         ws:        {working_set_mib}\n\
+         squash:    {squash_threshold_mib}\n"
+    );
+    let key = artifact::sha256_hex(manifest.as_bytes());
+    let dir = cache_root(here).join(&key);
+    Ok(CacheCtx { dir, key })
+}
+
+/// The baked files a cache entry holds (basenames within the entry dir).
+const CACHE_FILES: [&str; 5] = [
+    "artifact.dvmm",
+    "initramfs.cpio.gz",
+    "initramfs.cpio.gz.sha256",
+    "compose.lock.yml",
+    "stack.lock",
+];
+
+fn cache_is_hit(c: &CacheCtx) -> bool {
+    c.dir.is_dir()
+        && c.dir.join("dvmm_sha256").is_file()
+        && CACHE_FILES.iter().all(|f| c.dir.join(f).is_file())
+}
+
+/// Restore a hit's outputs into place; returns the cached `.dvmm` sha256.
+fn cache_restore(
+    c: &CacheCtx,
+    out_dvmm: &Path,
+    out_initramfs: &Path,
+    committed_lock: &Path,
+    stack_lock: &Path,
+) -> std::io::Result<String> {
+    for p in [out_dvmm, out_initramfs, committed_lock] {
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    std::fs::copy(c.dir.join("artifact.dvmm"), out_dvmm)?;
+    std::fs::copy(c.dir.join("initramfs.cpio.gz"), out_initramfs)?;
+    std::fs::copy(
+        c.dir.join("initramfs.cpio.gz.sha256"),
+        format!("{}.sha256", out_initramfs.display()),
+    )?;
+    std::fs::copy(c.dir.join("compose.lock.yml"), committed_lock)?;
+    std::fs::copy(c.dir.join("stack.lock"), stack_lock)?;
+    Ok(std::fs::read_to_string(c.dir.join("dvmm_sha256"))?
+        .trim()
+        .to_string())
+}
+
+/// Store the freshly-baked outputs under the key (atomic via temp-dir rename).
+/// Returns `Ok(false)` if an entry already exists (nothing to do).
+fn cache_store(
+    c: &CacheCtx,
+    out_dvmm: &Path,
+    out_initramfs: &Path,
+    committed_lock: &Path,
+    stack_lock: &Path,
+    dvmm_sha: &str,
+) -> std::io::Result<bool> {
+    if c.dir.exists() {
+        return Ok(false);
+    }
+    let root = c.dir.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(root)?;
+    let tmp = root.join(format!(".tmp-{}-{}", std::process::id(), now_nanos()));
+    std::fs::create_dir_all(&tmp)?;
+    std::fs::copy(out_dvmm, tmp.join("artifact.dvmm"))?;
+    std::fs::copy(out_initramfs, tmp.join("initramfs.cpio.gz"))?;
+    let sidecar = PathBuf::from(format!("{}.sha256", out_initramfs.display()));
+    if sidecar.exists() {
+        std::fs::copy(&sidecar, tmp.join("initramfs.cpio.gz.sha256"))?;
+    } else {
+        std::fs::write(tmp.join("initramfs.cpio.gz.sha256"), b"")?;
+    }
+    std::fs::copy(committed_lock, tmp.join("compose.lock.yml"))?;
+    std::fs::copy(stack_lock, tmp.join("stack.lock"))?;
+    std::fs::write(tmp.join("dvmm_sha256"), format!("{dvmm_sha}\n"))?;
+    // atomic publish; if another builder won the race, drop our temp.
+    match std::fs::rename(&tmp, &c.dir) {
+        Ok(()) => Ok(true),
+        Err(_) => {
+            let _ = std::fs::remove_dir_all(&tmp);
+            Ok(false)
+        }
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    #[test]
+    fn tree_hash_is_stable_and_content_sensitive() {
+        let base = std::env::temp_dir().join(format!("dvmm-th-{}-{}", std::process::id(), now_nanos()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("sub")).unwrap();
+        std::fs::write(base.join("a.txt"), b"hello").unwrap();
+        std::fs::write(base.join("sub/b.txt"), b"world").unwrap();
+
+        let h1 = tree_hash(&base, &[]).unwrap();
+        assert_eq!(h1, tree_hash(&base, &[]).unwrap(), "same tree -> same hash");
+
+        // an excluded output file must not affect the key.
+        std::fs::write(base.join("stack.lock"), b"ignored").unwrap();
+        assert_eq!(h1, tree_hash(&base, &["stack.lock"]).unwrap(), "excluded file ignored");
+
+        // a content change must flip the key.
+        std::fs::write(base.join("a.txt"), b"HELLO").unwrap();
+        assert_ne!(h1, tree_hash(&base, &["stack.lock"]).unwrap(), "content change -> new hash");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

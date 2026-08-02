@@ -28,3 +28,9 @@
 # OP-1a: the single-file .dvmm artifacts (bake-stack.sh output) are rebuildable;
 # the manifest anchors live in each stack's stack.lock, which IS committed.
 *.dvmm
+
+# goal-3a: the content-hash bake cache, the runner's scratch TMPDIR, and the
+# per-run test results (JSON + logs). All rebuildable / transient.
+/.dvmm-cache
+/.dvmm-tmp
+/.dvmm-test-results
