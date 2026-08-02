@@ -203,7 +203,11 @@ build_one() {  # <service> <context> <dockerfile> <image_tag> <bases-csv>
     record_prov "build_base  service=$svc  base=$b"
     if [ -z "$toolchain" ]; then
       local gv
-      gv="$(bp image inspect "$b" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null | grep -E '^GOLANG_VERSION=' | head -1 | cut -d= -f2)"
+      # Best-effort Go-toolchain capture: a NON-Go base (e.g. a plain Alpine
+      # build context) simply has no GOLANG_VERSION, so `grep` matches nothing and
+      # exits 1 -- `|| true` keeps that expected no-match from tripping
+      # `set -e`/`pipefail` and aborting the bake.
+      gv="$(bp image inspect "$b" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null | grep -E '^GOLANG_VERSION=' | head -1 | cut -d= -f2 || true)"
       [ -n "$gv" ] && toolchain="go$gv"
     fi
   done
