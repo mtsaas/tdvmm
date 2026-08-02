@@ -70,6 +70,46 @@ use crate::vtsc::VirtualClock;
 const KVMIO: u32 = 0xAE;
 ioctl_iow_nr!(KVM_INTERRUPT, KVMIO, 0x86, kvm_interrupt);
 
+// ---- dvmm's own stderr logging (raw-tty aware) -----------------------------
+//
+// At an interactive console dvmm puts the tty in RAW mode (see
+// `serial::RawTerminal`) so the GUEST owns the byte stream verbatim — which also
+// turns OFF the terminal's newline->CRLF translation (ONLCR). A bare "\n" on OUR
+// OWN log lines would then only drop down a row, not return to column 0, so our
+// telemetry/startup/WARN lines would staircase across the guest's output. When
+// raw mode is active we therefore terminate our log lines with CRLF and prepend a
+// CR to snap to column 0 (embedded newlines get the same treatment). In cooked
+// mode the terminal itself adds the CR, so a plain "\n" is already correct. This
+// changes ONLY dvmm's own log lines — the guest's byte stream is untouched.
+//
+// The flag starts false and is set true only once `RawTerminal::enable` has put
+// the tty in raw mode (see `run`), so lines emitted during cooked-mode boot setup
+// still use a plain "\n".
+static RAW_TTY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Emit one dvmm log line to stderr with raw-tty-aware line endings (see the
+/// module note above). Used via the [`dlog!`] macro (and directly by the device
+/// modules); not for guest output.
+pub(crate) fn log_line(args: std::fmt::Arguments) {
+    use std::io::Write;
+    let body = format!("{args}");
+    let stderr = std::io::stderr();
+    let mut h = stderr.lock();
+    let _ = if RAW_TTY.load(std::sync::atomic::Ordering::Relaxed) {
+        // Snap to column 0 and turn every embedded newline into a CRLF too.
+        write!(h, "\r{}\r\n", body.replace('\n', "\r\n"))
+    } else {
+        writeln!(h, "{body}")
+    };
+    let _ = h.flush();
+}
+
+/// dvmm's own stderr log line, raw-tty aware (see [`log_line`]). A drop-in for
+/// `eprintln!` for dvmm's OWN diagnostics — never for guest console bytes.
+macro_rules! dlog {
+    ($($arg:tt)*) => { crate::log_line(format_args!($($arg)*)) };
+}
+
 // `no_timer_check`: the userspace backend emits no PIT IRQ0, so the kernel must
 // not run its "does the timer IRQ reach the CPU?" probe. `tsc=reliable`: trust
 // the invariant TSC and skip the clocksource watchdog.
@@ -384,7 +424,7 @@ impl FfState {
     /// stops the run (that is `--max-virtual-time`'s job).
     fn maybe_warn_high_jump_rate(&mut self) {
         if let Some(msg) = self.jump_rate_warn_at(std::time::Instant::now()) {
-            eprintln!("{msg}");
+            dlog!("{msg}");
         }
     }
 
@@ -554,7 +594,7 @@ struct Config {
 }
 
 fn usage() -> ! {
-    eprintln!(
+    dlog!(
         "usage: dvmm --kernel <vmlinux> --initrd <initramfs> [--mem <MiB>] \
          [--cmdline <str>] [--ff on|off] [--max-jump-secs <n>] \
          [--max-virtual-time <dur>] [--metrics-out <path>] [--dump-cpuid]\n\
@@ -638,7 +678,7 @@ fn parse_args() -> Config {
             "--metrics-out" => metrics_out = Some(args.next().unwrap_or_else(|| usage())),
             "-h" | "--help" => usage(),
             other => {
-                eprintln!("unknown argument: {other}");
+                dlog!("unknown argument: {other}");
                 usage();
             }
         }
@@ -677,7 +717,7 @@ fn main() {
     match run() {
         Ok(code) => std::process::exit(code),
         Err(err) => {
-            eprintln!("dvmm: fatal: {err}");
+            dlog!("dvmm: fatal: {err}");
             std::process::exit(1);
         }
     }
@@ -705,17 +745,17 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
         let tty = serial::stdin_is_tty();
         let mode = ff_mode_statement(cfg.fast_forward, cfg.ff_explicit);
         if tty {
-            eprintln!(
+            dlog!(
                 "[dvmm] {mode} — quit the guest with `poweroff` or `reboot` \
                  (`exit` now gives a fresh shell)"
             );
         } else {
-            eprintln!("[dvmm] {mode}");
+            dlog!("[dvmm] {mode}");
         }
         // Advisory (telemetry, NOT behavior): fast-forward at an interactive
         // console races the guest clock and pins a host core.
         if cfg.fast_forward && tty {
-            eprintln!(
+            dlog!(
                 "[dvmm][WARN] fast-forward is ON at an interactive console — it \
                  races the guest clock and pins a host core; pass `--ff off` for \
                  real-time."
@@ -730,7 +770,7 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
     let mut initrd_file = std::fs::File::open(&initrd_path)
         .map_err(|e| format!("opening initrd {initrd_path}: {e}"))?;
 
-    eprintln!(
+    dlog!(
         "[dvmm] kernel={} initrd={} mem={} MiB ff={} cmdline={:?}",
         kernel_path,
         initrd_path,
@@ -772,7 +812,7 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
         let a = clock.vtsc_now();
         let b = clock.vtsc_now();
         assert!(b >= a, "vtsc went backwards ({a} -> {b}) — clock is not sane");
-        eprintln!(
+        dlog!(
             "[dvmm] virtual clock: tsc_khz={} (~{} MHz) tsc_offset={} vtsc_now={}",
             clock.freq().khz(),
             clock.freq().hz() / 1_000_000,
@@ -784,7 +824,7 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
     // --- Load kernel + initrd ---
     let entry = boot::load_kernel(&guest_mem, &mut kernel_file)?;
     let initrd_cfg = boot::load_initrd(&guest_mem, &mut initrd_file, mem_size)?;
-    eprintln!(
+    dlog!(
         "[dvmm] vmlinux entry {:#x}, initramfs {} bytes @ {:#x}",
         entry.0, initrd_cfg.size, initrd_cfg.address
     );
@@ -801,7 +841,13 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
 
     // --- Serial console ---
     let (serial, serial_drain) = serial::new_serial()?;
-    let _raw_term = serial::RawTerminal::enable(0);
+    let raw_term = serial::RawTerminal::enable(0);
+    // From here our own log lines must snap to column 0 with CRLF (raw mode turns
+    // off the tty's ONLCR). Flip the flag only if raw mode actually took effect
+    // (a tty); the cooked-mode boot lines above already printed with a plain "\n".
+    if raw_term.is_raw() {
+        RAW_TTY.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
 
     let stop = run_user_backend(
         vcpu,
@@ -853,7 +899,7 @@ fn run_user_backend(
     // correct virtual time, bit-identically every run.
     let apic_bus_hz = apic_bus_hz_from_cpuid();
     let (ratio_num, ratio_den) = apic_timer_tsc_ratio(clock.freq().hz());
-    eprintln!(
+    dlog!(
         "[dvmm] userspace LAPIC timer: {ratio_num}/{ratio_den} TSC cycles/count \
          (CPUID 0x15 EBX/EAX), crystal ~{} MHz",
         apic_bus_hz / 1_000_000
@@ -878,6 +924,17 @@ fn run_user_backend(
     } else {
         None
     };
+
+    // Interactive console: a human at a tty with no harness context (no metrics
+    // sink and no virtual-time horizon). The periodic HLT-rate / fast-forward
+    // rollup below is a perf/Step-4 metric for demo + harness runs, NOT interactive
+    // console noise — so when interactive we suppress its PERIODIC emission (it
+    // would interrupt a human's prompt every ~15s). isatty gates ONLY this
+    // suppression, never any time behavior (Fable-locked); it is still emitted for
+    // every harness path (non-tty, `--metrics-out`, or a horizon set), and the
+    // on-stop summary + metrics file are unaffected either way.
+    let interactive =
+        serial::stdin_is_tty() && metrics_out.is_none() && max_virtual_time_secs.is_none();
 
     // Idle-observability (a Step-4 hop-cost input, not a diagnostic): how often
     // the guest HLTs. Reported on stop, and rolled up every ~15s of wall time so
@@ -906,7 +963,7 @@ fn run_user_backend(
         vtsc_start.wrapping_add(cycles)
     });
     if let Some(h) = horizon_vtsc {
-        eprintln!(
+        dlog!(
             "[dvmm] max-virtual-time horizon: {:.3}s of virtual time \
              (vtsc {vtsc_start} -> {h}), as a (vtsc, StopRun) queue event",
             max_virtual_time_secs.unwrap(),
@@ -917,7 +974,7 @@ fn run_user_backend(
     // the loop to pick the process exit code.
     let stop_reason: StopReason;
 
-    eprintln!(
+    dlog!(
         "[dvmm] starting vCPU on the USERSPACE irqchip, fast-forward {} \
          (Ctrl-A is passed to the guest; kill from another terminal to stop)\n",
         if fast_forward { "ON" } else { "OFF" }
@@ -1049,7 +1106,7 @@ fn run_user_backend(
                 // idle `sti; hlt` (IF=1) which parks and waits/jumps for its next
                 // timer. Checked here, before the park, in BOTH FF modes.
                 if vcpu.get_kvm_run().if_flag == 0 {
-                    eprintln!(
+                    dlog!(
                         "\n[dvmm] STOP: guest halted (power off) — HLT with \
                          interrupts disabled (IF=0), a terminal halt that can \
                          never wake."
@@ -1058,17 +1115,19 @@ fn run_user_backend(
                     break;
                 }
                 hlt_count += 1;
-                if last_report.elapsed() >= HLT_REPORT_PERIOD {
+                // Periodic rollup: kept for harness/metrics/horizon runs; suppressed
+                // when interactive (Task 4) so it never interrupts a human's prompt.
+                if !interactive && last_report.elapsed() >= HLT_REPORT_PERIOD {
                     let win = last_report.elapsed().as_secs_f64();
                     let n = hlt_count - last_report_hlts;
-                    eprintln!(
+                    dlog!(
                         "[dvmm] HLT-exit rate: {:.1}/s ({n} in {win:.0}s; {hlt_count} total)",
                         n as f64 / win
                     );
                     if let Some(ff) = ff_state.as_ref() {
                         let virt_s = ff.virtual_secs_since(vtsc_start, clock.vtsc_now());
                         let real_s = start.elapsed().as_secs_f64().max(1e-9);
-                        eprintln!(
+                        dlog!(
                             "[dvmm] fast-forward: {} jumps, {:.0} virtual-s in {:.1} real-s \
                              = {:.0}x; per-hop mean {:.1}us max {:.1}us; max Δ {:.3}s",
                             ff.jumps,
@@ -1106,7 +1165,7 @@ fn run_user_backend(
                 // Distinct from the VMM's own horizon stop below — a testing
                 // platform wants "guest panicked/rebooted" as a first-class
                 // outcome (see StopReason -> exit code).
-                eprintln!(
+                dlog!(
                     "\n[dvmm] STOP: guest-initiated shutdown/reboot \
                      (KVM_EXIT_SHUTDOWN, triple fault — e.g. panic+reboot or `reboot -f`)."
                 );
@@ -1115,7 +1174,7 @@ fn run_user_backend(
             }
             VcpuExit::SystemEvent(type_, _) => {
                 // Guest-initiated reset/shutdown/crash via a system event.
-                eprintln!(
+                dlog!(
                     "\n[dvmm] STOP: guest-initiated system event \
                      (reset/shutdown/crash, type {type_})."
                 );
@@ -1129,13 +1188,13 @@ fn run_user_backend(
             }
             VcpuExit::InternalError => return Err("KVM_EXIT_INTERNAL_ERROR".into()),
             other => {
-                eprintln!("[dvmm] unhandled KVM exit: {other:?}");
+                dlog!("[dvmm] unhandled KVM exit: {other:?}");
             }
         }
     }
 
     let secs = start.elapsed().as_secs_f64();
-    eprintln!(
+    dlog!(
         "[dvmm] userspace backend stopped: {hlt_count} HLT exits over {secs:.1}s \
          ({:.1}/s)",
         hlt_count as f64 / secs.max(0.001)
@@ -1143,7 +1202,7 @@ fn run_user_backend(
     if let Some(ff) = ff_state.as_ref() {
         let virt_s = ff.virtual_secs_since(vtsc_start, clock.vtsc_now());
         let real_s = secs.max(1e-9);
-        eprintln!(
+        dlog!(
             "[dvmm] FAST-FORWARD SUMMARY: {} jumps; virtual {:.1}s in real {:.1}s = \
              {:.1}x speedup; per-hop cost mean {:.1}us / max {:.1}us; \
              largest single jump Δ = {:.3}s (bound {}s)",
@@ -1156,8 +1215,8 @@ fn run_user_backend(
             ff.max_delta_secs(),
             ff.max_jump_secs,
         );
-        eprintln!("[dvmm] {}", ff.hist.summary());
-        eprintln!(
+        dlog!("[dvmm] {}", ff.hist.summary());
+        dlog!(
             "[dvmm] per-hop cost p99 {:.1}us; real-vs-virtual: {:.1}% executing / \
              {:.3}% jumping ({:.1} real-exec ms per virtual-hour — busy-wait tripwire)",
             ff.hop_p99_ns() as f64 / 1000.0,
@@ -1178,8 +1237,8 @@ fn run_user_backend(
             let report =
                 ff.metrics_report(stop_reason, vtsc_start, clock.vtsc_now(), secs, hlt_count);
             match std::fs::write(path, &report) {
-                Ok(()) => eprintln!("[dvmm] wrote per-run metrics to {path}"),
-                Err(e) => eprintln!("[dvmm][WARN] could not write --metrics-out {path}: {e}"),
+                Ok(()) => dlog!("[dvmm] wrote per-run metrics to {path}"),
+                Err(e) => dlog!("[dvmm][WARN] could not write --metrics-out {path}: {e}"),
             }
         }
     } else if let Some(path) = metrics_out.as_deref() {
@@ -1201,13 +1260,13 @@ fn run_user_backend(
 /// count, jump rate, largest Δ, and the Δvtsc histogram (its tail is the wedge
 /// signature). Distinguishes this VMM policy stop from a guest-initiated one.
 fn report_horizon(ff: Option<&FfState>, start: std::time::Instant) {
-    eprintln!(
+    dlog!(
         "\n[dvmm] STOP: --max-virtual-time horizon reached — VMM virtual-time budget \
          (a deterministic (vtsc, StopRun) queue event, NOT a guest-initiated stop)."
     );
     if let Some(ff) = ff {
         let real_s = start.elapsed().as_secs_f64().max(1e-9);
-        eprintln!(
+        dlog!(
             "[dvmm] HORIZON DIAGNOSTIC: {} jumps in {:.2}s real = {:.0} jumps/s; \
              max single Δ {:.3}s; {}",
             ff.jumps,

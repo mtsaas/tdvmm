@@ -130,10 +130,10 @@ impl Ioapic {
             return None;
         }
         if rte & RTE_TRIGGER_LEVEL != 0 {
-            eprintln!(
+            crate::log_line(format_args!(
                 "[dvmm][ioapic] UNSUPPORTED level-triggered RTE on pin {pin} \
                  (rte={rte:#x}); dropping interrupt (edge-only model)"
-            );
+            ));
             return None;
         }
         Some((rte & 0xff) as u8)
