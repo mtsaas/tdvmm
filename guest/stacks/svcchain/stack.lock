@@ -14,12 +14,16 @@ project   dvmm_svcchain
 mem_mib   3072
 ram_estimate_mib  1752
 compose_lock_sha256  7e94a1c3f67e820d8f2f5210c212c444ab5e1913ff979a5db7779485af32e1e7
-initramfs_sha256     3db7b7dbd550e1679b9f5aca653fe8f17bbc6c579c5f6a250246486ab0c46e70  initramfs-alpine-svcchain.cpio.gz
+initramfs_sha256     b34df19c37ec899f5dab1eaa6edc8c639b5618f96d51980bb7f645abe83bf812  initramfs-alpine-svcchain.cpio.gz
+agent_sha256         ab9d4584490c3d6a57c3ab6c33ff755c2be1f972a8a1d5a17679f6fa38fd33e3  dvmm-agent
+builder_image        docker.io/library/alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
+builder_image        docker.io/library/debian:bookworm-slim@sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e
+builder_image        docker.io/library/rust:1.97-alpine3.22@sha256:b348cb409ac0a73de15065997a360063cf87465574a15e3e4469862cb8996f02
   image  policy=plain   upstream=docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616  diffid=sha256:0958e0fef2d6a31e1325b8bfecd99dead933363682d69850a7606599023751bc  size_mib=4
   image  policy=plain   upstream=docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616  diffid=sha256:0958e0fef2d6a31e1325b8bfecd99dead933363682d69850a7606599023751bc  size_mib=4
   image  policy=squash  upstream=docker.io/library/postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777  seed_tag=localhost/dvmm-postgres-57c72fd2a128:baked  src_diffid=sha256:af5b54b4903175790ece7037a66fd16496658d7030a59e2e2360f66038d74c8c  size_mib=283  GATE=ok
   pin    upstream=docker.io/library/postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777  pinned=localhost/dvmm-postgres-57c72fd2a128@sha256:cbf217007d0742829dc120c3ea9cd2621e90eb3adfeaf6684e87ce268a2ca368
 # --- informational (NOT compared for repeatability) ---
-# podman-version: 5.8.3
-# baked-at: 2026-08-02T11:22:21Z
-dvmm_sha256          a949638c400c8fea26715fe30460dbf9432a19354f785872df6d8d1e2b83a495  svcchain-B.dvmm
+# host-probed values (podman version, baked-at) are written to the
+# cache dir's diagnostics/ side file, NEVER here (Fable guardrail §3).
+dvmm_sha256          81ac5c88d64e40291dc61d979cfb9973c13f95fb0c5b81f0d9ea55ff7c47e5b0  svcchain.dvmm

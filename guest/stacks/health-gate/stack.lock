@@ -14,9 +14,14 @@ project   dvmm_health-gate
 mem_mib   3072
 ram_estimate_mib  1044
 compose_lock_sha256  bf6f2a56e9b5c32684e711e1717294499e0e8cef3ab17ac09d148706f1beeff7
-initramfs_sha256     f9051ba6e46d9311210feadd4e0ec852fb5e0c4251fcd711fe3e2362a5d65cf2  initramfs-alpine-health-gate.cpio.gz
+initramfs_sha256     6a1892c537416be5c62b0f1507fac3f83dc4822841d807f5f1fc6f50dd23a60e  initramfs-alpine-health-gate.cpio.gz
+agent_sha256         ab9d4584490c3d6a57c3ab6c33ff755c2be1f972a8a1d5a17679f6fa38fd33e3  dvmm-agent
+builder_image        docker.io/library/alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
+builder_image        docker.io/library/debian:bookworm-slim@sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e
+builder_image        docker.io/library/rust:1.97-alpine3.22@sha256:b348cb409ac0a73de15065997a360063cf87465574a15e3e4469862cb8996f02
   image  policy=plain   upstream=docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616  diffid=sha256:0958e0fef2d6a31e1325b8bfecd99dead933363682d69850a7606599023751bc  size_mib=4
   image  policy=plain   upstream=docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616  diffid=sha256:0958e0fef2d6a31e1325b8bfecd99dead933363682d69850a7606599023751bc  size_mib=4
 # --- informational (NOT compared for repeatability) ---
-# podman-version: 5.8.3
-# baked-at: 2026-08-02T05:03:07Z
+# host-probed values (podman version, baked-at) are written to the
+# cache dir's diagnostics/ side file, NEVER here (Fable guardrail §3).
+dvmm_sha256          003cd3d5959ec9a3c6dd1219e3190c230ee53f8e7648497640d18bbd1a8ce146  health-gate.dvmm

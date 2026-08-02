@@ -14,7 +14,11 @@ project   dvmm_webstack
 mem_mib   3072
 ram_estimate_mib  1884
 compose_lock_sha256  d9602b14494a7159c2efccff09c349f17af9471083b42b9da86004e6b756157b
-initramfs_sha256     8e81cfb455f9afdf1bd9494401e46f509775d346fea08344bf82a859efc06a4d  initramfs-alpine-webstack.cpio.gz
+initramfs_sha256     e7ac65971cdede9dd5ea15dba12385c4441b9f1354935298c8b6fa4731d3db2c  initramfs-alpine-webstack.cpio.gz
+agent_sha256         ab9d4584490c3d6a57c3ab6c33ff755c2be1f972a8a1d5a17679f6fa38fd33e3  dvmm-agent
+builder_image        docker.io/library/alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
+builder_image        docker.io/library/debian:bookworm-slim@sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e
+builder_image        docker.io/library/rust:1.97-alpine3.22@sha256:b348cb409ac0a73de15065997a360063cf87465574a15e3e4469862cb8996f02
   build_base  service=api  base=docker.io/library/alpine@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
   image  policy=build   service=api  tag=localhost/dvmm-webstack-api:corpus  content_id=sha256:3a04da54f02e1497b8442705399d903ed7f52cb4914c86b4156c58924a97b35b  size_mib=19
   image  policy=plain   upstream=docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616  diffid=sha256:0958e0fef2d6a31e1325b8bfecd99dead933363682d69850a7606599023751bc  size_mib=4
@@ -23,5 +27,6 @@ initramfs_sha256     8e81cfb455f9afdf1bd9494401e46f509775d346fea08344bf82a859efc
   pin    upstream=docker.io/library/postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777  pinned=localhost/dvmm-postgres-57c72fd2a128@sha256:cbf217007d0742829dc120c3ea9cd2621e90eb3adfeaf6684e87ce268a2ca368
   pin    upstream=localhost/dvmm-webstack-api:corpus  pinned=localhost/dvmm-webstack-api@sha256:41fa4f4c8053c5f029a7b345a16113d963a8695df64b9d277e660ea0904ab25b
 # --- informational (NOT compared for repeatability) ---
-# podman-version: 5.8.3
-# baked-at: 2026-08-02T06:13:33Z
+# host-probed values (podman version, baked-at) are written to the
+# cache dir's diagnostics/ side file, NEVER here (Fable guardrail §3).
+dvmm_sha256          ecd3a0857875c25553d12d60abf1d787d3891d8d5c840b2a4a39644036dfc729  webstack.dvmm

@@ -305,23 +305,23 @@ pub fn rootfs_segment(root: &Path) -> std::io::Result<Vec<u8>> {
     Ok(c.out)
 }
 
-/// gzip an already-assembled (concatenated) cpio byte buffer to `out_path` via the
-/// host `gzip -9 -n` (identical bytes to the scripts' compressor). Staged to a
-/// temp file to avoid a producer/consumer pipe deadlock on large inputs.
+/// gzip an already-assembled (concatenated) cpio byte buffer to `out_path`,
+/// in-process via `flate2` (Move 3 Step B — replaces the host `gzip -9 -n`).
+///
+/// Level 9, `mtime=0`, and no FNAME/comment in the header — the deterministic
+/// equivalent of `gzip -n`. flate2 uses its DEFAULT `miniz_oxide` (pure-Rust)
+/// backend ONLY: a zlib/zlib-ng feature would add a C build dep and break Move 1,
+/// so it must never be enabled. The emitted deflate stream differs from GNU
+/// gzip's, so the initramfs sha256 changes ONCE versus the old producer; the
+/// kernel decompresses standard deflate identically. Deterministic: identical
+/// input bytes -> identical output bytes.
 pub fn gzip_to(combined: &[u8], out_path: &Path) -> std::io::Result<()> {
-    let tmp = out_path.with_extension("cpio.tmp");
-    fs::write(&tmp, combined)?;
-    let in_file = fs::File::open(&tmp)?;
+    use flate2::{Compression, GzBuilder};
+    use std::io::Write;
     let out_file = fs::File::create(out_path)?;
-    let status = std::process::Command::new("gzip")
-        .args(["-9", "-n"])
-        .stdin(std::process::Stdio::from(in_file))
-        .stdout(std::process::Stdio::from(out_file))
-        .status()?;
-    let _ = fs::remove_file(&tmp);
-    if !status.success() {
-        return Err(std::io::Error::other("gzip failed"));
-    }
+    let mut enc = GzBuilder::new().mtime(0).write(out_file, Compression::new(9));
+    enc.write_all(combined)?;
+    enc.finish()?;
     Ok(())
 }
 

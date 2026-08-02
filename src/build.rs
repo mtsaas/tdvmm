@@ -23,6 +23,7 @@
 //! the corpus, so every command and file operation below mirrors them exactly.
 
 use std::collections::HashMap;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -171,6 +172,85 @@ fn sha256_file_hex(path: &Path) -> std::io::Result<String> {
     let mut h = Sha256::new();
     h.update(&data);
     Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+// ============================================================================
+// in-process filesystem helpers (Move 3, Step D) — replace the host `cp -a` /
+// `chmod` / `install -D -m` shell-outs. The `.dvmm` bytes come ONLY from the
+// normalizing cpio/artifact packers (Fable guardrail §2), so these helpers only
+// need to reproduce {file type, content, symlink target, permission bits}:
+// ownership, mtime, hardlink identity and sparseness are all normalized (or, for
+// hardlinks, reconstructed from dev/inode) by the packer and are NOT preserved
+// here. Seed layers + overlay + bind trees are plain files (Fable-locked).
+// ============================================================================
+
+/// `cp -a <src> <dst>` — recursively copy the single filesystem entity at `src`
+/// to the path `dst` (directories recurse; symlinks are recreated as symlinks,
+/// never followed; permission bits preserved). Directory modes are set only when
+/// the directory is freshly created, so merging into an existing tree leaves that
+/// tree's directory modes untouched (cp -a parity).
+fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let meta = std::fs::symlink_metadata(src)?;
+    let ft = meta.file_type();
+    if ft.is_symlink() {
+        let target = std::fs::read_link(src)?;
+        let _ = std::fs::remove_file(dst);
+        std::os::unix::fs::symlink(target, dst)?;
+    } else if ft.is_dir() {
+        if !dst.exists() {
+            std::fs::create_dir(dst)?;
+            std::fs::set_permissions(dst, std::fs::Permissions::from_mode(meta.mode() & 0o7777))?;
+        }
+        for de in std::fs::read_dir(src)? {
+            let de = de?;
+            copy_tree(&de.path(), &dst.join(de.file_name()))?;
+        }
+    } else {
+        // regular file (block/char/fifo nodes never occur in our copied trees).
+        std::fs::copy(src, dst)?; // copies content + permission bits
+    }
+    Ok(())
+}
+
+/// `cp -a <src>/. <dst>/` — merge the CONTENTS of directory `src` into the
+/// existing directory `dst` (recursively). Used for the overlay + bind trees.
+fn copy_dir_contents(src: &Path, dst: &Path) -> std::io::Result<()> {
+    for de in std::fs::read_dir(src)? {
+        let de = de?;
+        copy_tree(&de.path(), &dst.join(de.file_name()))?;
+    }
+    Ok(())
+}
+
+/// `chmod <mode> <path>` — set exactly the given permission bits.
+fn set_mode(path: &Path, mode: u32) -> std::io::Result<()> {
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+}
+
+/// `install -D -m <mode> <src> <dst>` — create `dst`'s parent dirs, copy `src`'s
+/// contents to `dst`, then set the mode.
+fn install_file(src: &Path, dst: &Path, mode: u32) -> std::io::Result<()> {
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::copy(src, dst)?;
+    set_mode(dst, mode)?;
+    Ok(())
+}
+
+/// Extract an UNCOMPRESSED tar archive into `dest`, in-process via the pure-Rust
+/// `tar` crate (Move 3 — replaces the host `tar`). The archive is untrusted
+/// TRANSPORT input (Fable guardrail §2): the `.dvmm` bytes come solely from the
+/// normalizing cpio packer, which re-derives uid/gid 0 + epoch + sorted order +
+/// hardlink groups; only {file type, content, link target, permission bits} are
+/// consumed here. Overwrites so a re-extract into a populated dir is idempotent.
+fn extract_tar(tarball: &Path, dest: &Path) -> std::io::Result<()> {
+    let f = std::fs::File::open(tarball)?;
+    let mut ar = tar::Archive::new(f);
+    ar.set_preserve_permissions(true);
+    ar.set_overwrite(true);
+    ar.unpack(dest)?;
+    Ok(())
 }
 
 // ============================================================================
@@ -448,7 +528,8 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     for (src, dest_rel) in &lock.bind_manifest {
         let dest = binds_stage.join(dest_rel);
         std::fs::create_dir_all(dest.parent().unwrap())?;
-        run(Command::new("cp").arg("-a").arg(src).arg(&dest), ux.mode)?;
+        copy_tree(Path::new(src), &dest)
+            .map_err(|e| format!("materialize bind {src}: {e}"))?;
         ux.progress.println(format!("   materialized  {src}  ->  {binds_base}/{dest_rel}"));
     }
 
@@ -504,7 +585,11 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     //     epoch + self-test pin) — NOT the stack. A hit lets `__assemble` skip the
     //     apk install/overlay entirely and reuse the cached cpio segment. --no-cache
     //     forces a base rebuild (still stored). ---
-    let base_key = compute_base_key(&alpine_dir, &agent_sha, &compose_version, &compose_sha256, &selftest_pin);
+    // The pinned rootfs-builder image (Move 3 Step C) — folded into the base key so
+    // an image bump busts the base-runtime cache and re-resolves the package set.
+    let (rb_img, rb_dig) = read_rootfs_builder_pin(&here)?;
+    let rootfs_builder = format!("{rb_img}@{rb_dig}");
+    let base_key = compute_base_key(&alpine_dir, &agent_sha, &compose_version, &compose_sha256, &selftest_pin, &rootfs_builder);
     let base_entry = cache_dir.join("base-runtime").join(&base_key);
     let base_seg_cached = base_entry.join("base.cpio");
     let base_pl_cached = base_entry.join("packages.lock");
@@ -520,14 +605,24 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     // stores it after the unshare. HIT: __assemble reads the cached segment.
     let base_segment = if base_hit { base_seg_cached.clone() } else { work.join("base.cpio") };
 
+    // MISS: build the base Alpine rootfs in the pinned rootfs-builder container
+    // (apk --root, NO chroot) BEFORE the unshare — build_agent's slot. Produces
+    // base-rootfs.tar (untrusted transport) + packages.lock (the resolution
+    // ledger). On a HIT this is skipped entirely (cached cpio segment reused).
+    let base_build_dir = work.join("base-build");
+    let base_rootfs_tar = base_build_dir.join("base-rootfs.tar");
+    if !base_hit {
+        ux.progress.msg("assemble initramfs: build base rootfs (apk)");
+        build_base_rootfs(&rootfs_builder, &tarball, &mirror, ALPINE_BRANCH, PKGS, &base_build_dir, &ux)?;
+        // stage the container-emitted package ledger for __assemble + the base cache.
+        std::fs::copy(base_build_dir.join("packages.lock"), work.join("packages.lock"))?;
+    }
+
     let assemble_cfg = AssembleConfig {
         conf: conf.clone(),
         work: work.clone(),
-        tarball,
-        mirror,
-        alpine_branch: ALPINE_BRANCH.to_string(),
+        base_rootfs_tar: base_rootfs_tar.clone(),
         build_epoch: BUILD_EPOCH.to_string(),
-        pkgs: PKGS.iter().map(|s| s.to_string()).collect(),
         overlay: here.join("initramfs-alpine/overlay"),
         compose_cache,
         agent_bin,
@@ -842,6 +937,116 @@ pub fn read_builder_pin(repo_root: &Path) -> Result<(String, String), Box<dyn st
     Ok((image, digest))
 }
 
+/// Read the pinned Alpine rootfs-builder image ref + digest from
+/// `guest/initramfs-alpine/rootfs-builder.lock` (Move 3 Step C). This image
+/// assembles the base rootfs (`apk --root`) AND serves as the fetch container
+/// (busybox `wget`). Returns `(image, digest)`.
+fn read_rootfs_builder_pin(here: &Path) -> Result<(String, String), Box<dyn std::error::Error>> {
+    let lock = here.join("initramfs-alpine/rootfs-builder.lock");
+    let text =
+        std::fs::read_to_string(&lock).map_err(|e| format!("reading {}: {e}", lock.display()))?;
+    let mut image = String::new();
+    let mut digest = String::new();
+    for line in text.lines() {
+        let l = line.trim();
+        if let Some(v) = l.strip_prefix("BUILDER_IMAGE=") {
+            image = v.trim().to_string();
+        } else if let Some(v) = l.strip_prefix("BUILDER_DIGEST=") {
+            digest = v.trim().to_string();
+        }
+    }
+    if image.is_empty() || digest.is_empty() {
+        return Err("rootfs-builder.lock missing BUILDER_IMAGE / BUILDER_DIGEST".into());
+    }
+    Ok((image, digest))
+}
+
+/// Download `url` into `dest` from INSIDE the pinned Alpine container (Move 3
+/// Step A — replaces host `curl`). `dest`'s parent dir is bind-mounted at `/cache`
+/// and busybox `wget` writes the file there over HTTPS; the CALLER sha256-verifies
+/// it in-process afterward (Fable guardrail §6 — no host TLS stack is linked, and
+/// the container transport is never trusted). Routed through the engine choke
+/// point (guardrail §3); the child's OutputMode comes from the orchestrator.
+fn fetch_in_container(dest: &Path, url: &str, ux: &Ux) -> Result<(), Box<dyn std::error::Error>> {
+    let here = self_here()?;
+    let (image, digest) = read_rootfs_builder_pin(&here)?;
+    let img_ref = format!("{image}@{digest}");
+    let dir = dest
+        .parent()
+        .ok_or_else(|| format!("fetch destination {} has no parent dir", dest.display()))?;
+    let name = dest
+        .file_name()
+        .ok_or_else(|| format!("fetch destination {} has no file name", dest.display()))?
+        .to_string_lossy()
+        .into_owned();
+    std::fs::create_dir_all(dir)?;
+    let confdir = mkdtemp()?;
+    let conf = confdir.join("containers.conf");
+    std::fs::write(&conf, "[engine]\nruntime=\"runc\"\n")?;
+    let target = format!("/cache/{name}");
+    run(engine::command()
+        .env("CONTAINERS_CONF", &conf)
+        .arg("run")
+        .arg("--rm")
+        .arg("-v")
+        .arg(format!("{}:/cache", dir.display()))
+        .arg(&img_ref)
+        .args(["wget", "-q", "-O", &target, url]), ux.mode)?;
+    let _ = std::fs::remove_dir_all(&confdir);
+    Ok(())
+}
+
+/// Build the base Alpine rootfs INSIDE the pinned rootfs-builder container (Move 3
+/// Step C — replaces the in-`unshare` chroot apk). Extracts the (already
+/// sha-verified) minirootfs, writes the pinned repositories, installs `PKGS` via
+/// `apk --root` (NO chroot anywhere), records the resolved package set, clears
+/// `/dev` (the cpio packer supplies device nodes), and tars the rootfs to
+/// `<out_dir>/base-rootfs.tar` (+ `<out_dir>/packages.lock`). The tar is untrusted
+/// TRANSPORT (Fable guardrail §2): `__assemble` re-packs it via the normalizing
+/// cpio emitter, so container ownership / order / mtime are all discarded. Routed
+/// through the engine choke point; OutputMode comes from the orchestrator.
+fn build_base_rootfs(
+    img_ref: &str,
+    minirootfs: &Path,
+    mirror: &str,
+    alpine_branch: &str,
+    pkgs: &[&str],
+    out_dir: &Path,
+    ux: &Ux,
+) -> Result<(), Box<dyn std::error::Error>> {
+    std::fs::create_dir_all(out_dir)?;
+    let confdir = mkdtemp()?;
+    let conf = confdir.join("containers.conf");
+    std::fs::write(&conf, "[engine]\nruntime=\"runc\"\n")?;
+    let mini_name = minirootfs.file_name().unwrap().to_string_lossy().into_owned();
+    let pkg_args = pkgs.join(" ");
+    let script = format!(
+        "set -e\n\
+         mkdir -p /rootfs\n\
+         tar -C /rootfs -xzf /in/{mini_name}\n\
+         mkdir -p /rootfs/etc/apk\n\
+         printf '%s/%s/main\\n%s/%s/community\\n' '{mirror}' '{alpine_branch}' '{mirror}' '{alpine_branch}' > /rootfs/etc/apk/repositories\n\
+         printf 'nameserver 1.1.1.1\\nnameserver 8.8.8.8\\n' > /rootfs/etc/resolv.conf\n\
+         apk --root /rootfs update\n\
+         apk --root /rootfs add --no-progress {pkg_args}\n\
+         apk --root /rootfs list -I | awk '{{print $1}}' | LC_ALL=C sort > /out/packages.lock\n\
+         rm -rf /rootfs/dev && mkdir -p /rootfs/dev\n\
+         tar -cf /out/base-rootfs.tar -C /rootfs .\n"
+    );
+    run(engine::command()
+        .env("CONTAINERS_CONF", &conf)
+        .arg("run")
+        .arg("--rm")
+        .arg("-v")
+        .arg(format!("{}:/in/{}:ro", minirootfs.display(), mini_name))
+        .arg("-v")
+        .arg(format!("{}:/out", out_dir.display()))
+        .arg(img_ref)
+        .args(["sh", "-c", &script]), ux.mode)?;
+    let _ = std::fs::remove_dir_all(&confdir);
+    Ok(())
+}
+
 /// A deterministic identity of the agent's SOURCES — the `dvmm-agent` +
 /// `dvmm-proto` crate trees + `Cargo.lock`. Embedded as the agent's build hash
 /// (the compatibility oracle reported by `ping`/hello) and folded into the bake
@@ -939,7 +1144,7 @@ pub fn cmd_build_agent(out: &str) -> Result<i32, Box<dyn std::error::Error>> {
 fn fetch_verify(path: &Path, url: &str, sha: &str, ux: &Ux) -> Result<(), Box<dyn std::error::Error>> {
     if !path.exists() {
         ux.progress.println(format!("downloading {url} ..."));
-        run(Command::new("curl").args(["-sSL", "-o"]).arg(path).arg(url), ux.mode)?;
+        fetch_in_container(path, url, ux)?;
     }
     let got = sha256_file_hex(path)?;
     if got != sha {
@@ -982,9 +1187,11 @@ fn collect_builder_pins(
             "kernel.lock has no BUILDER_DIGEST; run `dvmm build-kernel --record` first".into(),
         );
     }
+    let (rimg, rdig) = read_rootfs_builder_pin(here)?;
     let mut v = vec![
         format!("{aimg}@{adig}"),
         format!("{}@{}", kl.builder_image, kl.builder_digest),
+        format!("{rimg}@{rdig}"),
     ];
     v.sort();
     Ok(v)
@@ -1171,7 +1378,7 @@ fn build_kernel_container(
         // --record bootstrap: fetch without a pre-known sha (recorded afterwards).
         if !tarball.exists() {
             ux.progress.println(format!("downloading {} ...", kl.source_url));
-            run(Command::new("curl").args(["-sSL", "-o"]).arg(&tarball).arg(&kl.source_url), ux.mode)?;
+            fetch_in_container(&tarball, &kl.source_url, ux)?;
         }
     } else {
         fetch_verify(&tarball, &kl.source_url, &kl.source_sha256, ux)?;
@@ -1597,11 +1804,11 @@ pub fn cmd_seed_build(config: &str) -> Result<i32, Box<dyn std::error::Error>> {
 struct AssembleConfig {
     conf: PathBuf,
     work: PathBuf,
-    tarball: PathBuf,
-    mirror: String,
-    alpine_branch: String,
+    /// The base rootfs tarball produced by the pinned rootfs-builder container
+    /// (Move 3 Step C). Extracted in-process on a base-cache MISS; unused on a HIT
+    /// (the cached cpio segment is read instead). Untrusted transport (§2).
+    base_rootfs_tar: PathBuf,
     build_epoch: String,
-    pkgs: Vec<String>,
     overlay: PathBuf,
     compose_cache: PathBuf,
     agent_bin: PathBuf,
@@ -1634,47 +1841,30 @@ struct AssembleConfig {
 fn assemble_base_tree(cfg: &AssembleConfig, rootfs: &Path) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(rootfs)?;
 
-    // 1. extract the pinned minirootfs.
-    run(Command::new("tar").arg("-C").arg(rootfs).arg("-xzf").arg(&cfg.tarball), engine::OutputMode::Inherit)?;
-
-    // 2. apk config: pinned branch + a resolver for the one-time install.
-    std::fs::create_dir_all(rootfs.join("etc/apk"))?;
-    std::fs::write(
-        rootfs.join("etc/apk/repositories"),
-        format!("{m}/{b}/main\n{m}/{b}/community\n", m = cfg.mirror, b = cfg.alpine_branch),
-    )?;
-    std::fs::write(rootfs.join("etc/resolv.conf"), "nameserver 1.1.1.1\nnameserver 8.8.8.8\n")?;
-
-    // 3. install the pinned container stack (chroot works: CAP_SYS_CHROOT in userns).
-    run(Command::new("chroot").arg(rootfs).args(["/sbin/apk", "update"]), engine::OutputMode::Inherit)?;
-    let mut add = Command::new("chroot");
-    add.arg(rootfs).args(["/sbin/apk", "add", "--no-progress"]);
-    for p in &cfg.pkgs {
-        add.arg(p);
-    }
-    run(&mut add, engine::OutputMode::Inherit)?;
-
-    // record the FULL resolved version set (top-level + deps).
-    let listing = capture(Command::new("chroot").arg(rootfs).args(["/sbin/apk", "list", "-I"]))?;
-    let mut pkgs: Vec<&str> = listing.lines().filter_map(|l| l.split_whitespace().next()).collect();
-    pkgs.sort_unstable();
-    let packages_lock = format!("{}\n", pkgs.join("\n"));
-    std::fs::write(cfg.work.join("packages.lock"), &packages_lock)?;
+    // 1-3. extract the container-built base rootfs: the pinned Alpine minirootfs +
+    //       the apk-installed package set (PKGS), produced by the pinned rootfs-
+    //       builder container via `apk --root` on the host (Move 3 Step C — NO
+    //       chroot, no host apk). The tar is untrusted TRANSPORT (Fable guardrail
+    //       §2): the cpio packer below re-derives uid/gid 0 + epoch + sort order +
+    //       hardlink groups, so nothing about the container tar's bytes is trusted.
+    //       The resolved package ledger (packages.lock) is emitted by that same
+    //       container and staged to work/ by the host before this runs.
+    extract_tar(&cfg.base_rootfs_tar, rootfs)?;
 
     // 4. drop the overlay (init, self-test, compose launcher, podman config).
-    run(Command::new("cp").arg("-a").arg(format!("{}/.", cfg.overlay.display())).arg(format!("{}/", rootfs.display())), engine::OutputMode::Inherit)?;
+    copy_dir_contents(&cfg.overlay, rootfs)?;
     for f in [
         "init",
         "usr/local/bin/container-selftest.sh",
         "usr/local/bin/compose-up.sh",
         "usr/local/bin/healthcheck-ticker.sh",
     ] {
-        run(Command::new("chmod").arg("0755").arg(rootfs.join(f)), engine::OutputMode::Inherit)?;
+        set_mode(&rootfs.join(f), 0o755)?;
     }
     // 4b. bake the genuine Docker Compose v2 CLI.
-    run(Command::new("install").args(["-D", "-m", "0755"]).arg(&cfg.compose_cache).arg(rootfs.join("usr/local/bin/docker-compose")), engine::OutputMode::Inherit)?;
+    install_file(&cfg.compose_cache, &rootfs.join("usr/local/bin/docker-compose"), 0o755)?;
     // 4c. bake the control-channel agent.
-    run(Command::new("install").args(["-D", "-m", "0755"]).arg(&cfg.agent_bin).arg(rootfs.join("usr/local/bin/dvmm-agent")), engine::OutputMode::Inherit)?;
+    install_file(&cfg.agent_bin, &rootfs.join("usr/local/bin/dvmm-agent"), 0o755)?;
 
     // 5. fixed clock epoch + self-test image ref (both stack-independent = base).
     std::fs::write(rootfs.join("etc/dvmm-build-epoch"), format!("{}\n", cfg.build_epoch))?;
@@ -1703,26 +1893,22 @@ fn assemble_stack_tree(cfg: &AssembleConfig, rootfs: &Path) -> Result<(), Box<dy
     // Scaffolding dirs (explicit 0755 so modes never vary with the ambient umask).
     for d in ["var", "var/lib", "etc", "var/lib/dvmm-stack", "var/lib/dvmm-stack/binds", "var/lib/containers-seed"] {
         std::fs::create_dir_all(rootfs.join(d))?;
-        run(Command::new("chmod").arg("0755").arg(rootfs.join(d)), engine::OutputMode::Inherit)?;
+        set_mode(&rootfs.join(d), 0o755)?;
     }
 
     // compose.lock + materialized binds + pinned project.
     std::fs::copy(&cfg.stack_lock, rootfs.join("var/lib/dvmm-stack/compose.lock.yml"))?;
-    run(Command::new("chmod").arg("0644").arg(rootfs.join("var/lib/dvmm-stack/compose.lock.yml")), engine::OutputMode::Inherit)?;
+    set_mode(&rootfs.join("var/lib/dvmm-stack/compose.lock.yml"), 0o644)?;
     if cfg.stack_binds.is_dir() {
         // cp -a "$STACK_BINDS/." binds/  (may be empty; ignore failure like the script)
-        let _ = Command::new("cp")
-            .arg("-a")
-            .arg(format!("{}/.", cfg.stack_binds.display()))
-            .arg(format!("{}/", rootfs.join("var/lib/dvmm-stack/binds").display()))
-            .status();
+        let _ = copy_dir_contents(&cfg.stack_binds, &rootfs.join("var/lib/dvmm-stack/binds"));
     }
     std::fs::write(rootfs.join("etc/dvmm-stack-name"), format!("{}\n", cfg.stack_name))?;
     std::fs::write(rootfs.join("etc/dvmm-stack-project"), format!("{}\n", cfg.stack_project))?;
     std::fs::write(rootfs.join("etc/dvmm-stack-mem"), format!("{}\n", cfg.stack_mem))?;
 
     // the seed store: the pre-baked image graph the guest copies into its tmpfs.
-    run(Command::new("cp").arg("-a").arg(&cfg.seed_storage).arg(rootfs.join("var/lib/containers-seed/storage")), engine::OutputMode::Inherit)?;
+    copy_tree(&cfg.seed_storage, &rootfs.join("var/lib/containers-seed/storage"))?;
 
     // normalize containers/storage "created" timestamps + zero its lock files.
     normalize_created_json(&rootfs.join("var/lib/containers-seed"))?;
@@ -2076,6 +2262,7 @@ fn compute_base_key(
     compose_version: &str,
     compose_sha256: &str,
     selftest_pin: &str,
+    rootfs_builder: &str,
 ) -> String {
     let overlay_tree = tree_hash(&alpine_dir.join("overlay"), &[]).unwrap_or_default();
     let pkgs = PKGS.join(",");
@@ -2088,6 +2275,7 @@ fn compute_base_key(
          overlay:    {overlay_tree}\n\
          agent:      {agent_sha}\n\
          compose:    {compose_version} {compose_sha256}\n\
+         builder:    {rootfs_builder}\n\
          selftest:   {selftest_pin}\n"
     );
     artifact::sha256_hex(manifest.as_bytes())

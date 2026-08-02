@@ -14,7 +14,11 @@ project   dvmm_go-ab
 mem_mib   3072
 ram_estimate_mib  1777
 compose_lock_sha256  42228b25913c1a82f04d0c2cf9ee62e501c84612f59da1d08acd0be04554b93b
-initramfs_sha256     6a2a87197161b82e44c2dc4a2ee31b2072f9d3282048526f893b97086edc7cf4  initramfs-alpine-go-ab.cpio.gz
+initramfs_sha256     ce00eea93c78a9341a2c66706f4f2d2c887ca8738e2052903be0c1aa63e9eaac  initramfs-alpine-go-ab.cpio.gz
+agent_sha256         ab9d4584490c3d6a57c3ab6c33ff755c2be1f972a8a1d5a17679f6fa38fd33e3  dvmm-agent
+builder_image        docker.io/library/alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
+builder_image        docker.io/library/debian:bookworm-slim@sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e
+builder_image        docker.io/library/rust:1.97-alpine3.22@sha256:b348cb409ac0a73de15065997a360063cf87465574a15e3e4469862cb8996f02
   build_base  service=service  base=docker.io/library/alpine@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
   build_base  service=service  base=docker.io/library/golang@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2
   image  policy=build   service=service  tag=localhost/dvmm-go-service:2b  content_id=sha256:f7b73c10b85fe8f06037c694885077efcdd3891e09e458eb4e49ff80d55fc126  size_mib=14
@@ -22,7 +26,7 @@ initramfs_sha256     6a2a87197161b82e44c2dc4a2ee31b2072f9d3282048526f893b97086ed
   image  policy=squash  upstream=docker.io/library/postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777  seed_tag=localhost/dvmm-postgres-57c72fd2a128:baked  src_diffid=sha256:af5b54b4903175790ece7037a66fd16496658d7030a59e2e2360f66038d74c8c  size_mib=283  GATE=ok
   pin    upstream=docker.io/library/postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777  pinned=localhost/dvmm-postgres-57c72fd2a128@sha256:cbf217007d0742829dc120c3ea9cd2621e90eb3adfeaf6684e87ce268a2ca368
   pin    upstream=localhost/dvmm-go-service:2b  pinned=localhost/dvmm-go-service@sha256:b42adc3b5644da4c7b6723cfb5c890242cdeea8a6ecdf5b291ab9e9f3365316d
-  toolchain   service=service  go1.26.5
 # --- informational (NOT compared for repeatability) ---
-# podman-version: 5.8.3
-# baked-at: 2026-08-02T05:20:47Z
+# host-probed values (podman version, baked-at) are written to the
+# cache dir's diagnostics/ side file, NEVER here (Fable guardrail §3).
+dvmm_sha256          6d90dbc3e86221d58a19566a8d58355dc0d9155f69932aee7be017f051303745  go-ab.dvmm

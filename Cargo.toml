@@ -38,6 +38,12 @@ serde_json = "1"
 sha2 = "0.10"
 serde_yaml = "0.9.34"
 regex = "1.13.1"
+# Move 3 Step B: in-process gzip + tar, replacing the host `gzip -9 -n` and the
+# `tar -xzf` shell-outs. `flate2` uses its DEFAULT (miniz_oxide) backend ONLY —
+# a zlib/zlib-ng feature would reintroduce a C build dependency and break Move 1
+# (verified via `cargo tree`). `tar` is pure-Rust archive read (extraction only).
+flate2 = "=1.1.5"
+tar = "=0.4.44"
 # `dvmm build`'s single stepped progress spinner (Fable CLI-UX ruling). Root
 # `dvmm` ONLY — FORBIDDEN in dvmm-agent/dvmm-proto (their dep trees are
 # Fable-locked). Pinned to an exact version.
