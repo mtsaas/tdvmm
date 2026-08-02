@@ -336,13 +336,23 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     };
     let ux = Ux { progress: &progress, mode };
 
+    // TTY-only banner; a no-op in frozen mode. Everything below that used to
+    // print a routine `== section ==`/detail line now goes through
+    // `ux.progress.detail()` instead of `.println()`: byte-identical in frozen
+    // mode (same `eprintln!` fallback), but suppressed on the TTY (relocated
+    // into `diag`, folded into the diagnostics file at the end).
+    ux.progress.title(&stack_name);
+    let mut diag = String::new();
+
     ux.progress.step(1, TOTAL_STEPS, "resolve inputs");
-    ux.progress.println(format!("== dvmm build: stack={stack_name} project={project} mem={mem_mib}MiB =="));
-    ux.progress.println(format!("   compose: {}", compose_path.display()));
+    ux.progress.detail(format!("== dvmm build: stack={stack_name} project={project} mem={mem_mib}MiB =="));
+    ux.progress.detail(format!("   compose: {}", compose_path.display()));
+    diag.push_str(&format!("compose_path: {}\n", compose_path.display()));
 
     // --- cache dir (Fable Part A): --cache-dir > $DVMM_CACHE_DIR > $HOME/.dvmm ---
     let (cache_dir, cache_src) = resolve_cache_dir(args.cache_dir.as_deref());
-    ux.progress.println(format!("   cache-dir: {} (source: {cache_src})", cache_dir.display()));
+    ux.progress.detail(format!("   cache-dir: {} (source: {cache_src})", cache_dir.display()));
+    diag.push_str(&format!("cache_dir: {} (source: {cache_src})\n", cache_dir.display()));
 
     // --- kernel (Fable Part C): fetch the pinned release asset, else reproducibly
     //     build it in the pinned container; verified against kernel.lock. Done
@@ -352,12 +362,13 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
         .ok_or("could not locate the repo root above guest/")?
         .to_path_buf();
     let kernel = ensure_kernel(&here, &cache_dir, false, &ux)?;
+    diag.push_str(&format!("kernel: {} sha256={}\n", kernel.display(), sha256_file_hex(&kernel).unwrap_or_default()));
 
     // --- builder-image pins (Fable Part B): the DECLARED, host-identical toolchain
     //     anchors that REPLACE the host-probed `podman --version` in both the hashed
     //     artifact bytes and the cache key. Sorted for order-stability. ---
     let builders = collect_builder_pins(&repo_root, &here)?;
-    ux.progress.println(format!("   builders: {}", builders.join(" ")));
+    ux.progress.detail(format!("   builders: {}", builders.join(" ")));
 
     // Output destinations (needed early so a cache HIT can restore them). The `-o`
     // path is NOT part of the cache key: identical inputs bake identical bytes
@@ -391,22 +402,37 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
         }
     };
     if let Some(c) = &cache {
+        diag.push_str(&format!("bake_cache_key: {}\n", c.key));
         if !args.no_cache && cache_is_hit(c) {
-            ux.progress.println(format!("== BAKE CACHE HIT ==  key={}", &c.key[..16]));
-            ux.progress.println(format!("   reusing baked artifacts (skipped pull/squash/assemble): {}", c.dir.display()));
+            ux.progress.note("hit → reuse");
+            diag.push_str("bake_cache_status: HIT (reused)\n");
+            ux.progress.detail(format!("== BAKE CACHE HIT ==  key={}", &c.key[..16]));
+            ux.progress.detail(format!("   reusing baked artifacts (skipped pull/squash/assemble): {}", c.dir.display()));
             match cache_restore(c, &out_dvmm, &out_initramfs, &committed_lock, &stack_lock_path) {
                 Ok(dvmm_sha) => {
-                    ux.progress.println(format!("   .dvmm:     {} (sha256 {dvmm_sha})", out_dvmm.display()));
+                    ux.progress.detail(format!("   .dvmm:     {} (sha256 {dvmm_sha})", out_dvmm.display()));
+                    let size = std::fs::metadata(&out_dvmm).map(|m| m.len()).unwrap_or(0);
+                    ux.progress.print_summary(&out_dvmm, &dvmm_sha, size, progress.elapsed(), None);
                     progress.finish();
-                    println!("{dvmm_sha}  {}", out_dvmm.display());
+                    // stdout: the artifact identity line (parity with the old pack-dvmm.sh) —
+                    // `suspend` just runs the closure directly once the bar is finished; kept
+                    // for symmetry with the other stdout site below.
+                    ux.progress.suspend(|| println!("{dvmm_sha}  {}", out_dvmm.display()));
                     return Ok(0);
                 }
-                Err(e) => ux.progress.println(format!("{}: cache restore failed ({e}); rebuilding", compose::WARN)),
+                Err(e) => {
+                    ux.progress.note("restore failed → full bake");
+                    ux.progress.println(format!("{}: cache restore failed ({e}); rebuilding", compose::WARN));
+                }
             }
         } else if args.no_cache {
-            ux.progress.println(format!("== bake cache BYPASSED (--no-cache): forcing full rebuild ==  key={}", &c.key[..16]));
+            ux.progress.note("bypassed → full bake");
+            diag.push_str("bake_cache_status: BYPASSED (--no-cache)\n");
+            ux.progress.detail(format!("== bake cache BYPASSED (--no-cache): forcing full rebuild ==  key={}", &c.key[..16]));
         } else {
-            ux.progress.println(format!("== BAKE CACHE MISS ==  key={} (full bake) ==", &c.key[..16]));
+            ux.progress.note("miss → full bake");
+            diag.push_str("bake_cache_status: MISS\n");
+            ux.progress.detail(format!("== BAKE CACHE MISS ==  key={} (full bake) ==", &c.key[..16]));
         }
     }
 
@@ -424,11 +450,11 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
         .and_then(|s| s.split_whitespace().nth(2).map(|v| v.to_string()))
         .unwrap_or_default();
 
-    ux.progress.step(3, TOTAL_STEPS, "squash images");
-    ux.progress.println(format!("   images: {}", validated.images.join(" ")));
+    ux.progress.step(3, TOTAL_STEPS, "pull + build images");
+    ux.progress.detail(format!("   images: {}", validated.images.join(" ")));
     if !validated.builds.is_empty() {
         let tags: Vec<&str> = validated.builds.iter().map(|b| b.image_tag.as_str()).collect();
-        ux.progress.println(format!("   builds: {}", tags.join(" ")));
+        ux.progress.detail(format!("   builds: {}", tags.join(" ")));
     }
 
     // --- 2. bake each image into a scratch vfs store ---
@@ -445,24 +471,37 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     let mut total_img_mib: u64 = 0;
 
     for reff in &validated.images {
-        ux.progress.msg(format!("squash images: {reff}"));
         bake_one(&bstore, &brun, &conf, reff, squash_threshold_mib, &work, &mut records, &mut plain_refs, &mut plain_pin, &mut squash_tars, &mut total_img_mib, &ux)?;
-    }
-    if !validated.builds.is_empty() {
-        ux.progress.println("== build build: services (host-side) ==");
-        for b in &validated.builds {
-            ux.progress.msg(format!("build: {}", b.service));
-            build_one(&bstore, &brun, &conf, b, &work, &mut records, &mut squash_tars, &mut total_img_mib, &ux)?;
+        // TTY: the aligned sub-list entry (name + size) for this user-declared
+        // image; a no-op in frozen mode. The self-test busybox pull (below)
+        // deliberately has no entry — it isn't part of the stack the user asked
+        // to build.
+        if let Some(r) = records.last() {
+            ux.progress.item(squash_base_name(reff), r.size_mib);
         }
     }
-    ux.progress.println("== bake self-test image (busybox, plain) ==");
-    ux.progress.msg("squash images: self-test (busybox)");
+    if !validated.builds.is_empty() {
+        ux.progress.detail("== build build: services (host-side) ==");
+        for b in &validated.builds {
+            build_one(&bstore, &brun, &conf, b, &work, &mut records, &mut squash_tars, &mut total_img_mib, &ux)?;
+            if let Some(r) = records.last() {
+                ux.progress.item(b.service.clone(), r.size_mib);
+            }
+        }
+    }
+    ux.progress.detail("== bake self-test image (busybox, plain) ==");
     bake_one(&bstore, &brun, &conf, BUSYBOX_REF, squash_threshold_mib, &work, &mut records, &mut plain_refs, &mut plain_pin, &mut squash_tars, &mut total_img_mib, &ux)?;
     let selftest_pin = plain_pin.get(BUSYBOX_REF).cloned().unwrap_or_default();
+    for r in &records {
+        diag.push_str(&format!(
+            "image: policy={} upstream={} content_id={} size_mib={}\n",
+            r.policy, r.upstream, r.content_id, r.size_mib
+        ));
+    }
 
     // --- 3. build the seed store (podman unshare) ---
     ux.progress.step(4, TOTAL_STEPS, "seed store");
-    ux.progress.println("== build seed store ==");
+    ux.progress.detail("== build seed store ==");
     let seed = work.join("seed");
     let store = seed.join("storage");
     let runroot = work.join("seedrun");
@@ -505,7 +544,7 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
 
     // --- 4. emit compose.lock.yml + materialize binds ---
     ux.progress.step(5, TOTAL_STEPS, "compose.lock + binds");
-    ux.progress.println("== emit compose.lock.yml ==");
+    ux.progress.detail("== emit compose.lock.yml ==");
     let mut digests: HashMap<String, String> = HashMap::new();
     for reff in &plain_refs {
         if let Some(canon) = plain_pin.get(reff) {
@@ -521,6 +560,7 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     let lock_path = work.join("compose.lock.yml");
     std::fs::write(&lock_path, &lock.lock_yaml)?;
     let lock_sha = sha256_file_hex(&lock_path)?;
+    diag.push_str(&format!("compose_lock_sha256: {lock_sha}\n"));
 
     // materialize relative binds into a staging tree.
     let binds_stage = work.join("binds");
@@ -530,17 +570,19 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
         std::fs::create_dir_all(dest.parent().unwrap())?;
         copy_tree(Path::new(src), &dest)
             .map_err(|e| format!("materialize bind {src}: {e}"))?;
-        ux.progress.println(format!("   materialized  {src}  ->  {binds_base}/{dest_rel}"));
+        ux.progress.detail(format!("   materialized  {src}  ->  {binds_base}/{dest_rel}"));
+        diag.push_str(&format!("bind: {src} -> {binds_base}/{dest_rel}\n"));
     }
 
     // --- 5. RAM estimate ---
     let est_mib = ((2.5 * total_img_mib as f64) + working_set_mib as f64 + 512.0).ceil() as u64;
-    ux.progress.println("== RAM estimate ==");
-    ux.progress.println(format!("   total image size: {total_img_mib} MiB;  estimate >= {est_mib} MiB (2.5x img + {working_set_mib} ws + 512 base)"));
+    ux.progress.detail("== RAM estimate ==");
+    ux.progress.detail(format!("   total image size: {total_img_mib} MiB;  estimate >= {est_mib} MiB (2.5x img + {working_set_mib} ws + 512 base)"));
+    diag.push_str(&format!("ram_estimate: total_img_mib={total_img_mib} estimate_mib={est_mib} configured_mib={mem_mib}\n"));
     if mem_mib < est_mib {
         ux.progress.println(format!("{}: configured guest RAM {mem_mib} MiB is below the estimate {est_mib} MiB.", compose::WARN));
     } else {
-        ux.progress.println(format!("   configured {mem_mib} MiB >= estimate {est_mib} MiB (OK)"));
+        ux.progress.detail(format!("   configured {mem_mib} MiB >= estimate {est_mib} MiB (OK)"));
     }
     if mem_mib > VMM_MAX_MEM_MIB {
         ux.progress.println(format!("{}: {mem_mib} MiB exceeds the current VMM cap {VMM_MAX_MEM_MIB} MiB (32-bit MMIO gap);", compose::WARN));
@@ -548,22 +590,23 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
 
     // --- 6. assemble the per-stack initramfs (build_rootfs, stack mode) ---
     ux.progress.step(6, TOTAL_STEPS, "assemble initramfs");
-    ux.progress.println("== assemble initramfs (Rust rootfs + cpio) ==");
+    ux.progress.detail("== assemble initramfs (Rust rootfs + cpio) ==");
     // (out_initramfs computed early, above, for the cache path)
 
     // build the dvmm-agent (static musl, reproducible) in the pinned builder
     // container, before the unshare. Returns the embedded build hash (the compat
     // oracle reported by ping/hello); its file sha256 goes in the ledger + anchors.
     let agent_bin = work.join("dvmm-agent");
-    ux.progress.msg("assemble initramfs: build dvmm-agent");
     let agent_build_hash = build_agent(&here, &agent_bin, &ux)?;
     let agent_sha = sha256_file_hex(&agent_bin)?;
-    ux.progress.println(format!("   dvmm-agent: sha256 {agent_sha}  build {agent_build_hash}"));
+    // TTY: deliberately NOT shown on the step line — it's diagnostic (relocated
+    // to `diag` below), not routine build progress.
+    ux.progress.detail(format!("   dvmm-agent: sha256 {agent_sha}  build {agent_build_hash}"));
+    diag.push_str(&format!("agent_sha256: {agent_sha}\nagent_build_hash: {agent_build_hash}\n"));
 
     // fetch + verify the pinned minirootfs + compose binary (cached in alpine_dir).
     let mirror = std::env::var("ALPINE_MIRROR").unwrap_or_else(|_| DEFAULT_MIRROR.to_string());
     let tarball = alpine_dir.join(MINIROOTFS);
-    ux.progress.msg("assemble initramfs: fetch minirootfs");
     fetch_verify(
         &tarball,
         &format!("{mirror}/{ALPINE_BRANCH}/releases/x86_64/{MINIROOTFS}"),
@@ -572,7 +615,6 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     )?;
     let (compose_version, compose_sha256) = read_compose_lock(&alpine_dir)?;
     let compose_cache = alpine_dir.join(format!("docker-compose-{compose_version}"));
-    ux.progress.msg("assemble initramfs: fetch compose engine");
     fetch_verify(
         &compose_cache,
         &format!("https://github.com/docker/compose/releases/download/{compose_version}/docker-compose-linux-x86_64"),
@@ -594,12 +636,20 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     let base_seg_cached = base_entry.join("base.cpio");
     let base_pl_cached = base_entry.join("packages.lock");
     let base_hit = !args.no_cache && base_seg_cached.is_file();
-    if base_hit {
-        ux.progress.println(format!("== base-runtime cache HIT ==  key={} ({})", &base_key[..16], base_entry.display()));
+    let base_status = if base_hit {
+        "HIT"
     } else if args.no_cache {
-        ux.progress.println(format!("== base-runtime cache BYPASSED (--no-cache) ==  key={}", &base_key[..16]));
+        "BYPASSED (--no-cache)"
     } else {
-        ux.progress.println(format!("== base-runtime cache MISS ==  key={} (building base layer)", &base_key[..16]));
+        "MISS"
+    };
+    diag.push_str(&format!("base_runtime_cache_key: {base_key}\nbase_runtime_cache_status: {base_status} ({})\n", base_entry.display()));
+    if base_hit {
+        ux.progress.detail(format!("== base-runtime cache HIT ==  key={} ({})", &base_key[..16], base_entry.display()));
+    } else if args.no_cache {
+        ux.progress.detail(format!("== base-runtime cache BYPASSED (--no-cache) ==  key={}", &base_key[..16]));
+    } else {
+        ux.progress.detail(format!("== base-runtime cache MISS ==  key={} (building base layer)", &base_key[..16]));
     }
     // MISS: __assemble writes the fresh base segment to work/base.cpio; the host
     // stores it after the unshare. HIT: __assemble reads the cached segment.
@@ -612,7 +662,6 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     let base_build_dir = work.join("base-build");
     let base_rootfs_tar = base_build_dir.join("base-rootfs.tar");
     if !base_hit {
-        ux.progress.msg("assemble initramfs: build base rootfs (apk)");
         build_base_rootfs(&rootfs_builder, &tarball, &mirror, ALPINE_BRANCH, PKGS, &base_build_dir, &ux)?;
         // stage the container-emitted package ledger for __assemble + the base cache.
         std::fs::copy(base_build_dir.join("packages.lock"), work.join("packages.lock"))?;
@@ -641,7 +690,6 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     };
     let assemble_cfg_path = work.join("assemble-config.json");
     std::fs::write(&assemble_cfg_path, serde_json::to_vec(&assemble_cfg)?)?;
-    ux.progress.msg("assemble initramfs: build rootfs + cpio");
     run(engine::unshare(&conf)
         .arg(&self_exe)
         .arg("__assemble-initramfs")
@@ -653,7 +701,7 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
         if let Err(e) = base_cache_store(&base_entry, &base_segment, &alpine_dir.join("packages.lock")) {
             ux.progress.println(format!("{}: could not populate base-runtime cache ({e})", compose::WARN));
         } else {
-            ux.progress.println(format!("   base cached: {} (key {})", base_entry.display(), &base_key[..16]));
+            ux.progress.detail(format!("   base cached: {} (key {})", base_entry.display(), &base_key[..16]));
         }
     }
 
@@ -668,59 +716,89 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     std::fs::copy(&lock_path, &committed_lock)?;
 
     // --- 8. pack the single-file .dvmm artifact ---
-    ux.progress.println("== pack .dvmm artifact ==");
+    ux.progress.detail("== pack .dvmm artifact ==");
     let dvmm_bytes = pack_dvmm(&self_exe, &records, &compose_version, &compose_sha256, &stack_name, &project, mem_mib, est_mib, &builders, &agent_sha, &agent_build_hash, &kernel, &out_initramfs, &lock_path)?;
     std::fs::write(&out_dvmm, &dvmm_bytes)?;
     let dvmm_sha = artifact::sha256_hex(&dvmm_bytes);
     // append the artifact identity to the ledger.
     append_stack_lock_dvmm(&here, &stack_name, &dvmm_sha, &out_dvmm)?;
+    diag.push_str(&format!(
+        "initramfs: {} sha256={art_sha}\ndvmm: {} sha256={dvmm_sha}\n",
+        out_initramfs.display(), out_dvmm.display(),
+    ));
 
-    ux.progress.println("");
-    ux.progress.println("== dvmm build DONE ==");
-    ux.progress.println(format!("   initramfs: {}", out_initramfs.display()));
-    ux.progress.println(format!("   sha256:    {art_sha}"));
-    ux.progress.println(format!("   .dvmm:     {} (sha256 {dvmm_sha})", out_dvmm.display()));
-    // stdout: the artifact identity line (parity with the old pack-dvmm.sh).
-    println!("{dvmm_sha}  {}", out_dvmm.display());
+    ux.progress.detail("");
+    ux.progress.detail("== dvmm build DONE ==");
+    ux.progress.detail(format!("   initramfs: {}", out_initramfs.display()));
+    ux.progress.detail(format!("   sha256:    {art_sha}"));
+    ux.progress.detail(format!("   .dvmm:     {} (sha256 {dvmm_sha})", out_dvmm.display()));
+    // stdout: the artifact identity line (parity with the old pack-dvmm.sh) —
+    // UNCHANGED by the TTY redesign (progress/chrome is stderr-only). Routed
+    // through `suspend` so a still-ticking step-7 spinner can't interleave
+    // with this raw stdout write (the bar is cleared for the print, then
+    // redrawn) — frozen/non-TTY: `suspend` just calls the closure directly.
+    ux.progress.suspend(|| println!("{dvmm_sha}  {}", out_dvmm.display()));
 
     // --- 9. populate the bake cache (best-effort; never fails the build) ---
-    ux.progress.step(8, TOTAL_STEPS, "cache + diagnostics");
+    ux.progress.step(8, TOTAL_STEPS, "cache");
     if let Some(c) = &cache {
         match cache_store(c, &out_dvmm, &out_initramfs, &committed_lock, &stack_lock_path, &dvmm_sha) {
-            Ok(true) => ux.progress.println(format!("   cached:    {} (key {})", c.dir.display(), &c.key[..16])),
+            Ok(true) => {
+                ux.progress.detail(format!("   cached:    {} (key {})", c.dir.display(), &c.key[..16]));
+                diag.push_str(&format!("bake_cache_stored: {} (key {})\n", c.dir.display(), c.key));
+            }
             Ok(false) => {} // entry already present
             Err(e) => ux.progress.println(format!("{}: could not populate bake cache ({e})", compose::WARN)),
         }
     }
 
-    // --- 10. side diagnostics (Fable guardrail §3): host-probed values live ONLY
-    //         here, never in the artifact or the cache key. Disposable. ---
-    write_bake_diagnostics(&cache_dir, &stack_name, &host_podman_version, &builders, ux.progress);
+    // --- 10. side diagnostics (Fable guardrail §3): host-probed values, cache
+    //         mechanics, full digests, and absolute paths live ONLY here, never
+    //         in the artifact, stdout, the cache key, or the clean TTY view —
+    //         relocated, not lost. Disposable; best-effort. ---
+    let diag_path = write_bake_diagnostics(&cache_dir, &stack_name, &host_podman_version, &builders, &diag, ux.progress);
+
+    // TTY: the aligned final summary block (Fix: the bar is cleared FIRST, so
+    // the step counter deterministically reaches [8/8] with no stale spinner
+    // frame). A no-op in frozen mode — the plain `DONE` block above already
+    // covers it byte-for-byte.
+    ux.progress.print_summary(&out_dvmm, &dvmm_sha, dvmm_bytes.len() as u64, progress.elapsed(), diag_path.as_deref());
 
     let _ = std::fs::remove_dir_all(&work);
     Ok(0)
 }
 
-/// Write host-probed bake diagnostics to a side file under the (disposable) cache
-/// dir. NOTHING here enters the `.dvmm` bytes or the bake cache key — it exists
-/// purely so a human can see which host engine produced a given local build.
-fn write_bake_diagnostics(cache_dir: &Path, stack: &str, podman_version: &str, builders: &[String], progress: &ui::Progress) {
+/// Write host-probed + relocated bake diagnostics to a side file under the
+/// (disposable) cache dir. NOTHING here enters the `.dvmm` bytes or the bake
+/// cache key. `extra` is the run's accumulated diagnostic detail (full digests,
+/// cache keys, the agent sha/build hash, absolute paths, …) — the ROUTINE
+/// detail that used to wall the TTY, now relocated here instead of lost
+/// (`build.rs`'s `diag` accumulator). Returns the written path on success (used
+/// for the TTY summary's `details` line); `None` is a best-effort failure.
+fn write_bake_diagnostics(cache_dir: &Path, stack: &str, podman_version: &str, builders: &[String], extra: &str, progress: &ui::Progress) -> Option<PathBuf> {
     let dir = cache_dir.join("diagnostics");
     if std::fs::create_dir_all(&dir).is_err() {
-        return; // best-effort only
+        return None; // best-effort only
     }
     let body = format!(
-        "# dvmm bake diagnostics (host-probed; NOT in the artifact or cache key)\n\
+        "# dvmm bake diagnostics (host-probed + relocated detail; NOT in the artifact\n\
+         # or cache key — see stack.lock for the compared, reproducible ledger).\n\
          stack: {stack}\n\
          host_podman_version: {podman_version}\n\
          baked_at: {}\n\
-         builder_images:\n{}\n",
+         builder_images:\n{}\n\
+         {extra}",
         utc_now_iso(),
         builders.iter().map(|b| format!("  - {b}")).collect::<Vec<_>>().join("\n"),
     );
     let path = dir.join(format!("{stack}.txt"));
-    let _ = std::fs::write(&path, body);
-    progress.println(format!("   diagnostics: {} (host-probed, not hashed)", path.display()));
+    if std::fs::write(&path, body).is_err() {
+        return None;
+    }
+    // Frozen/non-TTY: unchanged (byte-identical `println` fallback). TTY: this
+    // routine line is suppressed — the summary's `details` line replaces it.
+    progress.detail(format!("   diagnostics: {} (host-probed, not hashed)", path.display()));
+    Some(path)
 }
 
 /// Resolve the repo `guest/` directory relative to the running binary (target/…).
@@ -805,7 +883,7 @@ fn bake_one(
             size_mib: mib,
             pinned: reff.to_string(),
         });
-        ux.progress.println(format!("   [plain]  {reff}  ({mib} MiB)"));
+        ux.progress.detail(format!("   [plain]  {reff}  ({mib} MiB)"));
         return Ok(());
     }
 
@@ -842,7 +920,7 @@ fn bake_one(
         size_mib: mib,
         pinned: String::new(), // filled after seed load
     });
-    ux.progress.println(format!("   [squash] {reff}  ({mib} MiB)  -> {tag}  (GATE ok)"));
+    ux.progress.detail(format!("   [squash] {reff}  ({mib} MiB)  -> {tag}  (GATE ok)"));
     Ok(())
 }
 
@@ -858,7 +936,7 @@ fn build_one(
     total_img_mib: &mut u64,
     ux: &Ux,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    ux.progress.println(format!("   [build]  service={}  context={}  dockerfile={}  -> {}", b.service, b.context, b.dockerfile, b.image_tag));
+    ux.progress.detail(format!("   [build]  service={}  context={}  dockerfile={}  -> {}", b.service, b.context, b.dockerfile, b.image_tag));
     run(podman(bstore, brun, conf).args(["build", "--squash-all", "--timestamp", BUILD_EPOCH, "-t", &b.image_tag, "-f", &b.dockerfile, &b.context]), ux.mode)?;
     let bytes: u64 = capture(podman(bstore, brun, conf).args(["image", "inspect", &b.image_tag, "--format", "{{.Size}}"]))?
         .trim()
@@ -880,7 +958,7 @@ fn build_one(
         size_mib: mib,
         pinned: String::new(),
     });
-    ux.progress.println(format!("   [build]  {}  ({mib} MiB)  content_id set", b.image_tag));
+    ux.progress.detail(format!("   [build]  {}  ({mib} MiB)  content_id set", b.image_tag));
     Ok(())
 }
 
@@ -1072,7 +1150,7 @@ fn build_agent(here: &Path, out: &Path, ux: &Ux) -> Result<String, Box<dyn std::
     let (image, digest) = read_builder_pin(&repo_root)?;
     let img_ref = format!("{image}@{digest}");
     let build_hash = agent_src_id(&repo_root)?;
-    ux.progress.println(format!("building dvmm-agent (static musl, reproducible) in {img_ref}"));
+    ux.progress.detail(format!("building dvmm-agent (static musl, reproducible) in {img_ref}"));
 
     let confdir = mkdtemp()?;
     let conf = confdir.join("containers.conf");
@@ -1142,7 +1220,7 @@ pub fn cmd_build_agent(out: &str) -> Result<i32, Box<dyn std::error::Error>> {
 
 fn fetch_verify(path: &Path, url: &str, sha: &str, ux: &Ux) -> Result<(), Box<dyn std::error::Error>> {
     if !path.exists() {
-        ux.progress.println(format!("downloading {url} ..."));
+        ux.progress.detail(format!("downloading {url} ..."));
         fetch_in_container(path, url, ux)?;
     }
     let got = sha256_file_hex(path)?;
@@ -1307,7 +1385,7 @@ fn ensure_kernel(
     if !force_build && out.exists() {
         if let Ok(got) = sha256_file_hex(&out) {
             if got == kl.sha256 {
-                ux.progress.println(format!("   kernel: {} (present, sha256 verified)", out.display()));
+                ux.progress.detail(format!("   kernel: {} (present, sha256 verified)", out.display()));
                 return Ok(out);
             }
             ux.progress.println(format!(
@@ -1319,11 +1397,11 @@ fn ensure_kernel(
 
     // PRIMARY: pinned release asset.
     if !force_build && !kl.release_asset_url.is_empty() {
-        ux.progress.println(format!("   kernel: fetching pinned release asset {} ...", kl.release_asset_url));
+        ux.progress.detail(format!("   kernel: fetching pinned release asset {} ...", kl.release_asset_url));
         let _ = std::fs::remove_file(&out);
         match fetch_verify(&out, &kl.release_asset_url, &kl.sha256, ux) {
             Ok(()) => {
-                ux.progress.println("   kernel: fetched + sha256 verified from release");
+                ux.progress.detail("   kernel: fetched + sha256 verified from release");
                 return Ok(out);
             }
             Err(e) => {
@@ -1347,7 +1425,7 @@ fn ensure_kernel(
         )
         .into());
     }
-    ux.progress.println("   kernel: container build sha256 verified against kernel.lock");
+    ux.progress.detail("   kernel: container build sha256 verified against kernel.lock");
     Ok(out)
 }
 
@@ -1367,7 +1445,7 @@ fn build_kernel_container(
         return Err("kernel.lock has no BUILDER_DIGEST; run `dvmm build-kernel --record`".into());
     }
     let img_ref = format!("{}@{}", kl.builder_image, kl.builder_digest);
-    ux.progress.println(format!("   kernel: reproducible container build in {img_ref}"));
+    ux.progress.detail(format!("   kernel: reproducible container build in {img_ref}"));
 
     // 1. source tarball: fetch + verify on the host, cached in the cache dir.
     let src_dir = cache_dir.join("kernel-src");
@@ -1376,7 +1454,7 @@ fn build_kernel_container(
     if kl.source_sha256.is_empty() {
         // --record bootstrap: fetch without a pre-known sha (recorded afterwards).
         if !tarball.exists() {
-            ux.progress.println(format!("downloading {} ...", kl.source_url));
+            ux.progress.detail(format!("downloading {} ...", kl.source_url));
             fetch_in_container(&tarball, &kl.source_url, ux)?;
         }
     } else {
