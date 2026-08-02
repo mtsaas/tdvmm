@@ -285,26 +285,32 @@ fn write_entry(c: &mut Cpio, e: &Entry, new_ino: u32, with_data: bool) -> std::i
     Ok(())
 }
 
-/// Build the full combined initramfs cpio (nodes segment + rootfs segment),
-/// uncompressed. This is exactly what `cat nodes.cpio rootfs.cpio` produced
-/// after `zero_cpio_inodes.py`.
-pub fn build_combined_cpio(rootfs: &Path) -> std::io::Result<Vec<u8>> {
+/// The device-nodes cpio segment (with its trailer + 512-pad), on its own. The
+/// kernel initramfs unpacker reads CONCATENATED newc archives, so a full
+/// initramfs can be assembled as `nodes_segment() + <base seg> + <stack seg>`
+/// (Fable Part D: a reusable base-runtime segment + a per-stack segment).
+pub fn nodes_segment() -> Vec<u8> {
     let mut c = Cpio::new();
     write_nodes_segment(&mut c);
-    write_rootfs_segment(&mut c, rootfs)?;
+    c.out
+}
+
+/// Emit ONE rootfs tree as a standalone cpio segment (byte-sorted, uid/gid 0,
+/// dev zeroed, mtime=epoch, GNU-cpio-compatible inode renumbering + hardlink
+/// handling, trailer + 512-pad). Deterministic: identical trees -> identical
+/// bytes. Concatenate segments to form the final initramfs.
+pub fn rootfs_segment(root: &Path) -> std::io::Result<Vec<u8>> {
+    let mut c = Cpio::new();
+    write_rootfs_segment(&mut c, root)?;
     Ok(c.out)
 }
 
-/// Emit the final `initramfs.cpio.gz`: build the combined cpio in Rust, then run
-/// the host `gzip -9 -n` (the SAME compressor the scripts used, so the gzip bytes
-/// are identical — a Rust deflate would differ). The uncompressed cpio is staged
-/// to a temp file and gzip is fed via file redirection (stdin = combined file,
-/// stdout = the output file) — exactly `gzip -9 -n < combined > out`, with no
-/// stdout pipe to drain (avoiding a producer/consumer deadlock on large inputs).
-pub fn write_initramfs_gz(rootfs: &Path, out_path: &Path) -> std::io::Result<()> {
-    let combined = build_combined_cpio(rootfs)?;
+/// gzip an already-assembled (concatenated) cpio byte buffer to `out_path` via the
+/// host `gzip -9 -n` (identical bytes to the scripts' compressor). Staged to a
+/// temp file to avoid a producer/consumer pipe deadlock on large inputs.
+pub fn gzip_to(combined: &[u8], out_path: &Path) -> std::io::Result<()> {
     let tmp = out_path.with_extension("cpio.tmp");
-    fs::write(&tmp, &combined)?;
+    fs::write(&tmp, combined)?;
     let in_file = fs::File::open(&tmp)?;
     let out_file = fs::File::create(out_path)?;
     let status = std::process::Command::new("gzip")

@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 use crate::artifact;
 use crate::compose;
 use crate::cpio;
+use crate::engine;
 
 // ---- pins (mirror bake-stack.sh + build_rootfs.sh) -------------------------
 
@@ -81,6 +82,17 @@ pub struct BuildArgs {
     /// Bypass the content-hash bake cache: force a full rebuild (still stores the
     /// result so later cached runs can hit). Nightly `bake_repeat` uses this.
     pub no_cache: bool,
+    /// Cache directory override (Fable Part A). Precedence: this > `DVMM_CACHE_DIR`
+    /// > `$HOME/.dvmm`. `None` falls through to env/default.
+    pub cache_dir: Option<String>,
+}
+
+/// `dvmm build-kernel` args.
+pub struct BuildKernelArgs {
+    pub out: Option<String>,
+    pub cache_dir: Option<String>,
+    pub force_build: bool,
+    pub record: bool,
 }
 
 // ============================================================================
@@ -120,18 +132,11 @@ fn run(cmd: &mut Command) -> Result<(), String> {
     Ok(())
 }
 
-/// A podman invocation against a scratch vfs store (mirrors `bp()`), with the
-/// clean CONTAINERS_CONF set.
+/// A container-engine invocation against a scratch vfs store (mirrors `bp()`),
+/// with the clean CONTAINERS_CONF set. Routes through the single engine choke
+/// point (Fable guardrail §2).
 fn podman(store: &Path, runroot: &Path, conf: &Path) -> Command {
-    let mut c = Command::new("podman");
-    c.env("CONTAINERS_CONF", conf)
-        .arg("--root")
-        .arg(store)
-        .arg("--runroot")
-        .arg(runroot)
-        .arg("--storage-driver")
-        .arg("vfs");
-    c
+    engine::scratch(store, runroot, conf)
 }
 
 fn sha256_file_hex(path: &Path) -> std::io::Result<String> {
@@ -214,6 +219,25 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     eprintln!("== dvmm build: stack={stack_name} project={project} mem={mem_mib}MiB ==");
     eprintln!("   compose: {}", compose_path.display());
 
+    // --- cache dir (Fable Part A): --cache-dir > $DVMM_CACHE_DIR > $HOME/.dvmm ---
+    let (cache_dir, cache_src) = resolve_cache_dir(args.cache_dir.as_deref());
+    eprintln!("   cache-dir: {} (source: {cache_src})", cache_dir.display());
+
+    // --- kernel (Fable Part C): fetch the pinned release asset, else reproducibly
+    //     build it in the pinned container; verified against kernel.lock. Done
+    //     BEFORE the cache key so the kernel bytes are a present, hashable input. ---
+    let repo_root = here
+        .parent()
+        .ok_or("could not locate the repo root above guest/")?
+        .to_path_buf();
+    let kernel = ensure_kernel(&here, &cache_dir, false)?;
+
+    // --- builder-image pins (Fable Part B): the DECLARED, host-identical toolchain
+    //     anchors that REPLACE the host-probed `podman --version` in both the hashed
+    //     artifact bytes and the cache key. Sorted for order-stability. ---
+    let builders = collect_builder_pins(&repo_root, &here)?;
+    eprintln!("   builders: {}", builders.join(" "));
+
     // Output destinations (needed early so a cache HIT can restore them). The `-o`
     // path is NOT part of the cache key: identical inputs bake identical bytes
     // regardless of where they land.
@@ -229,13 +253,14 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     // The key covers EVERY input that affects the output bytes: the whole compose
     // dir tree (compose.yml + build contexts + bind sources + service source,
     // excluding this bake's own committed outputs), the kernel, the agent source,
-    // the guest overlay tree, the pinned compose engine, the host podman
-    // toolchain, the dvmm binary itself (all compiled-in pins + bake logic), and
-    // the sizing knobs. `dvmm build` is deterministic (artifact_test gate 1), so a
-    // hit reusing the prior `.dvmm` is byte-identical to a fresh bake.
+    // the guest overlay tree, the pinned compose engine, the DECLARED builder-image
+    // digests (Fable Part B — replacing the host-probed podman version, which is
+    // gone), the dvmm binary itself (all compiled-in pins + bake logic), and the
+    // sizing knobs. `dvmm build` is deterministic (artifact_test gate 1), so a hit
+    // reusing the prior `.dvmm` is byte-identical to a fresh bake.
     let cache = match compute_cache_key(
         &self_exe, &here, &alpine_dir, &compose_dir, &stack_name, mem_mib, working_set_mib,
-        squash_threshold_mib,
+        squash_threshold_mib, &cache_dir, &kernel, &builders,
     ) {
         Ok(c) => Some(c),
         Err(e) => {
@@ -266,11 +291,15 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     let work = mkdtemp()?;
     let conf = work.join("containers.conf");
     std::fs::write(&conf, "[engine]\n")?;
-    let podman_version = capture(Command::new("podman").arg("--version"))?
-        .split_whitespace()
-        .nth(2)
-        .unwrap_or("")
-        .to_string();
+
+    // Host-probed engine version — Fable guardrail §3: it must NOT enter the hashed
+    // artifact bytes OR the cache key (it breaks cross-host byte-identity). It is
+    // captured for DEBUGGING ONLY and written to a side diagnostics file under the
+    // (disposable) cache dir — never into the .dvmm, the manifest, or stack.lock.
+    let host_podman_version = capture(engine::command().arg("--version"))
+        .ok()
+        .and_then(|s| s.split_whitespace().nth(2).map(|v| v.to_string()))
+        .unwrap_or_default();
 
     eprintln!("   images: {}", validated.images.join(" "));
     if !validated.builds.is_empty() {
@@ -326,9 +355,7 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     };
     let seed_cfg_path = work.join("seed-config.json");
     std::fs::write(&seed_cfg_path, serde_json::to_vec(&seed_cfg)?)?;
-    run(Command::new("podman")
-        .env("CONTAINERS_CONF", &conf)
-        .arg("unshare")
+    run(engine::unshare(&conf)
         .arg(&self_exe)
         .arg("__seed-build")
         .arg("--config")
@@ -417,6 +444,27 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
         &compose_sha256,
     )?;
 
+    // --- Fable Part D: the shared base-runtime segment cache. Keyed on DECLARED
+    //     base pins only (Alpine + package set + overlay + agent + compose engine +
+    //     epoch + self-test pin) — NOT the stack. A hit lets `__assemble` skip the
+    //     apk install/overlay entirely and reuse the cached cpio segment. --no-cache
+    //     forces a base rebuild (still stored). ---
+    let base_key = compute_base_key(&alpine_dir, &agent_sha, &compose_version, &compose_sha256, &selftest_pin);
+    let base_entry = cache_dir.join("base-runtime").join(&base_key);
+    let base_seg_cached = base_entry.join("base.cpio");
+    let base_pl_cached = base_entry.join("packages.lock");
+    let base_hit = !args.no_cache && base_seg_cached.is_file();
+    if base_hit {
+        eprintln!("== base-runtime cache HIT ==  key={} ({})", &base_key[..16], base_entry.display());
+    } else if args.no_cache {
+        eprintln!("== base-runtime cache BYPASSED (--no-cache) ==  key={}", &base_key[..16]);
+    } else {
+        eprintln!("== base-runtime cache MISS ==  key={} (building base layer)", &base_key[..16]);
+    }
+    // MISS: __assemble writes the fresh base segment to work/base.cpio; the host
+    // stores it after the unshare. HIT: __assemble reads the cached segment.
+    let base_segment = if base_hit { base_seg_cached.clone() } else { work.join("base.cpio") };
+
     let assemble_cfg = AssembleConfig {
         conf: conf.clone(),
         work: work.clone(),
@@ -437,29 +485,39 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
         stack_mem: mem_mib,
         out: out_initramfs.clone(),
         packages_lock_out: alpine_dir.join("packages.lock"),
+        base_hit,
+        base_segment: base_segment.clone(),
+        base_packages_lock: base_pl_cached.clone(),
     };
     let assemble_cfg_path = work.join("assemble-config.json");
     std::fs::write(&assemble_cfg_path, serde_json::to_vec(&assemble_cfg)?)?;
-    run(Command::new("podman")
-        .env("CONTAINERS_CONF", &conf)
-        .arg("unshare")
+    run(engine::unshare(&conf)
         .arg(&self_exe)
         .arg("__assemble-initramfs")
         .arg("--config")
         .arg(&assemble_cfg_path))?;
 
+    // MISS: store the freshly-emitted base segment (+ its package set) for reuse.
+    if !base_hit {
+        if let Err(e) = base_cache_store(&base_entry, &base_segment, &alpine_dir.join("packages.lock")) {
+            eprintln!("{}: could not populate base-runtime cache ({e})", compose::WARN);
+        } else {
+            eprintln!("   base cached: {} (key {})", base_entry.display(), &base_key[..16]);
+        }
+    }
+
     let art_sha = sha256_file_hex(&out_initramfs)?;
 
-    // --- 7. write stack.lock (the reproducibility ledger) ---
-    write_stack_lock(&here, &stack_name, &project, mem_mib, est_mib, &lock_sha, &art_sha, &agent_sha, &out_initramfs, &records, &plain_refs, &plain_pin, &seedpins, &validated, &podman_version)?;
+    // --- 7. write stack.lock (the reproducibility ledger — declared inputs only,
+    //        NO host-probed values; Fable guardrail §3) ---
+    write_stack_lock(&here, &stack_name, &project, mem_mib, est_mib, &lock_sha, &art_sha, &agent_sha, &out_initramfs, &records, &plain_refs, &plain_pin, &seedpins, &validated, &builders)?;
 
     // stash the emitted lock next to the manifest.
     std::fs::copy(&lock_path, &committed_lock)?;
 
     // --- 8. pack the single-file .dvmm artifact ---
     eprintln!("== pack .dvmm artifact ==");
-    let kernel = here.join("kernel/vmlinux-6.1.128");
-    let dvmm_bytes = pack_dvmm(&self_exe, &records, &compose_version, &compose_sha256, &stack_name, &project, mem_mib, est_mib, &podman_version, &agent_sha, &agent_build_hash, &kernel, &out_initramfs, &lock_path)?;
+    let dvmm_bytes = pack_dvmm(&self_exe, &records, &compose_version, &compose_sha256, &stack_name, &project, mem_mib, est_mib, &builders, &agent_sha, &agent_build_hash, &kernel, &out_initramfs, &lock_path)?;
     std::fs::write(&out_dvmm, &dvmm_bytes)?;
     let dvmm_sha = artifact::sha256_hex(&dvmm_bytes);
     // append the artifact identity to the ledger.
@@ -482,8 +540,34 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
         }
     }
 
+    // --- 10. side diagnostics (Fable guardrail §3): host-probed values live ONLY
+    //         here, never in the artifact or the cache key. Disposable. ---
+    write_bake_diagnostics(&cache_dir, &stack_name, &host_podman_version, &builders);
+
     let _ = std::fs::remove_dir_all(&work);
     Ok(0)
+}
+
+/// Write host-probed bake diagnostics to a side file under the (disposable) cache
+/// dir. NOTHING here enters the `.dvmm` bytes or the bake cache key — it exists
+/// purely so a human can see which host engine produced a given local build.
+fn write_bake_diagnostics(cache_dir: &Path, stack: &str, podman_version: &str, builders: &[String]) {
+    let dir = cache_dir.join("diagnostics");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return; // best-effort only
+    }
+    let body = format!(
+        "# dvmm bake diagnostics (host-probed; NOT in the artifact or cache key)\n\
+         stack: {stack}\n\
+         host_podman_version: {podman_version}\n\
+         baked_at: {}\n\
+         builder_images:\n{}\n",
+        utc_now_iso(),
+        builders.iter().map(|b| format!("  - {b}")).collect::<Vec<_>>().join("\n"),
+    );
+    let path = dir.join(format!("{stack}.txt"));
+    let _ = std::fs::write(&path, body);
+    eprintln!("   diagnostics: {} (host-probed, not hashed)", path.display());
 }
 
 /// Resolve the repo `guest/` directory relative to the running binary (target/…).
@@ -740,7 +824,7 @@ fn build_agent(here: &Path, out: &Path) -> Result<String, Box<dyn std::error::Er
             --target x86_64-unknown-linux-musl --locked && \
         cp /work/target/x86_64-unknown-linux-musl/agent-release/dvmm-agent /work/dvmm-agent";
 
-    run(Command::new("podman")
+    run(engine::command()
         .env("CONTAINERS_CONF", &conf)
         .arg("run")
         .arg("--rm")
@@ -814,6 +898,364 @@ fn read_compose_lock(alpine_dir: &Path) -> Result<(String, String), Box<dyn std:
 }
 
 // ============================================================================
+// builder-image pins (Fable Part B) — the DECLARED, host-identical toolchain
+// anchors that go into the hashed manifest + the cache key (replacing the
+// host-probed podman version). Sorted for order-stability.
+// ============================================================================
+
+/// The pinned builder-image refs (`image@sha256`) for the guest binaries: the
+/// musl agent builder (`dvmm-agent/images.lock`) + the kernel builder
+/// (`guest/kernel/kernel.lock`). Sorted.
+fn collect_builder_pins(
+    repo_root: &Path,
+    here: &Path,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let (aimg, adig) = read_builder_pin(repo_root)?;
+    let kl = read_kernel_lock(here)?;
+    if kl.builder_digest.is_empty() {
+        return Err(
+            "kernel.lock has no BUILDER_DIGEST; run `dvmm build-kernel --record` first".into(),
+        );
+    }
+    let mut v = vec![
+        format!("{aimg}@{adig}"),
+        format!("{}@{}", kl.builder_image, kl.builder_digest),
+    ];
+    v.sort();
+    Ok(v)
+}
+
+// ============================================================================
+// kernel (Fable Part C) — reproducible containerized build + fetch-with-fallback
+//
+// The guest kernel is acquired EITHER by fetching the pinned GitHub release asset
+// (PRIMARY, sha256-verified against kernel.lock) OR by a reproducible build inside
+// the pinned builder container (FALLBACK). Both paths MUST yield the byte-identical
+// vmlinux recorded in kernel.lock. No host kernel toolchain is required.
+// ============================================================================
+
+/// The kernel config baked into the guest (Firecracker microvm config, HPET off,
+/// all built-in). Lives in `guest/kernel/`; hashed into kernel.lock.
+const KERNEL_CONFIG_NAME: &str = "microvm-kernel-x86_64-6.1.config";
+
+/// The reproducibility ledger for the guest kernel (`guest/kernel/kernel.lock`).
+/// Empty `sha256`/`source_sha256`/`builder_digest` mean "not yet recorded" — the
+/// `--record` bootstrap fills them.
+#[derive(Default, Clone)]
+struct KernelLock {
+    version: String,
+    sha256: String,
+    config_sha256: String,
+    source_url: String,
+    source_sha256: String,
+    builder_image: String,
+    builder_digest: String,
+    release_asset_url: String,
+    release_asset_name: String,
+}
+
+fn kernel_lock_path(here: &Path) -> PathBuf {
+    here.join("kernel/kernel.lock")
+}
+
+fn read_kernel_lock(here: &Path) -> Result<KernelLock, Box<dyn std::error::Error>> {
+    let path = kernel_lock_path(here);
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("reading {}: {e} (run `dvmm build-kernel --record`)", path.display()))?;
+    let mut k = KernelLock::default();
+    for line in text.lines() {
+        let l = line.trim();
+        if l.is_empty() || l.starts_with('#') {
+            continue;
+        }
+        let Some((key, val)) = l.split_once('=') else { continue };
+        let val = val.trim().to_string();
+        match key.trim() {
+            "KERNEL_VERSION" => k.version = val,
+            "KERNEL_SHA256" => k.sha256 = val,
+            "KERNEL_CONFIG_SHA256" => k.config_sha256 = val,
+            "KERNEL_SOURCE_URL" => k.source_url = val,
+            "KERNEL_SOURCE_SHA256" => k.source_sha256 = val,
+            "BUILDER_IMAGE" => k.builder_image = val,
+            "BUILDER_DIGEST" => k.builder_digest = val,
+            "RELEASE_ASSET_URL" => k.release_asset_url = val,
+            "RELEASE_ASSET_NAME" => k.release_asset_name = val,
+            _ => {}
+        }
+    }
+    if k.version.is_empty() {
+        return Err(format!("{} missing KERNEL_VERSION", path.display()).into());
+    }
+    Ok(k)
+}
+
+fn write_kernel_lock(here: &Path, k: &KernelLock) -> Result<(), Box<dyn std::error::Error>> {
+    let body = format!(
+        "# deterministic-vmm guest kernel pin (Fable Part C).\n\
+         #\n\
+         # The guest vmlinux is acquired EITHER by fetching the pinned GitHub release\n\
+         # asset (PRIMARY, verified against KERNEL_SHA256) OR by a reproducible build in\n\
+         # the pinned builder container (FALLBACK, also verified). Both paths yield the\n\
+         # byte-identical kernel recorded here. No host kernel toolchain is required.\n\
+         #\n\
+         # Regenerate with:  dvmm build-kernel --record\n\
+         KERNEL_VERSION={}\n\
+         KERNEL_SHA256={}\n\
+         KERNEL_CONFIG_SHA256={}\n\
+         KERNEL_SOURCE_URL={}\n\
+         KERNEL_SOURCE_SHA256={}\n\
+         BUILDER_IMAGE={}\n\
+         BUILDER_DIGEST={}\n\
+         RELEASE_ASSET_URL={}\n\
+         RELEASE_ASSET_NAME={}\n",
+        k.version, k.sha256, k.config_sha256, k.source_url, k.source_sha256,
+        k.builder_image, k.builder_digest, k.release_asset_url, k.release_asset_name,
+    );
+    std::fs::write(kernel_lock_path(here), body)?;
+    Ok(())
+}
+
+/// Ensure the guest kernel is present at `guest/kernel/vmlinux-<version>` and
+/// matches kernel.lock. PRIMARY: fetch the pinned release asset (sha-verified).
+/// FALLBACK: reproducible container build (sha-verified). Returns the path.
+fn ensure_kernel(
+    here: &Path,
+    cache_dir: &Path,
+    force_build: bool,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let kl = read_kernel_lock(here)?;
+    let out = here.join(format!("kernel/vmlinux-{}", kl.version));
+    if kl.sha256.is_empty() {
+        return Err(
+            "kernel.lock has no KERNEL_SHA256; run `dvmm build-kernel --record` first".into(),
+        );
+    }
+
+    // Already present + verified? (the common case for every bake after the first.)
+    if !force_build && out.exists() {
+        if let Ok(got) = sha256_file_hex(&out) {
+            if got == kl.sha256 {
+                eprintln!("   kernel: {} (present, sha256 verified)", out.display());
+                return Ok(out);
+            }
+            eprintln!(
+                "{}: kernel at {} sha256 {} != kernel.lock {}; re-acquiring",
+                compose::WARN, out.display(), &got[..16], &kl.sha256[..16]
+            );
+        }
+    }
+
+    // PRIMARY: pinned release asset.
+    if !force_build && !kl.release_asset_url.is_empty() {
+        eprintln!("   kernel: fetching pinned release asset {} ...", kl.release_asset_url);
+        let _ = std::fs::remove_file(&out);
+        match fetch_verify(&out, &kl.release_asset_url, &kl.sha256) {
+            Ok(()) => {
+                eprintln!("   kernel: fetched + sha256 verified from release");
+                return Ok(out);
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&out);
+                eprintln!(
+                    "{}: release fetch failed ({e}); falling back to reproducible container build",
+                    compose::WARN
+                );
+            }
+        }
+    }
+
+    // FALLBACK: reproducible container build.
+    build_kernel_container(here, cache_dir, &kl, &out)?;
+    let got = sha256_file_hex(&out)?;
+    if got != kl.sha256 {
+        return Err(format!(
+            "container-built kernel sha256 {got} != kernel.lock {}; the build is not reproducing \
+             the recorded kernel (re-run `dvmm build-kernel --record` if inputs changed)",
+            kl.sha256
+        )
+        .into());
+    }
+    eprintln!("   kernel: container build sha256 verified against kernel.lock");
+    Ok(out)
+}
+
+/// Reproducibly build vmlinux inside the pinned builder container (no host kernel
+/// toolchain). Faithfully ports `build_kernel.sh` — including the `-std=gnu11` CC
+/// wrapper — with build_agent's determinism knobs (pinned image, SOURCE_DATE_EPOCH,
+/// fixed KBUILD_BUILD_* + build-id). Source is fetched+verified on the host and
+/// bind-mounted; the compiler is pinned by the image digest.
+fn build_kernel_container(
+    here: &Path,
+    cache_dir: &Path,
+    kl: &KernelLock,
+    out: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if kl.builder_digest.is_empty() {
+        return Err("kernel.lock has no BUILDER_DIGEST; run `dvmm build-kernel --record`".into());
+    }
+    let img_ref = format!("{}@{}", kl.builder_image, kl.builder_digest);
+    eprintln!("   kernel: reproducible container build in {img_ref}");
+
+    // 1. source tarball: fetch + verify on the host, cached in the cache dir.
+    let src_dir = cache_dir.join("kernel-src");
+    std::fs::create_dir_all(&src_dir)?;
+    let tarball = src_dir.join(format!("linux-{}.tar.xz", kl.version));
+    if kl.source_sha256.is_empty() {
+        // --record bootstrap: fetch without a pre-known sha (recorded afterwards).
+        if !tarball.exists() {
+            eprintln!("downloading {} ...", kl.source_url);
+            run(Command::new("curl").args(["-sSL", "-o"]).arg(&tarball).arg(&kl.source_url))?;
+        }
+    } else {
+        fetch_verify(&tarball, &kl.source_url, &kl.source_sha256)?;
+    }
+
+    // 2. runc conf (host default runtime is misconfigured — Fable host fact) + work.
+    let confdir = mkdtemp()?;
+    let conf = confdir.join("containers.conf");
+    std::fs::write(&conf, "[engine]\nruntime=\"runc\"\n")?;
+    let work = mkdtemp()?;
+    let config_src = here.join("kernel").join(KERNEL_CONFIG_NAME);
+
+    // 3. the in-container build script — a faithful port of build_kernel.sh with
+    //    reproducibility knobs. KBUILD_BUILD_TIMESTAMP/USER/HOST + SOURCE_DATE_EPOCH
+    //    + no build-id pin every timestamp/identity that would otherwise leak.
+    let ver = &kl.version;
+    let script = format!(
+        "set -e\n\
+         export DEBIAN_FRONTEND=noninteractive\n\
+         apt-get update -qq\n\
+         apt-get install -y --no-install-recommends build-essential bc bison flex libelf-dev libssl-dev xz-utils >/dev/null\n\
+         cd /work\n\
+         tar -xf /src/linux-{ver}.tar.xz\n\
+         cd linux-{ver}\n\
+         # Modern GCC defaults to C23 (bool/true/false keywords); Linux 6.1's real-\n\
+         # mode boot stub predates that. Force -std=gnu11 for EVERY TU via a CC wrapper\n\
+         # (build_kernel.sh parity), so the build works regardless of the image's GCC.\n\
+         printf '#!/bin/sh\\nexec gcc -std=gnu11 \"$@\"\\n' > .cc-gnu11\n\
+         chmod +x .cc-gnu11\n\
+         cp /config .config\n\
+         make CC=$PWD/.cc-gnu11 olddefconfig\n\
+         make -j\"$(nproc)\" CC=$PWD/.cc-gnu11 vmlinux\n\
+         cp vmlinux /work/vmlinux-out\n"
+    );
+
+    // 4. run. Fixed build identity for byte-reproducibility.
+    let ts = "Thu Jan  1 00:00:00 UTC 1970"; // stable KBUILD banner timestamp
+    run(engine::command()
+        .env("CONTAINERS_CONF", &conf)
+        .arg("run")
+        .arg("--rm")
+        .arg("-v")
+        .arg(format!("{}:/src:ro", src_dir.display()))
+        .arg("-v")
+        .arg(format!("{}:/config:ro", config_src.display()))
+        .arg("-v")
+        .arg(format!("{}:/work", work.display()))
+        .arg("-e")
+        .arg(format!("SOURCE_DATE_EPOCH={BUILD_EPOCH}"))
+        .arg("-e")
+        .arg(format!("KBUILD_BUILD_TIMESTAMP={ts}"))
+        .arg("-e")
+        .arg("KBUILD_BUILD_USER=dvmm")
+        .arg("-e")
+        .arg("KBUILD_BUILD_HOST=dvmm")
+        .arg("-e")
+        .arg("KCONFIG_NOTIMESTAMP=1")
+        .arg(&img_ref)
+        .args(["sh", "-c", &script]))?;
+
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::copy(work.join("vmlinux-out"), out)
+        .map_err(|e| format!("kernel build produced no vmlinux: {e}"))?;
+    let _ = std::fs::remove_dir_all(&work);
+    let _ = std::fs::remove_dir_all(&confdir);
+    Ok(())
+}
+
+/// Resolve an image's pinned digest by pulling the ref and reading RepoDigests.
+fn resolve_image_digest(image: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let confdir = mkdtemp()?;
+    let conf = confdir.join("containers.conf");
+    std::fs::write(&conf, "[engine]\nruntime=\"runc\"\n")?;
+    run(engine::command().env("CONTAINERS_CONF", &conf).args(["pull", "-q", image]))?;
+    let repo = image.split(':').next().unwrap_or(image);
+    let digests = capture(engine::command().env("CONTAINERS_CONF", &conf).args([
+        "image", "inspect", image, "--format", "{{range .RepoDigests}}{{println .}}{{end}}",
+    ]))?;
+    let _ = std::fs::remove_dir_all(&confdir);
+    let pin = digests
+        .lines()
+        .find(|l| l.starts_with(&format!("{repo}@")))
+        .and_then(|l| l.split_once('@').map(|(_, d)| d.to_string()))
+        .ok_or_else(|| format!("could not resolve a digest for {image}"))?;
+    Ok(pin)
+}
+
+/// `dvmm build-kernel`: acquire the pinned kernel (fetch/fallback), or `--record`
+/// to bootstrap kernel.lock from a fresh reproducible container build.
+pub fn cmd_build_kernel(args: BuildKernelArgs) -> Result<i32, Box<dyn std::error::Error>> {
+    let here = self_here()?;
+    let (cache_dir, cache_src) = resolve_cache_dir(args.cache_dir.as_deref());
+    eprintln!("== dvmm build-kernel ==  cache-dir: {} (source: {cache_src})", cache_dir.display());
+
+    if args.record {
+        // Bootstrap/update kernel.lock: resolve digests, container-build, record.
+        let mut kl = read_kernel_lock(&here).unwrap_or_default();
+        if kl.version.is_empty() {
+            return Err(
+                "guest/kernel/kernel.lock must exist with at least KERNEL_VERSION + \
+                 KERNEL_SOURCE_URL + BUILDER_IMAGE + RELEASE_ASSET_URL before --record".into(),
+            );
+        }
+        // config sha (declared input).
+        kl.config_sha256 = sha256_file_hex(&here.join("kernel").join(KERNEL_CONFIG_NAME))?;
+        // resolve the builder image digest if not pinned yet.
+        if kl.builder_digest.is_empty() {
+            eprintln!("   resolving builder image digest for {} ...", kl.builder_image);
+            kl.builder_digest = resolve_image_digest(&kl.builder_image)?;
+        }
+        // fetch source (record its sha), then container-build.
+        let out = args
+            .out
+            .clone()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| here.join(format!("kernel/vmlinux-{}", kl.version)));
+        build_kernel_container(&here, &cache_dir, &kl, &out)?;
+        // record source + kernel shas.
+        let tarball = cache_dir.join("kernel-src").join(format!("linux-{}.tar.xz", kl.version));
+        kl.source_sha256 = sha256_file_hex(&tarball)?;
+        kl.sha256 = sha256_file_hex(&out)?;
+        write_kernel_lock(&here, &kl)?;
+        eprintln!("== kernel.lock RECORDED ==");
+        eprintln!("   KERNEL_SHA256={}", kl.sha256);
+        eprintln!("   KERNEL_SOURCE_SHA256={}", kl.source_sha256);
+        eprintln!("   BUILDER_DIGEST={}", kl.builder_digest);
+        eprintln!("   CONFIG_SHA256={}", kl.config_sha256);
+        println!("{}  {}", kl.sha256, out.display());
+        return Ok(0);
+    }
+
+    let out = ensure_kernel(&here, &cache_dir, args.force_build)?;
+    // If a custom -o was requested, copy the acquired kernel there too.
+    if let Some(o) = &args.out {
+        let op = PathBuf::from(o);
+        if op != out {
+            if let Some(parent) = op.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(&out, &op)?;
+        }
+    }
+    let sha = sha256_file_hex(&out)?;
+    eprintln!("== kernel ready ==  {} (sha256 {sha})", out.display());
+    println!("{sha}  {}", out.display());
+    Ok(0)
+}
+
+// ============================================================================
 // stack.lock ledger (mirror bake-stack.sh)
 // ============================================================================
 
@@ -833,7 +1275,7 @@ fn write_stack_lock(
     _plain_pin: &HashMap<String, String>,
     seedpins: &HashMap<String, String>,
     validated: &compose::Validated,
-    podman_version: &str,
+    builders: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path = here.join("stacks").join(stack).join("stack.lock");
     let mut prov: Vec<String> = Vec::new();
@@ -892,12 +1334,19 @@ fn write_stack_lock(
     out.push_str(&format!("initramfs_sha256     {art_sha}  {}\n", out_initramfs.file_name().unwrap().to_string_lossy()));
     // The reproducible guest control-channel agent's own line (Fable §2).
     out.push_str(&format!("agent_sha256         {agent_sha}  dvmm-agent\n"));
+    // Declared, host-identical builder-image pins (Fable Part B). These REPLACE the
+    // old host-probed `# podman-version` line, which is gone from the ledger (it is
+    // diagnostics-only now); every line here is reproducible across hosts, so they
+    // ARE part of the compared/repeatable portion.
+    for b in builders {
+        out.push_str(&format!("builder_image        {b}\n"));
+    }
     for line in &prov {
         out.push_str(&format!("  {line}\n"));
     }
     out.push_str("# --- informational (NOT compared for repeatability) ---\n");
-    out.push_str(&format!("# podman-version: {podman_version}\n"));
-    out.push_str(&format!("# baked-at: {}\n", utc_now_iso()));
+    out.push_str("# host-probed values (podman version, baked-at) are written to the\n");
+    out.push_str("# cache dir's diagnostics/ side file, NEVER here (Fable guardrail §3).\n");
     std::fs::write(&path, out)?;
     Ok(())
 }
@@ -951,7 +1400,7 @@ fn pack_dvmm(
     project: &str,
     mem_mib: u64,
     est_mib: u64,
-    podman_version: &str,
+    builders: &[String],
     agent_sha: &str,
     agent_build_hash: &str,
     kernel_path: &Path,
@@ -992,7 +1441,7 @@ fn pack_dvmm(
             },
             images,
             toolchain: artifact::Toolchain {
-                podman: podman_version.to_string(),
+                builders: builders.to_vec(),
                 alpine: ALPINE_VER.to_string(),
                 compose: compose_version.to_string(),
             },
@@ -1040,15 +1489,8 @@ struct SeedConfig {
 pub fn cmd_seed_build(config: &str) -> Result<i32, Box<dyn std::error::Error>> {
     let cfg: SeedConfig = serde_json::from_slice(&std::fs::read(config)?)?;
     let sp = |args: &[&str]| -> Command {
-        let mut c = Command::new("podman");
-        c.env("CONTAINERS_CONF", &cfg.conf)
-            .arg("--root")
-            .arg(&cfg.store)
-            .arg("--runroot")
-            .arg(&cfg.runroot)
-            .arg("--storage-driver")
-            .arg("vfs")
-            .args(args);
+        let mut c = engine::scratch(&cfg.store, &cfg.runroot, &cfg.conf);
+        c.args(args);
         c
     };
     for reff in &cfg.plains {
@@ -1098,15 +1540,28 @@ struct AssembleConfig {
     stack_mem: u64,
     out: PathBuf,
     packages_lock_out: PathBuf,
+    // --- Fable Part D: shared base-runtime cpio segment ---
+    /// True when the base runtime segment (Alpine + podman/crun/... + agent +
+    /// compose) is already cached: skip the expensive base BUILD and reuse the
+    /// cached segment. False forces a full base build (also stored, for later).
+    base_hit: bool,
+    /// Base segment path. HIT: the cached `base.cpio` to READ. MISS: where to WRITE
+    /// the freshly-emitted base segment (the host then stores it to the cache).
+    base_segment: PathBuf,
+    /// On a HIT, the cached `packages.lock` to restore (the base's package set is
+    /// stack-independent, so it is part of the base segment's cache entry).
+    base_packages_lock: PathBuf,
 }
 
-pub fn cmd_assemble_initramfs(config: &str) -> Result<i32, Box<dyn std::error::Error>> {
-    let cfg: AssembleConfig = serde_json::from_slice(&std::fs::read(config)?)?;
-    let rootfs = cfg.work.join("rootfs");
-    std::fs::create_dir_all(&rootfs)?;
+/// Build the BASE runtime tree (Fable Part D): Alpine minirootfs + the pinned
+/// container stack (apk) + overlay + compose CLI + agent + fixed epoch/self-test
+/// ref, MINUS every stack-specific path. This is the expensive, stack-independent
+/// layer whose emitted cpio segment is cached and reused across stacks.
+fn assemble_base_tree(cfg: &AssembleConfig, rootfs: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    std::fs::create_dir_all(rootfs)?;
 
     // 1. extract the pinned minirootfs.
-    run(Command::new("tar").arg("-C").arg(&rootfs).arg("-xzf").arg(&cfg.tarball))?;
+    run(Command::new("tar").arg("-C").arg(rootfs).arg("-xzf").arg(&cfg.tarball))?;
 
     // 2. apk config: pinned branch + a resolver for the one-time install.
     std::fs::create_dir_all(rootfs.join("etc/apk"))?;
@@ -1117,16 +1572,16 @@ pub fn cmd_assemble_initramfs(config: &str) -> Result<i32, Box<dyn std::error::E
     std::fs::write(rootfs.join("etc/resolv.conf"), "nameserver 1.1.1.1\nnameserver 8.8.8.8\n")?;
 
     // 3. install the pinned container stack (chroot works: CAP_SYS_CHROOT in userns).
-    run(Command::new("chroot").arg(&rootfs).args(["/sbin/apk", "update"]))?;
+    run(Command::new("chroot").arg(rootfs).args(["/sbin/apk", "update"]))?;
     let mut add = Command::new("chroot");
-    add.arg(&rootfs).args(["/sbin/apk", "add", "--no-progress"]);
+    add.arg(rootfs).args(["/sbin/apk", "add", "--no-progress"]);
     for p in &cfg.pkgs {
         add.arg(p);
     }
     run(&mut add)?;
 
     // record the FULL resolved version set (top-level + deps).
-    let listing = capture(Command::new("chroot").arg(&rootfs).args(["/sbin/apk", "list", "-I"]))?;
+    let listing = capture(Command::new("chroot").arg(rootfs).args(["/sbin/apk", "list", "-I"]))?;
     let mut pkgs: Vec<&str> = listing.lines().filter_map(|l| l.split_whitespace().next()).collect();
     pkgs.sort_unstable();
     let packages_lock = format!("{}\n", pkgs.join("\n"));
@@ -1147,12 +1602,37 @@ pub fn cmd_assemble_initramfs(config: &str) -> Result<i32, Box<dyn std::error::E
     // 4c. bake the control-channel agent.
     run(Command::new("install").args(["-D", "-m", "0755"]).arg(&cfg.agent_bin).arg(rootfs.join("usr/local/bin/dvmm-agent")))?;
 
-    // 5. fixed clock epoch + self-test image ref.
+    // 5. fixed clock epoch + self-test image ref (both stack-independent = base).
     std::fs::write(rootfs.join("etc/dvmm-build-epoch"), format!("{}\n", cfg.build_epoch))?;
     std::fs::write(rootfs.join("etc/dvmm-image-ref"), format!("{}\n", cfg.selftest_image_ref))?;
 
-    // 5b. STACK mode: compose.lock + materialized binds + pinned project.
-    std::fs::create_dir_all(rootfs.join("var/lib/dvmm-stack/binds"))?;
+    // 7. trim install-time cruft that would only bloat RAM (base part).
+    let _ = remove_glob(&rootfs.join("var/cache/apk"));
+    let _ = std::fs::remove_file(rootfs.join("etc/resolv.conf"));
+    let _ = std::fs::remove_dir_all(rootfs.join("root/.config/containers"));
+    std::fs::write(rootfs.join("etc/resolv.conf"), "")?; // empty mount target
+
+    // 7a. zero base lock files (apk db lock, etc — random per-writer tokens).
+    truncate_locks(rootfs)?;
+    Ok(())
+}
+
+/// Build the STACK-specific tree (Fable Part D) in a dedicated dir: ONLY the
+/// per-stack paths — the seed image store, the compose.lock + materialized binds,
+/// and the stack env files. Its emitted cpio segment is concatenated AFTER the
+/// (possibly cached) base segment; on extraction the two segments merge into the
+/// same rootfs. Built identically whether or not the base was a cache hit, so the
+/// final initramfs is byte-identical either way.
+fn assemble_stack_tree(cfg: &AssembleConfig, rootfs: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    std::fs::create_dir_all(rootfs)?;
+
+    // Scaffolding dirs (explicit 0755 so modes never vary with the ambient umask).
+    for d in ["var", "var/lib", "etc", "var/lib/dvmm-stack", "var/lib/dvmm-stack/binds", "var/lib/containers-seed"] {
+        std::fs::create_dir_all(rootfs.join(d))?;
+        run(Command::new("chmod").arg("0755").arg(rootfs.join(d)))?;
+    }
+
+    // compose.lock + materialized binds + pinned project.
     std::fs::copy(&cfg.stack_lock, rootfs.join("var/lib/dvmm-stack/compose.lock.yml"))?;
     run(Command::new("chmod").arg("0644").arg(rootfs.join("var/lib/dvmm-stack/compose.lock.yml")))?;
     if cfg.stack_binds.is_dir() {
@@ -1167,30 +1647,53 @@ pub fn cmd_assemble_initramfs(config: &str) -> Result<i32, Box<dyn std::error::E
     std::fs::write(rootfs.join("etc/dvmm-stack-project"), format!("{}\n", cfg.stack_project))?;
     std::fs::write(rootfs.join("etc/dvmm-stack-mem"), format!("{}\n", cfg.stack_mem))?;
 
-    // 6. seed store: the pre-baked image graph the guest copies into its tmpfs.
-    std::fs::create_dir_all(rootfs.join("var/lib/containers-seed"))?;
+    // the seed store: the pre-baked image graph the guest copies into its tmpfs.
     run(Command::new("cp").arg("-a").arg(&cfg.seed_storage).arg(rootfs.join("var/lib/containers-seed/storage")))?;
 
-    // 7. trim install-time cruft that would only bloat RAM.
-    let _ = remove_glob(&rootfs.join("var/cache/apk"));
-    let _ = std::fs::remove_file(rootfs.join("etc/resolv.conf"));
-    let _ = std::fs::remove_dir_all(rootfs.join("root/.config/containers"));
-    std::fs::write(rootfs.join("etc/resolv.conf"), "")?; // empty mount target
-
-    // 7a0. normalize containers/storage "created" timestamps to the fixed epoch.
+    // normalize containers/storage "created" timestamps + zero its lock files.
     normalize_created_json(&rootfs.join("var/lib/containers-seed"))?;
+    truncate_locks(rootfs)?;
+    Ok(())
+}
 
-    // 7a. zero containers/storage lock files (random per-writer tokens).
-    truncate_locks(&rootfs)?;
+pub fn cmd_assemble_initramfs(config: &str) -> Result<i32, Box<dyn std::error::Error>> {
+    let cfg: AssembleConfig = serde_json::from_slice(&std::fs::read(config)?)?;
 
-    // 7b. (mtime normalization is folded into the cpio emitter: it writes the
-    //      fixed epoch for every entry, so no `touch` pass is needed.)
+    // --- base runtime segment (Fable Part D): reuse if cached, else build+emit ---
+    let base_seg: Vec<u8> = if cfg.base_hit {
+        eprintln!("   [base] cache HIT — reusing base-runtime segment (skipped apk/overlay)");
+        // restore the base's package set (stack-independent).
+        if cfg.base_packages_lock.is_file() {
+            let _ = std::fs::copy(&cfg.base_packages_lock, cfg.work.join("packages.lock"));
+        }
+        std::fs::read(&cfg.base_segment)?
+    } else {
+        eprintln!("   [base] cache MISS — building base-runtime tree");
+        let base_root = cfg.work.join("rootfs-base");
+        assemble_base_tree(&cfg, &base_root)?;
+        let seg = cpio::rootfs_segment(&base_root)?;
+        // hand the fresh segment to the host to store in the base cache.
+        std::fs::write(&cfg.base_segment, &seg)?;
+        seg
+    };
 
-    // 8. emit the initramfs cpio (Rust) + gzip -9 -n.
-    cpio::write_initramfs_gz(&rootfs, &cfg.out)?;
+    // --- stack-specific segment (always built fresh; cheap relative to the base) ---
+    let stack_root = cfg.work.join("rootfs-stack");
+    assemble_stack_tree(&cfg, &stack_root)?;
+    let stack_seg = cpio::rootfs_segment(&stack_root)?;
+
+    // --- assemble: nodes + base + stack, then gzip -9 -n (Fable guardrail §4:
+    //     the bytes come ONLY from dvmm's own normalizing cpio emitter) ---
+    let mut combined = cpio::nodes_segment();
+    combined.extend_from_slice(&base_seg);
+    combined.extend_from_slice(&stack_seg);
+    cpio::gzip_to(&combined, &cfg.out)?;
 
     // copy packages.lock next to the (now-retired) build script location.
-    std::fs::copy(cfg.work.join("packages.lock"), &cfg.packages_lock_out)?;
+    let pl = cfg.work.join("packages.lock");
+    if pl.is_file() {
+        std::fs::copy(&pl, &cfg.packages_lock_out)?;
+    }
 
     // artifact sha sidecar (build_rootfs.sh parity).
     let art_sha = sha256_file_hex(&cfg.out)?;
@@ -1279,8 +1782,10 @@ fn walk_files(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
 // ============================================================================
 
 /// Cache-entry format version. Bump when the cached fileset or key inputs change
-/// in a way older entries can't satisfy.
-const CACHE_VERSION: u32 = 2;
+/// in a way older entries can't satisfy. v3: dropped the host-probed `podman`
+/// version from the key, added the declared `builders` digests, and moved entries
+/// under `<cache-dir>/bake/` (Fable Parts A + B).
+const CACHE_VERSION: u32 = 3;
 
 struct CacheCtx {
     /// The per-key entry directory: <cache-root>/<key>.
@@ -1289,14 +1794,24 @@ struct CacheCtx {
     key: String,
 }
 
-/// `$DVMM_CACHE_DIR`, else `<repo>/.dvmm-cache` (here == `<repo>/guest`).
-fn cache_root(here: &Path) -> PathBuf {
-    if let Ok(d) = std::env::var("DVMM_CACHE_DIR") {
-        return PathBuf::from(d);
+/// Resolve the cache directory (Fable Part A). Precedence:
+///   `--cache-dir <path>` (the `flag`)  >  `$DVMM_CACHE_DIR`  >  `$HOME/.dvmm`.
+/// Returns `(dir, source)` where `source` is the provenance word for the log line.
+/// Replaces the old repo-relative `./.dvmm-cache`; old caches are disposable, so
+/// there is no migration.
+fn resolve_cache_dir(flag: Option<&str>) -> (PathBuf, &'static str) {
+    if let Some(f) = flag {
+        if !f.is_empty() {
+            return (PathBuf::from(f), "--cache-dir flag");
+        }
     }
-    here.parent()
-        .map(|r| r.join(".dvmm-cache"))
-        .unwrap_or_else(|| PathBuf::from(".dvmm-cache"))
+    if let Ok(d) = std::env::var("DVMM_CACHE_DIR") {
+        if !d.is_empty() {
+            return (PathBuf::from(d), "DVMM_CACHE_DIR env");
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    (PathBuf::from(home).join(".dvmm"), "default $HOME/.dvmm")
 }
 
 /// A stable content hash of a directory tree: for every regular file (recursively)
@@ -1331,17 +1846,6 @@ fn tree_hash(root: &Path, exclude: &[&str]) -> std::io::Result<String> {
     Ok(artifact::sha256_hex(buf.as_bytes()))
 }
 
-/// Best-effort tool version string (empty on failure — still a stable key input).
-fn tool_version(prog: &str, args: &[&str]) -> String {
-    Command::new(prog)
-        .args(args)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default()
-}
-
 #[allow(clippy::too_many_arguments)]
 fn compute_cache_key(
     self_exe: &Path,
@@ -1352,25 +1856,24 @@ fn compute_cache_key(
     mem_mib: u64,
     working_set_mib: u64,
     squash_threshold_mib: u64,
+    cache_dir: &Path,
+    kernel: &Path,
+    builders: &[String],
 ) -> Result<CacheCtx, String> {
     let repo_root = here
         .parent()
         .ok_or_else(|| "no repo root above guest/".to_string())?;
     let self_sha = sha256_file_hex(self_exe).map_err(|x| format!("hashing dvmm binary: {x}"))?;
-    let kernel_sha = sha256_file_hex(&here.join("kernel/vmlinux-6.1.128"))
-        .map_err(|x| format!("hashing kernel: {x}"))?;
+    let kernel_sha = sha256_file_hex(kernel).map_err(|x| format!("hashing kernel: {x}"))?;
     // The agent is now a Rust crate built in a pinned musl container: its cache
-    // input is the agent + proto crate trees + Cargo.lock + the builder image
-    // digest (a toolchain/image bump MUST miss). Fable §2.
+    // input is the agent + proto crate trees + Cargo.lock (a toolchain/image bump
+    // is captured via the `builders` digests below). Fable §2.
     let agent_tree =
         tree_hash(&repo_root.join("dvmm-agent"), &[]).map_err(|x| format!("hashing dvmm-agent: {x}"))?;
     let proto_tree =
         tree_hash(&repo_root.join("dvmm-proto"), &[]).map_err(|x| format!("hashing dvmm-proto: {x}"))?;
     let cargo_lock = sha256_file_hex(&repo_root.join("Cargo.lock"))
         .map_err(|x| format!("hashing Cargo.lock: {x}"))?;
-    let builder_digest = read_builder_pin(repo_root)
-        .map(|(_, d)| d)
-        .map_err(|x| format!("reading builder pin: {x}"))?;
     let overlay_tree =
         tree_hash(&alpine_dir.join("overlay"), &[]).map_err(|x| format!("hashing overlay: {x}"))?;
     let engine_sha = sha256_file_hex(&alpine_dir.join("compose-engine.lock"))
@@ -1379,18 +1882,19 @@ fn compute_cache_key(
     // EXCLUDING this bake's own committed outputs.
     let stack_tree = tree_hash(compose_dir, &["compose.lock.yml", "stack.lock"])
         .map_err(|x| format!("hashing stack dir: {x}"))?;
-    let podman_v = tool_version("podman", &["--version"]);
+    // Fable Part B/guardrail §3: the DECLARED builder-image digests replace the old
+    // host-probed `podman --version` — NOTHING host-probed enters the key.
+    let builders_line = builders.join(",");
 
     let manifest = format!(
         "dvmm-bake-cache v{CACHE_VERSION}\n\
          self:      {self_sha}\n\
-         podman:    {podman_v}\n\
+         builders:  {builders_line}\n\
          engine:    {engine_sha}\n\
          kernel:    {kernel_sha}\n\
          agent:     {agent_tree}\n\
          proto:     {proto_tree}\n\
          cargolock: {cargo_lock}\n\
-         builder:   {builder_digest}\n\
          overlay:   {overlay_tree}\n\
          stackdir:  {stack_tree}\n\
          name:      {stack_name}\n\
@@ -1399,7 +1903,7 @@ fn compute_cache_key(
          squash:    {squash_threshold_mib}\n"
     );
     let key = artifact::sha256_hex(manifest.as_bytes());
-    let dir = cache_root(here).join(&key);
+    let dir = cache_dir.join("bake").join(&key);
     Ok(CacheCtx { dir, key })
 }
 
@@ -1478,6 +1982,62 @@ fn cache_store(
         Err(_) => {
             let _ = std::fs::remove_dir_all(&tmp);
             Ok(false)
+        }
+    }
+}
+
+// ============================================================================
+// shared base-runtime segment cache (Fable Part D)
+//
+// The base runtime (Alpine + podman/crun/conmon/netavark + the agent + the
+// compose CLI) is common to EVERY stack. Its emitted cpio segment is cached here,
+// keyed on DECLARED base pins only, so per-stack bakes concatenate a reused base
+// segment + a fresh stack segment instead of rebuilding the base every time.
+// ============================================================================
+
+/// The base-runtime cache key: DECLARED base pins only (never the stack).
+fn compute_base_key(
+    alpine_dir: &Path,
+    agent_sha: &str,
+    compose_version: &str,
+    compose_sha256: &str,
+    selftest_pin: &str,
+) -> String {
+    let overlay_tree = tree_hash(&alpine_dir.join("overlay"), &[]).unwrap_or_default();
+    let pkgs = PKGS.join(",");
+    let manifest = format!(
+        "dvmm-base-runtime v{CACHE_VERSION}\n\
+         alpine:     {ALPINE_VER}\n\
+         minirootfs: {MINIROOTFS_SHA256}\n\
+         epoch:      {BUILD_EPOCH}\n\
+         pkgs:       {pkgs}\n\
+         overlay:    {overlay_tree}\n\
+         agent:      {agent_sha}\n\
+         compose:    {compose_version} {compose_sha256}\n\
+         selftest:   {selftest_pin}\n"
+    );
+    artifact::sha256_hex(manifest.as_bytes())
+}
+
+/// Store a freshly-emitted base segment (+ its package set) under the key (atomic
+/// temp-dir rename). No-op if an entry already exists.
+fn base_cache_store(entry: &Path, base_seg: &Path, packages_lock: &Path) -> std::io::Result<()> {
+    if entry.exists() {
+        return Ok(());
+    }
+    let root = entry.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(root)?;
+    let tmp = root.join(format!(".tmp-{}-{}", std::process::id(), now_nanos()));
+    std::fs::create_dir_all(&tmp)?;
+    std::fs::copy(base_seg, tmp.join("base.cpio"))?;
+    if packages_lock.is_file() {
+        std::fs::copy(packages_lock, tmp.join("packages.lock"))?;
+    }
+    match std::fs::rename(&tmp, entry) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            let _ = std::fs::remove_dir_all(&tmp);
+            Ok(())
         }
     }
 }

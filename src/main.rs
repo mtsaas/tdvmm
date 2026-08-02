@@ -41,6 +41,7 @@ mod compose;
 mod control;
 mod cpio;
 mod cpuid;
+mod engine;
 mod events;
 mod ioapic;
 mod lapic;
@@ -631,6 +632,11 @@ enum Cmd {
     /// container). Prints `<sha256>  <path>`. Used by the size / double-build gates.
     #[command(name = "build-agent")]
     BuildAgent(BuildAgentArgs),
+    /// Acquire the pinned guest kernel: fetch the pinned GitHub release asset
+    /// (PRIMARY, sha256-verified against kernel.lock) or reproducibly build it in
+    /// the pinned builder container (FALLBACK). `--record` bootstraps kernel.lock.
+    #[command(name = "build-kernel")]
+    BuildKernel(BuildKernelArgs),
     /// Boot a raw kernel + initramfs (the low-level VMM-dev / smoke verb).
     Boot(BootArgs),
     /// Run a .dvmm stack artifact: apply its baked run-defaults, then boot (offline).
@@ -686,6 +692,11 @@ struct BuildCliArgs {
     /// pull/squash/assemble). Nightly bake-repeatability uses this to re-bake.
     #[arg(long)]
     no_cache: bool,
+    /// Cache directory (holds the bake cache, the shared base-runtime segment, and
+    /// the fetched/built kernel). Precedence: this flag > $DVMM_CACHE_DIR >
+    /// $HOME/.dvmm. The resolved dir is logged at build start.
+    #[arg(long, value_name = "PATH")]
+    cache_dir: Option<String>,
 }
 
 /// `dvmm build-agent` args.
@@ -694,6 +705,26 @@ struct BuildAgentArgs {
     /// Output path for the built static-musl agent binary.
     #[arg(short, long, value_name = "PATH", default_value = "dvmm-agent.bin")]
     out: String,
+}
+
+/// `dvmm build-kernel` args.
+#[derive(Args)]
+struct BuildKernelArgs {
+    /// Output path for the vmlinux (default: guest/kernel/vmlinux-<version>).
+    #[arg(short, long, value_name = "PATH")]
+    out: Option<String>,
+    /// Cache directory (kernel source tarball + built kernel land here).
+    /// Precedence: this flag > $DVMM_CACHE_DIR > $HOME/.dvmm.
+    #[arg(long, value_name = "PATH")]
+    cache_dir: Option<String>,
+    /// Force the reproducible container build even if a release asset is available
+    /// (used by the two-build byte-identity gate).
+    #[arg(long)]
+    force_build: bool,
+    /// Bootstrap/update kernel.lock: run the container build, then WRITE the
+    /// resolved kernel + source + builder digests into kernel.lock (no verify).
+    #[arg(long)]
+    record: bool,
 }
 
 /// Flags shared by `boot` and `run`. On `boot` the `Option`s fall back to the
@@ -972,8 +1003,15 @@ fn dispatch() -> Result<i32, Box<dyn std::error::Error>> {
             squash_threshold: args.squash_threshold,
             validate_only: args.validate_only,
             no_cache: args.no_cache,
+            cache_dir: args.cache_dir,
         }),
         Cmd::BuildAgent(args) => build::cmd_build_agent(&args.out),
+        Cmd::BuildKernel(args) => build::cmd_build_kernel(build::BuildKernelArgs {
+            out: args.out,
+            cache_dir: args.cache_dir,
+            force_build: args.force_build,
+            record: args.record,
+        }),
         Cmd::SeedBuild { config } => build::cmd_seed_build(&config),
         Cmd::AssembleInitramfs { config } => build::cmd_assemble_initramfs(&config),
         Cmd::Boot(args) => cmd_boot(args),

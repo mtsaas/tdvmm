@@ -85,12 +85,19 @@ pub struct ImagePin {
     pub size_mib: u64,
 }
 
-/// Bake-toolchain versions (host tooling that produced the artifact). Recorded so
-/// a toolchain change is visible; NOT a volatile field (no timestamps here).
+/// Bake-toolchain pins that produced the artifact. Every field is a DECLARED
+/// input (identical on every host), never host-probed — Fable guardrail §3: no
+/// host-probed value (tool versions, paths, uname, timestamps) may enter the
+/// hashed artifact bytes. The host `podman --version` used to live here and broke
+/// cross-host byte-identity; it is gone (diagnostics-only now). What pins the
+/// bake toolchain is the set of `@sha256`-pinned BUILDER IMAGES below.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Toolchain {
+    /// The pinned builder-image refs (`image@sha256`) that produced the guest
+    /// binaries: the musl agent builder + the kernel builder. Sorted, so the
+    /// bytes are order-stable. A toolchain bump = a changed digest here.
     #[serde(default)]
-    pub podman: String,
+    pub builders: Vec<String>,
     #[serde(default)]
     pub alpine: String,
     #[serde(default)]
@@ -603,7 +610,10 @@ mod tests {
                     size_mib: 283,
                 }],
                 toolchain: Toolchain {
-                    podman: "5.8.3".into(),
+                    builders: vec![
+                        "docker.io/library/debian@sha256:beef".into(),
+                        "docker.io/library/rust@sha256:cafe".into(),
+                    ],
                     alpine: "3.22.5".into(),
                     compose: "v5.3.1".into(),
                 },
