@@ -64,6 +64,11 @@ pub fn stdin_is_tty() -> bool {
     unsafe { libc::isatty(0) == 1 }
 }
 
+/// Whether `port` is one of COM1's (ttyS0) 8 legacy 16550 PIO registers.
+pub(crate) fn is_serial(port: u16) -> bool {
+    (crate::arch::SERIAL_PORT_BASE..crate::arch::SERIAL_PORT_BASE + 8).contains(&port)
+}
+
 pub type SharedSerial = Arc<Mutex<Serial<EventFdTrigger, NoEvents, RawStdout>>>;
 
 /// Build the shared UART. Returns the serial handle and a clone of its

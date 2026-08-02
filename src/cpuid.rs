@@ -37,7 +37,8 @@
 //!    write; with the bit cleared the guest instead uses the LAPIC one-shot/
 //!    periodic timer (MMIO), which we serve. See [`filter_cpuid`].
 
-use kvm_bindings::{kvm_cpuid_entry2, CpuId};
+use kvm_bindings::{kvm_cpuid_entry2, CpuId, KVM_MAX_CPUID_ENTRIES};
+use kvm_ioctls::Kvm;
 
 const HYPERVISOR_LEAF_LOW: u32 = 0x4000_0000;
 const HYPERVISOR_LEAF_HIGH: u32 = 0x4000_00ff;
@@ -154,4 +155,67 @@ pub fn filter_cpuid(supported: &CpuId) -> Result<CpuId, CpuidError> {
 /// the four result registers.
 fn host_cpuid(leaf: u32) -> core::arch::x86_64::CpuidResult {
     core::arch::x86_64::__cpuid_count(leaf, 0)
+}
+
+/// Print the effective guest clock/timer CPUID profile (userspace backend) as a
+/// stable, diffable text block, then return — the manifest CPUID artifact
+/// (`--dump-cpuid`).
+///
+/// Records exactly the leaves the determinism + fast-forward guarantee hangs on:
+///   * `0x15`/`0x16` — the LAPIC-timer / TSC frequency the guest derives
+///     (counts→TSC cycles uses `0x15` EBX/EAX exactly, see
+///     [`lapic::apic_timer_tsc_ratio`]).
+///   * `0x01` ECX/EDX and `0x8000_0007` EDX — the clock-policy masks (no
+///     kvmclock/MWAIT/x2APIC/TSC-deadline; invariant TSC advertised).
+///
+/// So a host/CPU change surfaces here as a changed line instead of a silent
+/// timing difference. Per-core-volatile fields — the leaf-1 initial-APIC-ID byte
+/// (EBX[31:24]) and the topology x2APIC IDs (leaves 0x0b/0x1f) — are deliberately
+/// EXCLUDED so the profile is byte-stable run-to-run on one host (they reflect
+/// which physical core answered the ioctl, not the guest's clock).
+pub(crate) fn dump_cpuid(kvm: &Kvm) -> Result<(), Box<dyn std::error::Error>> {
+    let supported = kvm.get_supported_cpuid(KVM_MAX_CPUID_ENTRIES)?;
+    let filtered = filter_cpuid(&supported)?;
+    let entries = filtered.as_slice();
+    let find = |func: u32| entries.iter().find(|e| e.function == func && e.index == 0);
+
+    println!("# deterministic-vmm effective guest clock/timer CPUID profile (userspace backend)");
+    println!("#");
+    println!("# The CPUID leaves the determinism + fast-forward guarantee depends on. A host or");
+    println!("# CPU change surfaces here as a changed line. Per-core-volatile fields (leaf-1");
+    println!("# initial-APIC-ID byte, topology x2APIC IDs) are excluded so this is stable");
+    println!("# run-to-run on one host.");
+    println!("# function:index eax        ebx        ecx        edx");
+
+    if let Some(e) = find(0x01) {
+        // Mask EBX[31:24] (initial APIC ID): per-core-volatile, not clock-relevant.
+        let ebx = e.ebx & 0x00ff_ffff;
+        println!(
+            "{:#010x}:0x00 {:#010x} {:#010x} {:#010x} {:#010x}   # feature masks: ECX \
+             hypervisor/MWAIT/x2APIC/TSC-deadline cleared (EBX APIC-ID byte masked)",
+            0x01u32, e.eax, ebx, e.ecx, e.edx
+        );
+    }
+    if let Some(e) = find(0x15) {
+        let (num, den, crystal) = (e.ebx, e.eax, e.ecx);
+        let ratio = if den != 0 { format!("{num}/{den}={}", num / den.max(1)) } else { "n/a".into() };
+        println!(
+            "{:#010x}:0x00 {:#010x} {:#010x} {:#010x} {:#010x}   # TSC:crystal EBX/EAX={} \
+             cyc/count; crystal {} Hz",
+            0x15u32, e.eax, e.ebx, e.ecx, e.edx, ratio, crystal
+        );
+    }
+    if let Some(e) = find(0x16) {
+        println!(
+            "{:#010x}:0x00 {:#010x} {:#010x} {:#010x} {:#010x}   # CPU base {} / max {} / bus {} MHz",
+            0x16u32, e.eax, e.ebx, e.ecx, e.edx, e.eax, e.ebx, e.ecx
+        );
+    }
+    if let Some(e) = find(0x8000_0007) {
+        println!(
+            "{:#010x}:0x00 {:#010x} {:#010x} {:#010x} {:#010x}   # invariant TSC advertised (EDX bit 8)",
+            0x8000_0007u32, e.eax, e.ebx, e.ecx, e.edx
+        );
+    }
+    Ok(())
 }

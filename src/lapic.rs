@@ -33,6 +33,11 @@ use crate::vtsc::VirtualClock;
 pub const XAPIC_BASE: u64 = 0xfee0_0000;
 pub const XAPIC_LEN: u64 = 0x1000;
 
+/// Whether a guest-physical `addr` falls inside the xAPIC MMIO window.
+pub(crate) fn in_lapic(addr: u64) -> bool {
+    (XAPIC_BASE..XAPIC_BASE + XAPIC_LEN).contains(&addr)
+}
+
 /// IA32_TSC_DEADLINE MSR index. Retained for the (tested) deadline-mode model,
 /// but NOT wired on this host: a KVM WRMSR fastpath no-ops 0x6E0 before the MSR
 /// filter when there is no in-kernel LAPIC, so the userspace backend uses the
