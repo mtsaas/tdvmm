@@ -171,6 +171,5 @@ fn setup_page_tables(mem: &GuestMemoryMmap, sregs: &mut kvm_sregs) -> Result<(),
     Ok(())
 }
 
-// (The in-kernel LAPIC LINT setup — LINT0=ExtINT, LINT1=NMI — was removed with
-// the in-kernel irqchip backend in Step 4. The userspace LAPIC holds LINT0/1 as
-// register storage; nothing here programs an in-kernel local APIC.)
+// The userspace LAPIC holds LINT0/1 as register storage; nothing here
+// programs an in-kernel local APIC.

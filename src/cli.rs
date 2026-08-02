@@ -1,15 +1,6 @@
 //! CLI surface: the clap arg structs for every `dvmm` subcommand, plus
 //! `EffectiveConfig` — the resolved run configuration (baked < scenario < flag)
 //! every boot path hands to the vCPU loop.
-//!
-//! ============================================================================
-//! CLI subcommands. `build` (OP-1b) bakes a compose stack into a `.dvmm` (host
-//! tool: podman + network). `boot` is the raw kernel+initramfs dev verb; `run`
-//! boots a `.dvmm` applying its baked run-defaults; `test` drives a scenario;
-//! `inspect`/`verify` read the artifact; `dump-cpuid` emits the manifest CPUID
-//! profile. `__seed-build` / `__assemble-initramfs` are internal `podman unshare`
-//! helpers `dvmm build` re-execs into.
-//! ============================================================================
 
 use clap::{Args, Parser, Subcommand};
 

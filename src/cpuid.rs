@@ -64,12 +64,9 @@ impl std::fmt::Display for CpuidError {
 }
 impl std::error::Error for CpuidError {}
 
-/// Produce the CPUID we hand to the vCPU from KVM's supported set.
-///
-/// The LAPIC TSC-deadline timer bit is always cleared: on this host a KVM WRMSR
-/// fastpath eats IA32_TSC_DEADLINE before the MSR filter (see the README notes),
-/// so the userspace LAPIC would never see the arming write. With the bit cleared
-/// the guest falls to the LAPIC one-shot/periodic timer (MMIO, which we serve).
+/// Produce the CPUID we hand to the vCPU from KVM's supported set — see the
+/// module docs above for the per-edit rationale (the README has more on the
+/// TSC-deadline WRMSR-fastpath quirk behind edit 6).
 pub fn filter_cpuid(supported: &CpuId) -> Result<CpuId, CpuidError> {
     let mut entries: Vec<kvm_cpuid_entry2> = supported.as_slice().to_vec();
 
@@ -83,16 +80,10 @@ pub fn filter_cpuid(supported: &CpuId) -> Result<CpuId, CpuidError> {
                 // (1b) hide the hypervisor and (2) MONITOR/MWAIT bits.
                 e.ecx &= !ECX_HYPERVISOR;
                 e.ecx &= !ECX_MONITOR;
-                // (5) Mask x2APIC: with no in-kernel irqchip and no ACPI/IRQ
-                //     remapping, x2APIC cannot be enumerated. Masking it forces
-                //     the guest onto the xAPIC MMIO window (0xFEE00xxx), which
-                //     is exactly the surface the Step-3b userspace LAPIC serves,
-                //     and makes the MP table alone sufficient for enumeration.
+                // (5) Mask x2APIC (see module docs above for why).
                 e.ecx &= !ECX_X2APIC;
-                // (6) Clear the LAPIC TSC-deadline timer bit: a KVM WRMSR
-                //     fastpath eats IA32_TSC_DEADLINE before the MSR filter with
-                //     no in-kernel LAPIC, so the guest uses the LAPIC one-shot/
-                //     periodic timer (MMIO) we serve instead.
+                // (6) Clear the LAPIC TSC-deadline timer bit (see module docs
+                //     above for why).
                 e.ecx &= !ECX_TSC_DEADLINE;
             }
             LEAF_EXT_POWER_MGMT => {

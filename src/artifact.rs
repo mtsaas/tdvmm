@@ -88,9 +88,8 @@ pub struct ImagePin {
 /// Bake-toolchain pins that produced the artifact. Every field is a DECLARED
 /// input (identical on every host), never host-probed — Fable guardrail §3: no
 /// host-probed value (tool versions, paths, uname, timestamps) may enter the
-/// hashed artifact bytes. The host `podman --version` used to live here and broke
-/// cross-host byte-identity; it is gone (diagnostics-only now). What pins the
-/// bake toolchain is the set of `@sha256`-pinned BUILDER IMAGES below.
+/// hashed artifact bytes. What pins the bake toolchain is the set of
+/// `@sha256`-pinned BUILDER IMAGES below.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Toolchain {
     /// The pinned builder-image refs (`image@sha256`) that produced the guest

@@ -144,7 +144,7 @@ fn run(cmd: &mut Command, mode: engine::OutputMode) -> Result<(), String> {
 /// (Fable coexistence rule) — so it cannot outlive `cmd_build`'s call.
 /// `build-agent` / `build-kernel` construct a permanently-inherit instance
 /// (via [`Ux::inherit`]) over a [`ui::Progress::disabled`], so their output
-/// stays byte-for-byte what it was before this change.
+/// stays a plain inherited passthrough, unaffected by the progress bar.
 struct Ux<'a> {
     progress: &'a ui::Progress,
     mode: engine::OutputMode,
@@ -207,7 +207,7 @@ fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
         }
     } else {
         // regular file (block/char/fifo nodes never occur in our copied trees).
-        std::fs::copy(src, dst)?; // copies content + permission bits
+        std::fs::copy(src, dst)?;
     }
     Ok(())
 }
@@ -726,7 +726,6 @@ fn write_bake_diagnostics(cache_dir: &Path, stack: &str, podman_version: &str, b
 /// Resolve the repo `guest/` directory relative to the running binary (target/…).
 /// Falls back to `guest/` under the current dir.
 fn self_here() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    // The binary lives at <repo>/target/{release,debug}/dvmm; guest is <repo>/guest.
     let exe = std::env::current_exe()?;
     let mut p = exe.clone();
     // .../target/release/dvmm -> .../ (repo root)
@@ -1122,7 +1121,7 @@ fn build_agent(here: &Path, out: &Path, ux: &Ux) -> Result<String, Box<dyn std::
 /// (the size + double-build byte-identity gate scripts use this). Prints
 /// `<sha256>  <path>` to stdout. Shares `build_agent()` with `dvmm build`'s
 /// pipeline, but ALWAYS with progress UI disabled / output inherited (scope
-/// lock — progress is `build`-only): this command's output is unchanged.
+/// lock — progress is `build`-only): a plain inherited passthrough.
 pub fn cmd_build_agent(out: &str) -> Result<i32, Box<dyn std::error::Error>> {
     let here = self_here()?;
     let outp = PathBuf::from(out);
@@ -1474,7 +1473,7 @@ fn resolve_image_digest(image: &str) -> Result<String, Box<dyn std::error::Error
 /// to bootstrap kernel.lock from a fresh reproducible container build. Shares
 /// `ensure_kernel`/`build_kernel_container` with `dvmm build`'s pipeline, but
 /// ALWAYS with progress UI disabled / output inherited (scope lock — progress
-/// is `build`-only): this command's output is unchanged.
+/// is `build`-only): a plain inherited passthrough.
 pub fn cmd_build_kernel(args: BuildKernelArgs) -> Result<i32, Box<dyn std::error::Error>> {
     let here = self_here()?;
     let (cache_dir, cache_src) = resolve_cache_dir(args.cache_dir.as_deref());
@@ -1615,10 +1614,9 @@ fn write_stack_lock(
     out.push_str(&format!("initramfs_sha256     {art_sha}  {}\n", out_initramfs.file_name().unwrap().to_string_lossy()));
     // The reproducible guest control-channel agent's own line (Fable §2).
     out.push_str(&format!("agent_sha256         {agent_sha}  dvmm-agent\n"));
-    // Declared, host-identical builder-image pins (Fable Part B). These REPLACE the
-    // old host-probed `# podman-version` line, which is gone from the ledger (it is
-    // diagnostics-only now); every line here is reproducible across hosts, so they
-    // ARE part of the compared/repeatable portion.
+    // Declared, host-identical builder-image pins (Fable Part B): reproducible
+    // across hosts, so they ARE part of the compared/repeatable portion (unlike
+    // the host-probed diagnostics line, which lives outside this ledger).
     for b in builders {
         out.push_str(&format!("builder_image        {b}\n"));
     }
@@ -2042,9 +2040,7 @@ fn walk_files(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
 // ============================================================================
 
 /// Cache-entry format version. Bump when the cached fileset or key inputs change
-/// in a way older entries can't satisfy. v3: dropped the host-probed `podman`
-/// version from the key, added the declared `builders` digests, and moved entries
-/// under `<cache-dir>/bake/` (Fable Parts A + B).
+/// in a way older entries can't satisfy.
 const CACHE_VERSION: u32 = 3;
 
 struct CacheCtx {
@@ -2057,8 +2053,7 @@ struct CacheCtx {
 /// Resolve the cache directory (Fable Part A). Precedence:
 ///   `--cache-dir <path>` (the `flag`)  >  `$DVMM_CACHE_DIR`  >  `$HOME/.dvmm`.
 /// Returns `(dir, source)` where `source` is the provenance word for the log line.
-/// Replaces the old repo-relative `./.dvmm-cache`; old caches are disposable, so
-/// there is no migration.
+/// Cache entries are disposable, so no migration between locations is needed.
 fn resolve_cache_dir(flag: Option<&str>) -> (PathBuf, &'static str) {
     if let Some(f) = flag {
         if !f.is_empty() {

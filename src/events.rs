@@ -1,10 +1,9 @@
 //! The one virtual-time event queue.
 //!
 //! A min-ordered queue of future events keyed by **vtsc** (see [`crate::vtsc`]).
-//! Every guest timer will be an entry here: in Step 3b the userspace LAPIC
-//! timer (and anything else that must fire at a guest-time deadline) pushes its
-//! next deadline, and the vCPU loop drains everything due before each
-//! `KVM_RUN`:
+//! Every guest timer is an entry here: the userspace LAPIC timer (and anything
+//! else that must fire at a guest-time deadline) pushes its next deadline, and
+//! the vCPU loop drains everything due before each `KVM_RUN`:
 //!
 //! ```ignore
 //! // vCPU loop boundary (see service_timers in main.rs):
@@ -14,10 +13,9 @@
 //! let next = queue.peek_deadline();   // the park's wait-or-jump target
 //! ```
 //!
-//! Driven since Step 3b: the LAPIC deadline is mirrored here each loop boundary,
-//! `pop_due` fires everything due, and `peek_deadline` is what the Step-4 park
-//! either waits for or JUMPs to. Determinism is the whole point, so ordering is
-//! strict.
+//! The LAPIC deadline is mirrored here each loop boundary, `pop_due` fires
+//! everything due, and `peek_deadline` is what the park either waits for or
+//! JUMPs to.
 //!
 //! Ordering is deterministic: strictly by `deadline`, and for equal deadlines
 //! by insertion order (FIFO). Determinism is the whole point of the project, so
@@ -61,11 +59,6 @@ impl<T> PartialOrd for Event<T> {
 }
 
 /// A min-by-vtsc priority queue of [`Event`]s.
-///
-/// Not yet driven in Step 3a (see the module docs). The whole module carries a
-/// module-level `#[allow(dead_code)]` at its declaration in `main.rs`, marking
-/// the not-yet-called methods as intentionally-ahead-of-use for 3b rather than
-/// accidental dead code.
 #[derive(Debug, Default)]
 pub struct EventQueue<T> {
     heap: BinaryHeap<Event<T>>,
@@ -103,8 +96,8 @@ impl<T> EventQueue<T> {
         });
     }
 
-    /// The earliest pending deadline (vtsc), or `None` if empty. In 3b this arms
-    /// the park timeout so the vCPU wakes in time to service it.
+    /// The earliest pending deadline (vtsc), or `None` if empty. This arms the
+    /// park timeout so the vCPU wakes in time to service it.
     pub fn peek_deadline(&self) -> Option<u64> {
         self.heap.peek().map(|e| e.deadline)
     }

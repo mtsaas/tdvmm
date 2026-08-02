@@ -1,21 +1,21 @@
-//! deterministic-vmm — Step 4: fast-forward virtual time on idle.
+//! deterministic-vmm — fast-forward virtual time on idle.
 //!
 //! A single-vCPU, Firecracker-shaped KVM VMM. The guest runs on a **userspace**
 //! interrupt controller we own: no in-kernel irqchip, no in-kernel PIT. The
 //! LAPIC's one-shot/periodic timer (driven by [`vtsc`]) is the tick; LAPIC/IOAPIC
 //! register accesses are MMIO exits; and a halted guest parks at its HLT exit.
 //!
-//! ## Step 4: the JUMP
+//! ## The jump (fast-forward)
 //!
 //! When the guest is idle (HLTed) waiting for a future timer, the parker no
 //! longer *waits* real time for that deadline — it **jumps** virtual time to it:
 //! compute `Δ = next_event_vtsc − vtsc_now()`, bump the cached TSC offset by `Δ`
 //! (write-through to `KVM_VCPU_TSC_OFFSET`), fire everything now due, and loop.
 //! The guest experiences hours passing in seconds of wall clock. This is a
-//! runtime flag (`--ff on|off`, default ON); with FF off the old 3b real-wait
-//! park (`ppoll` on a `timerfd` + stdin) is used instead — the A/B for timing
-//! bugs and the right mode for an interactive console. Only the *wait* changes;
-//! the wake path (IRR → injection window → RUNNABLE) is unchanged 3b machinery.
+//! runtime flag (`--ff on|off`, default ON); with FF off the real-wait park
+//! (`ppoll` on a `timerfd` + stdin) is used instead — the A/B for timing bugs
+//! and the right mode for an interactive console. Only the *wait* changes; the
+//! wake path (IRR → injection window → RUNNABLE) is unchanged.
 //!
 //! ## Single-writer invariant
 //!
@@ -24,8 +24,7 @@
 //! boundaries. The offset is written ONLY while parked at a HLT exit, between
 //! `KVM_RUN`s, never concurrent with a running vCPU. The vCPU thread owns console
 //! input (it reads stdin while parked at HLT), so there is no off-thread writer
-//! at all. (The in-kernel `--irqchip kernel` A/B backend — which could not
-//! fast-forward, its timer ran on the host clock — was removed in Step 4.)
+//! at all.
 //!
 //! ## vCPU loop shape
 //!
@@ -155,7 +154,7 @@ struct ScenarioSetup {
 }
 
 /// A scheduled event in the one [`events::EventQueue`]. Every guest timer is an
-/// entry here (today that is the LAPIC deadline, the tick); Step-4 adds the
+/// entry here (today that is the LAPIC deadline, the tick); the fast-forward path adds the
 /// virtual-time horizon as a first-class queue event so the run terminates
 /// through the same drain path rather than a bolted-on loop check.
 #[derive(Clone, Copy, Debug)]
@@ -165,7 +164,7 @@ enum TimerKind {
     /// `--max-virtual-time`: when vtsc reaches the horizon, stop the run. A
     /// deterministic virtual-time event, not a real-time policy.
     StopRun,
-    /// TEST-1a: a scenario step's scheduled `at:` (or a poll/reply deadline) has
+    /// A scenario step's scheduled `at:` (or a poll/reply deadline) has
     /// arrived. GENERALIZES `StopRun` — a control command is delivered at its
     /// scheduled vtsc through the same one queue, never an ad-hoc side channel.
     ScenarioStep,
@@ -667,7 +666,7 @@ fn run_user_backend(
     let mut events: events::EventQueue<TimerKind> = events::EventQueue::new();
     let mut parker = park::Parker::new()?;
 
-    // TEST-1a control channel: the 2nd 16550 (COM2 / ttyS1). Always present so the
+    // Test control channel: the 2nd 16550 (COM2 / ttyS1). Always present so the
     // guest agent's ttyS1 always works; the scenario engine is what is optional.
     let mut com2 = control::ControlChannel::new()?;
     // The scenario engine (only for `dvmm test`). Built here so it has the virtual
@@ -677,8 +676,8 @@ fn run_user_backend(
         None => None,
     };
 
-    // Fast-forward state (Step 4): the jump-cost/speedup accounting + the
-    // single-jump sanity bound. `None` when FF is off (the 3b real-wait park).
+    // Fast-forward state: the jump-cost/speedup accounting + the
+    // single-jump sanity bound. `None` when FF is off (the real-wait park).
     let mut ff_state = if fast_forward {
         Some(FfState::new(clock.freq().hz(), max_jump_secs))
     } else {
@@ -687,7 +686,7 @@ fn run_user_backend(
 
     // Interactive console: a human at a tty with no harness context (no metrics
     // sink and no virtual-time horizon). The periodic HLT-rate / fast-forward
-    // rollup below is a perf/Step-4 metric for demo + harness runs, NOT interactive
+    // rollup below is a perf metric for demo + harness runs, NOT interactive
     // console noise — so when interactive we suppress its PERIODIC emission (it
     // would interrupt a human's prompt every ~15s). isatty gates ONLY this
     // suppression, never any time behavior (Fable-locked); it is still emitted for
@@ -696,7 +695,7 @@ fn run_user_backend(
     let interactive =
         serial::stdin_is_tty() && metrics_out.is_none() && max_virtual_time_secs.is_none();
 
-    // Idle-observability (a Step-4 hop-cost input, not a diagnostic): how often
+    // Idle-observability (a hop-cost input, not a diagnostic): how often
     // the guest HLTs. Reported on stop, and rolled up every ~15s of wall time so
     // it is observable during long-running workloads that never exit.
     let mut hlt_count: u64 = 0;
@@ -1088,7 +1087,7 @@ fn run_user_backend(
         );
     }
 
-    // TEST-1a: finalize the scenario — emit ff_stats + run_end to the JSONL,
+    // Finalize the scenario — emit ff_stats + run_end to the JSONL,
     // write the JSON report, print the human summary, and return the verdict's
     // exit code (0 pass / 1 assertion fail / 2 infra). If the guest died before
     // the scenario finished, that is an infrastructure error (exit 2).
@@ -1153,11 +1152,11 @@ fn report_horizon(ff: Option<&FfState>, start: std::time::Instant) {
 /// the authority) plus the optional virtual-time `horizon`, then fire everything
 /// due through the queue. Keeping the fire path in the queue is the whole point
 /// of `events.rs`: every guest timer — and the `--max-virtual-time` horizon — is
-/// a `(vtsc, event)` entry, and Step 4 drains the same queue after a time-jump.
+/// a `(vtsc, event)` entry, and fast-forward drains the same queue after a time-jump.
 ///
 /// Which special (non-LAPIC) queue events fired this drain. `horizon` = the
 /// `--max-virtual-time` StopRun; `scenario` = a `(vtsc, ScenarioStep)` deadline
-/// (TEST-1a) — the caller then drives the scenario engine.
+/// The caller then drives the scenario engine.
 #[derive(Default, Clone, Copy)]
 struct Fired {
     horizon: bool,
@@ -1208,7 +1207,7 @@ fn service_timers(
 
 /// How a park returned: an interrupt became deliverable (wake the guest), the
 /// `--max-virtual-time` horizon fired (stop), or the scenario reached its verdict
-/// while parked (TEST-1a — stop).
+/// while parked (stop).
 enum ParkOutcome {
     Deliverable,
     Horizon,
@@ -1217,7 +1216,7 @@ enum ParkOutcome {
 
 /// Idle park: the guest HLTed, so make it wait until an interrupt becomes
 /// deliverable. This is the one place that turns a virtual-time deadline into
-/// either a real wait (FF off, 3b behavior) or a fast-forward JUMP (FF on).
+/// either a real wait (FF off) or a fast-forward JUMP (FF on).
 /// Console input is read here (the vCPU thread owns it). The wake path itself —
 /// IRR set, deliverable_vector, the caller's injection — is unchanged either way.
 ///
@@ -1273,7 +1272,7 @@ fn park_scenario_fired(
     None
 }
 
-/// FF OFF: the 3b real-wait park — sleep in `ppoll` on a `timerfd` + stdin until
+/// FF OFF: the real-wait park — sleep in `ppoll` on a `timerfd` + stdin until
 /// the next deadline elapses in REAL time or console input arrives. If the next
 /// deadline is the horizon, the wait elapses to it and StopRun fires (a
 /// legitimate long idle reaching the virtual-time budget — correct).
@@ -1361,7 +1360,7 @@ fn fast_forward_until_deliverable(
             return Ok(o);
         }
         if lapic.deliverable_vector().is_some() {
-            return Ok(ParkOutcome::Deliverable); // unchanged 3b wake path.
+            return Ok(ParkOutcome::Deliverable); // unchanged wake path.
         }
 
         // The next scheduled event decides the jump target. This is the min of
@@ -1522,7 +1521,7 @@ mod tests {
 
     #[test]
     fn service_timers_fires_scenario_step_as_a_queue_event() {
-        // TEST-1a: a scenario deadline fires through the SAME queue as the horizon.
+        // A scenario deadline fires through the SAME queue as the horizon.
         let clock = VirtualClock::new(0, vtsc::TscFrequency::from_hz(1_000_000_000));
         let mut lapic = Lapic::new(clock, 160, 2);
         let mut events: events::EventQueue<TimerKind> = events::EventQueue::new();

@@ -173,8 +173,8 @@ fn collect(root: &Path) -> std::io::Result<Vec<Entry>> {
 fn rdev_of(meta_rdev: u64, mode: u32) -> (u32, u32) {
     let t = mode & S_IFMT;
     if t == S_IFCHR || t == S_IFBLK {
-        // Linux dev_t: major = (rdev >> 8) & 0xfff (glibc-compatible split cpio uses).
-        // GNU cpio writes the classic major/minor. Use the same split GNU cpio does.
+        // Linux dev_t split (major = (rdev>>8)&0xfff, ...) — the same split GNU
+        // cpio uses.
         let major = ((meta_rdev >> 8) & 0xfff) as u32;
         let minor = (meta_rdev & 0xff) as u32 | (((meta_rdev >> 12) & !0xffu64) as u32);
         (major, minor)

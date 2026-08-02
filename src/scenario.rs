@@ -12,9 +12,8 @@
 //! * `wait_for` — poll a probe at a virtual interval until a predicate holds or a
 //!                virtual deadline passes (readiness).
 //!
-//! (Fault ACTIONS — kill/stop/start/partition/heal — are TEST-1b. The schema and
-//! the agent protocol leave room for them: an unknown `op` is rejected by the
-//! agent, and new step kinds slot in beside the three here.)
+//! (TEST-1b fault ACTIONS — kill/stop/start/partition/heal — are also step
+//! kinds; an unknown `op` is rejected by the agent.)
 //!
 //! ## Time is the timeline
 //!

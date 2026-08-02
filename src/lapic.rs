@@ -414,7 +414,7 @@ impl Lapic {
         // (3) targets nobody here.
         match dest_shorthand {
             0 | 1 | 2 => self.raise(vector),
-            3 => { /* all-excluding-self: no other CPU exists; nothing to do */ }
+            3 => {}
             _ => unreachable!(),
         }
     }

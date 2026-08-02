@@ -260,9 +260,8 @@ pub fn setup_mptable(mem: &GuestMemoryMmap, num_cpus: u8) -> Result<(), MptableE
     // ExtINT / through-local-APIC path), so an override moves IRQ0 -> pin 2 and
     // parks the (cascade-only, never-fired) ISA IRQ2 on the vacated pin 0. This
     // is exactly what SeaBIOS/QEMU emit and what the guest's APIC code and KVM's
-    // GSI routing expect; the previous identity map (IRQ0 -> pin 0) made the
-    // guest listen on the wrong pin the moment MP parsing put it in symmetric-IO
-    // mode. Serial IRQ4 stays on pin 4 (identity). See `isa_irq_to_ioapic_pin`.
+    // GSI routing expect. Serial IRQ4 stays on pin 4 (identity). See
+    // `isa_irq_to_ioapic_pin`.
     for i in 0..=GSI_LEGACY_END {
         let intsrc = MpcIntsrc {
             type_: MP_INTSRC,

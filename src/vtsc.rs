@@ -13,7 +13,7 @@
 //! side. So `vtsc_now()` and what the guest reads with `RDTSC` are the SAME
 //! clock — same offset, same frequency, no second source of truth, ever. Every
 //! other time-derived thing in the VMM (the userspace PIT counter today; the
-//! userspace LAPIC timer and the event queue in Step 3b) is a pure function of
+//! userspace LAPIC timer and the event queue) is a pure function of
 //! this one clock. That is what makes later TSC fast-forward sound: move the
 //! offset and *everything* moves with it, atomically, because there is nothing
 //! else to move.
@@ -23,9 +23,9 @@
 //! host-time sample or anything else — `vtsc_now()` re-reads the host TSC every
 //! call and adds the *cached* offset, so it stays exactly in step with the guest.
 //!
-//! ## The cached offset (Step 4: fast-forward)
+//! ## The cached offset (fast-forward)
 //!
-//! From Step 4 the offset is no longer fixed: when the guest is idle the parker
+//! The offset is not fixed: when the guest is idle the parker
 //! JUMPs virtual time forward by bumping the offset (see [`VirtualClock::bump_offset`]).
 //! The offset lives in a single shared cell ([`std::cell::Cell`] behind an
 //! [`std::rc::Rc`]) so that every `VirtualClock` clone — the authority in the
@@ -66,7 +66,7 @@ const KVMIO: u32 = 0xAE;
 ioctl_iow_nr!(KVM_HAS_DEVICE_ATTR, KVMIO, 0xe3, kvm_device_attr);
 ioctl_iow_nr!(KVM_GET_DEVICE_ATTR, KVMIO, 0xe2, kvm_device_attr);
 // KVM_SET_DEVICE_ATTR = _IOW(KVMIO, 0xe1, struct kvm_device_attr): the write-side
-// of the same attribute interface, used by Step 4 to bump KVM_VCPU_TSC_OFFSET.
+// of the same attribute interface, used to bump KVM_VCPU_TSC_OFFSET.
 ioctl_iow_nr!(KVM_SET_DEVICE_ATTR, KVMIO, 0xe1, kvm_device_attr);
 
 #[derive(Debug)]
@@ -91,7 +91,7 @@ pub struct TscFrequency {
 impl TscFrequency {
     /// Build from a raw Hz value. Panics on zero — a zero TSC frequency is a
     /// programming error, never a legitimate runtime value.
-    #[allow(dead_code)] // used by tests today; a convenience constructor for 3b
+    #[allow(dead_code)] // used by tests today; a convenience constructor
     pub fn from_hz(hz: u64) -> Self {
         assert!(hz > 0, "TSC frequency must be non-zero");
         Self { hz }
@@ -112,14 +112,14 @@ impl TscFrequency {
 
     /// Convert a TSC-cycle count to nanoseconds (rounded down). Uses 128-bit
     /// intermediate math so it does not overflow for any 64-bit cycle count.
-    #[allow(dead_code)] // the cycles<->ns module; drives event scheduling in 3b
+    #[allow(dead_code)] // the cycles<->ns module; drives event scheduling
     pub fn cycles_to_ns(&self, cycles: u64) -> u64 {
         ((u128::from(cycles) * 1_000_000_000u128) / u128::from(self.hz)) as u64
     }
 
     /// Convert a nanosecond duration to TSC cycles (rounded down). 128-bit
     /// intermediate math; no overflow for any 64-bit nanosecond count.
-    #[allow(dead_code)] // the cycles<->ns module; drives event scheduling in 3b
+    #[allow(dead_code)] // the cycles<->ns module; drives event scheduling
     pub fn ns_to_cycles(&self, ns: u64) -> u64 {
         ((u128::from(ns) * u128::from(self.hz)) / 1_000_000_000u128) as u64
     }
@@ -138,7 +138,7 @@ pub fn host_rdtsc() -> u64 {
 /// Holds the TSC offset (in a shared cell — see the module docs) and the one
 /// TSC-frequency module. `Clone` shares the offset cell, so the authority in the
 /// vCPU loop and the copies the LAPIC/PIT hold all observe the same value; a
-/// Step-4 [`bump_offset`](Self::bump_offset) is therefore seen by every clone.
+/// [`bump_offset`](Self::bump_offset) is therefore seen by every clone.
 /// Deliberately NOT `Copy`: an accidental by-value copy would silently detach a
 /// snapshot of the offset from future bumps.
 #[derive(Clone, Debug)]
@@ -153,7 +153,7 @@ pub struct VirtualClock {
 impl VirtualClock {
     /// Construct from an explicit offset + frequency. Used by unit tests and by
     /// [`VirtualClock::from_vcpu`].
-    #[allow(dead_code)] // used by tests; explicit constructor kept for 3b
+    #[allow(dead_code)] // used by tests; explicit constructor
     pub fn new(tsc_offset: i64, freq: TscFrequency) -> Self {
         Self {
             tsc_offset: Rc::new(Cell::new(tsc_offset)),
@@ -211,7 +211,7 @@ impl VirtualClock {
         self.freq
     }
 
-    /// Fast-forward the virtual clock by `delta` cycles (Step 4's JUMP primitive).
+    /// Fast-forward the virtual clock by `delta` cycles (the JUMP primitive).
     ///
     /// Bumps `tsc_offset` by `delta` **write-through**: it programs KVM's
     /// `KVM_VCPU_TSC_OFFSET` first (so the guest's own RDTSC advances by exactly
@@ -369,7 +369,7 @@ mod tests {
 
     #[test]
     fn clones_share_the_cached_offset() {
-        // The Step-4 invariant: a bump through one handle is visible through every
+        // The invariant: a bump through one handle is visible through every
         // clone (this is what makes the LAPIC/PIT copies track a fast-forward).
         let a = VirtualClock::new(1_000, TscFrequency::from_hz(3_072_000_000));
         let b = a.clone();
