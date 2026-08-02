@@ -42,6 +42,15 @@ desc = "unit/integration Rust tests (the only fast tier before this work)"
 # ============================ T1 — fast (<=~90s) ===========================
 
 [[test]]
+name = "agent-deps"
+tier = "T1"
+tags = ["parallel-safe"]
+timeout = 90
+requires = "dvmm-agent/deps.allow"
+cmd = "scripts/agent_deps_check.sh"
+desc = "FLOOR(agent minimalism): cargo tree -p dvmm-agent == committed allowlist (no heavy deps)"
+
+[[test]]
 name = "smoke-busybox"
 tier = "T1"
 tags = ["parallel-safe"]
@@ -125,6 +134,24 @@ cmd = "scripts/smoke_test_binds.sh 150"
 desc = "relative rw bind + named volume materialized/writable under FF"
 
 # ============================ T3 — nightly =================================
+
+[[test]]
+name = "agent-size"
+tier = "T3"
+tags = ["needs-bake"]
+timeout = 300
+requires = "dvmm-agent/Cargo.toml dvmm-agent/images.lock"
+cmd = "scripts/agent_size_check.sh"
+desc = "FLOOR(agent minimalism): stripped musl dvmm-agent <= 3 MiB (pinned builder)"
+
+[[test]]
+name = "agent-repro"
+tier = "T3"
+tags = ["needs-bake"]
+timeout = 400
+requires = "dvmm-agent/Cargo.toml dvmm-agent/images.lock"
+cmd = "scripts/agent_double_build.sh"
+desc = "FLOOR(agent repro): two fresh-container builds of dvmm-agent are byte-identical"
 
 [[test]]
 name = "corpus-full"

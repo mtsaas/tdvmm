@@ -1,0 +1,1 @@
+{"id":3,"ok":true,"op":"containers","containers":[{"name":"dvmm_faultlab_db_1","service":"db","state":"running","exit_code":0,"health":"healthy"},{"name":"dvmm_faultlab_client_1","service":"client","state":"running","exit_code":0,"health":""}]}

@@ -19,7 +19,7 @@
 //!
 //! Every command is delivered by the VMM at its **scheduled vtsc** as a queue
 //! event (see `TimerKind::ScenarioStep` in `main.rs`) — never an ad-hoc side
-//! channel. [`ControlChannel::send_line`] only *queues* bytes; [`ControlChannel::pump`]
+//! channel. [`ControlChannel::send_frame`] only *queues* bytes; [`ControlChannel::pump`]
 //! moves them into the FIFO and raises the IRQ, and both run on the vCPU thread
 //! at loop boundaries, exactly like every other guest-state effect.
 //!
@@ -87,11 +87,13 @@ impl ControlChannel {
         }
     }
 
-    /// Queue one command line (VMM -> guest), appending the `\n` delimiter. Does
-    /// NOT touch the FIFO or raise an IRQ — call [`pump`](Self::pump) for that.
-    pub fn send_line(&mut self, line: &[u8]) {
-        self.pending_rx.extend(line.iter().copied());
-        self.pending_rx.push_back(b'\n');
+    /// Queue one already-framed command line (VMM -> guest). The bytes must be a
+    /// complete `dvmm_proto`-framed line (JSON + trailing `\n`, via
+    /// [`dvmm_proto::encode_line`]) — this crate no longer owns framing; the wire
+    /// contract does. Does NOT touch the FIFO or raise an IRQ — call
+    /// [`pump`](Self::pump) for that.
+    pub fn send_frame(&mut self, framed: &[u8]) {
+        self.pending_rx.extend(framed.iter().copied());
     }
 
     /// Feed as many queued bytes as the RX FIFO will accept and raise IRQ3 if any

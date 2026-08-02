@@ -229,7 +229,7 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     // The key covers EVERY input that affects the output bytes: the whole compose
     // dir tree (compose.yml + build contexts + bind sources + service source,
     // excluding this bake's own committed outputs), the kernel, the agent source,
-    // the guest overlay tree, the pinned compose engine, the host podman/go
+    // the guest overlay tree, the pinned compose engine, the host podman
     // toolchain, the dvmm binary itself (all compiled-in pins + bake logic), and
     // the sizing knobs. `dvmm build` is deterministic (artifact_test gate 1), so a
     // hit reusing the prior `.dvmm` is byte-identical to a fresh bake.
@@ -393,9 +393,13 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     eprintln!("== assemble initramfs (Rust rootfs + cpio) ==");
     // (out_initramfs computed early, above, for the cache path)
 
-    // build the dvmm-agent host-side (reproducible flags), before the unshare.
+    // build the dvmm-agent (static musl, reproducible) in the pinned builder
+    // container, before the unshare. Returns the embedded build hash (the compat
+    // oracle reported by ping/hello); its file sha256 goes in the ledger + anchors.
     let agent_bin = work.join("dvmm-agent");
-    build_agent(&here, &agent_bin)?;
+    let agent_build_hash = build_agent(&here, &agent_bin)?;
+    let agent_sha = sha256_file_hex(&agent_bin)?;
+    eprintln!("   dvmm-agent: sha256 {agent_sha}  build {agent_build_hash}");
 
     // fetch + verify the pinned minirootfs + compose binary (cached in alpine_dir).
     let mirror = std::env::var("ALPINE_MIRROR").unwrap_or_else(|_| DEFAULT_MIRROR.to_string());
@@ -447,7 +451,7 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     let art_sha = sha256_file_hex(&out_initramfs)?;
 
     // --- 7. write stack.lock (the reproducibility ledger) ---
-    write_stack_lock(&here, &stack_name, &project, mem_mib, est_mib, &lock_sha, &art_sha, &out_initramfs, &records, &plain_refs, &plain_pin, &seedpins, &validated, &podman_version)?;
+    write_stack_lock(&here, &stack_name, &project, mem_mib, est_mib, &lock_sha, &art_sha, &agent_sha, &out_initramfs, &records, &plain_refs, &plain_pin, &seedpins, &validated, &podman_version)?;
 
     // stash the emitted lock next to the manifest.
     std::fs::copy(&lock_path, &committed_lock)?;
@@ -455,7 +459,7 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     // --- 8. pack the single-file .dvmm artifact ---
     eprintln!("== pack .dvmm artifact ==");
     let kernel = here.join("kernel/vmlinux-6.1.128");
-    let dvmm_bytes = pack_dvmm(&self_exe, &records, &compose_version, &compose_sha256, &stack_name, &project, mem_mib, est_mib, &podman_version, &kernel, &out_initramfs, &lock_path)?;
+    let dvmm_bytes = pack_dvmm(&self_exe, &records, &compose_version, &compose_sha256, &stack_name, &project, mem_mib, est_mib, &podman_version, &agent_sha, &agent_build_hash, &kernel, &out_initramfs, &lock_path)?;
     std::fs::write(&out_dvmm, &dvmm_bytes)?;
     let dvmm_sha = artifact::sha256_hex(&dvmm_bytes);
     // append the artifact identity to the ledger.
@@ -671,21 +675,116 @@ fn squash_short(reff: &str) -> String {
 
 // ---- agent build + fetch helpers ------------------------------------------
 
-fn build_agent(here: &Path, out: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    if Command::new("go").arg("version").output().is_err() {
-        return Err("host 'go' is required to build dvmm-agent".into());
+/// Read the pinned rust+musl builder image ref + digest from
+/// `dvmm-agent/images.lock` (Fable §2). Returns `(image, digest)`.
+pub fn read_builder_pin(repo_root: &Path) -> Result<(String, String), Box<dyn std::error::Error>> {
+    let lock = repo_root.join("dvmm-agent/images.lock");
+    let text =
+        std::fs::read_to_string(&lock).map_err(|e| format!("reading {}: {e}", lock.display()))?;
+    let mut image = String::new();
+    let mut digest = String::new();
+    for line in text.lines() {
+        let l = line.trim();
+        if let Some(v) = l.strip_prefix("BUILDER_IMAGE=") {
+            image = v.trim().to_string();
+        } else if let Some(v) = l.strip_prefix("BUILDER_DIGEST=") {
+            digest = v.trim().to_string();
+        }
     }
-    let agent_src = here.join("agent");
-    eprintln!("building dvmm-agent (static, reproducible) ...");
-    run(Command::new("go")
-        .current_dir(&agent_src)
-        .env("CGO_ENABLED", "0")
-        .env("GOTOOLCHAIN", "local")
-        .env("GOFLAGS", "-trimpath")
-        .args(["build", "-trimpath", "-buildvcs=false", "-ldflags=-s -w -buildid=", "-o"])
-        .arg(out)
-        .arg("."))?;
-    Ok(())
+    if image.is_empty() || digest.is_empty() {
+        return Err("dvmm-agent/images.lock missing BUILDER_IMAGE / BUILDER_DIGEST".into());
+    }
+    Ok((image, digest))
+}
+
+/// A deterministic identity of the agent's SOURCES — the `dvmm-agent` +
+/// `dvmm-proto` crate trees + `Cargo.lock`. Embedded as the agent's build hash
+/// (the compatibility oracle reported by `ping`/hello) and folded into the bake
+/// cache key. First 16 hex of the sha256.
+fn agent_src_id(repo_root: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    let a = tree_hash(&repo_root.join("dvmm-agent"), &[])?;
+    let p = tree_hash(&repo_root.join("dvmm-proto"), &[])?;
+    let lock = sha256_file_hex(&repo_root.join("Cargo.lock"))?;
+    Ok(artifact::sha256_hex(format!("{a}\n{p}\n{lock}\n").as_bytes())[..16].to_string())
+}
+
+/// Build the guest `dvmm-agent` as a static, reproducible `x86_64-unknown-linux-
+/// musl` binary INSIDE the pinned builder container (Fable §2 — never on the host,
+/// so rustc drift can't change the `.dvmm` bytes). Determinism knobs: the
+/// `agent-release` profile (opt-level=z, lto, codegen-units=1, panic=abort,
+/// strip=symbols); `SOURCE_DATE_EPOCH`; `--remap-path-prefix` for both the source
+/// mount and CARGO_HOME; `--build-id=none`; and `rust-lld` + self-contained
+/// linking so no external C toolchain is pulled. Returns the embedded build hash.
+fn build_agent(here: &Path, out: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    let repo_root = here
+        .parent()
+        .ok_or("could not locate the repo root above guest/")?
+        .to_path_buf();
+    let (image, digest) = read_builder_pin(&repo_root)?;
+    let img_ref = format!("{image}@{digest}");
+    let build_hash = agent_src_id(&repo_root)?;
+    eprintln!("building dvmm-agent (static musl, reproducible) in {img_ref}");
+
+    let confdir = mkdtemp()?;
+    let conf = confdir.join("containers.conf");
+    std::fs::write(&conf, "[engine]\nruntime=\"runc\"\n")?;
+    let work = mkdtemp()?;
+
+    // rust-lld consumes link args directly (no `cc` driver), so `--build-id=none`
+    // is passed as-is. The remaps stabilize the two absolute paths that would
+    // otherwise leak into the bytes: the /src source mount and CARGO_HOME.
+    let rustflags = "-C linker=rust-lld -C link-self-contained=yes -C link-arg=--build-id=none \
+                     --remap-path-prefix=/src=/dvmm --remap-path-prefix=/work/cargo=/cargo";
+    let script = "set -e; cd /src && \
+        cargo build -p dvmm-agent --profile agent-release \
+            --target x86_64-unknown-linux-musl --locked && \
+        cp /work/target/x86_64-unknown-linux-musl/agent-release/dvmm-agent /work/dvmm-agent";
+
+    run(Command::new("podman")
+        .env("CONTAINERS_CONF", &conf)
+        .arg("run")
+        .arg("--rm")
+        .arg("-v")
+        .arg(format!("{}:/src:ro", repo_root.display()))
+        .arg("-v")
+        .arg(format!("{}:/work", work.display()))
+        .arg("-e")
+        .arg(format!("SOURCE_DATE_EPOCH={BUILD_EPOCH}"))
+        .arg("-e")
+        .arg("CARGO_HOME=/work/cargo")
+        .arg("-e")
+        .arg("CARGO_TARGET_DIR=/work/target")
+        .arg("-e")
+        .arg(format!("RUSTFLAGS={rustflags}"))
+        .arg("-e")
+        .arg(format!("DVMM_AGENT_BUILD={build_hash}"))
+        .arg(&img_ref)
+        .args(["sh", "-c", script]))?;
+
+    std::fs::copy(work.join("dvmm-agent"), out)
+        .map_err(|e| format!("agent build produced no binary: {e}"))?;
+    let _ = std::fs::remove_dir_all(&work);
+    let _ = std::fs::remove_dir_all(&confdir);
+    Ok(build_hash)
+}
+
+/// `dvmm build-agent -o <path>`: build the reproducible musl agent standalone
+/// (the size + double-build byte-identity gate scripts use this). Prints
+/// `<sha256>  <path>` to stdout.
+pub fn cmd_build_agent(out: &str) -> Result<i32, Box<dyn std::error::Error>> {
+    let here = self_here()?;
+    let outp = PathBuf::from(out);
+    if let Some(parent) = outp.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    let build_hash = build_agent(&here, &outp)?;
+    let sha = sha256_file_hex(&outp)?;
+    let size = std::fs::metadata(&outp)?.len();
+    eprintln!("   dvmm-agent: {size} bytes  build={build_hash}  sha256={sha}");
+    println!("{sha}  {}", outp.display());
+    Ok(0)
 }
 
 fn fetch_verify(path: &Path, url: &str, sha: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -727,6 +826,7 @@ fn write_stack_lock(
     est_mib: u64,
     lock_sha: &str,
     art_sha: &str,
+    agent_sha: &str,
     out_initramfs: &Path,
     records: &[ImgRecord],
     _plain_refs: &[String],
@@ -790,6 +890,8 @@ fn write_stack_lock(
     out.push_str(&format!("ram_estimate_mib  {est_mib}\n"));
     out.push_str(&format!("compose_lock_sha256  {lock_sha}\n"));
     out.push_str(&format!("initramfs_sha256     {art_sha}  {}\n", out_initramfs.file_name().unwrap().to_string_lossy()));
+    // The reproducible guest control-channel agent's own line (Fable §2).
+    out.push_str(&format!("agent_sha256         {agent_sha}  dvmm-agent\n"));
     for line in &prov {
         out.push_str(&format!("  {line}\n"));
     }
@@ -850,6 +952,8 @@ fn pack_dvmm(
     mem_mib: u64,
     est_mib: u64,
     podman_version: &str,
+    agent_sha: &str,
+    agent_build_hash: &str,
     kernel_path: &Path,
     initramfs_path: &Path,
     lock_path: &Path,
@@ -893,6 +997,10 @@ fn pack_dvmm(
                 compose: compose_version.to_string(),
             },
             ram_estimate_mib: est_mib,
+            // The baked control-channel agent: its file sha256 + the build hash
+            // it reports over ping/hello (the compatibility oracle; Fable §2/§4).
+            agent_sha256: agent_sha.to_string(),
+            agent_build_hash: agent_build_hash.to_string(),
         },
         run_defaults: artifact::RunDefaults {
             mem_mib,
@@ -1172,7 +1280,7 @@ fn walk_files(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
 
 /// Cache-entry format version. Bump when the cached fileset or key inputs change
 /// in a way older entries can't satisfy.
-const CACHE_VERSION: u32 = 1;
+const CACHE_VERSION: u32 = 2;
 
 struct CacheCtx {
     /// The per-key entry directory: <cache-root>/<key>.
@@ -1245,11 +1353,24 @@ fn compute_cache_key(
     working_set_mib: u64,
     squash_threshold_mib: u64,
 ) -> Result<CacheCtx, String> {
+    let repo_root = here
+        .parent()
+        .ok_or_else(|| "no repo root above guest/".to_string())?;
     let self_sha = sha256_file_hex(self_exe).map_err(|x| format!("hashing dvmm binary: {x}"))?;
     let kernel_sha = sha256_file_hex(&here.join("kernel/vmlinux-6.1.128"))
         .map_err(|x| format!("hashing kernel: {x}"))?;
+    // The agent is now a Rust crate built in a pinned musl container: its cache
+    // input is the agent + proto crate trees + Cargo.lock + the builder image
+    // digest (a toolchain/image bump MUST miss). Fable §2.
     let agent_tree =
-        tree_hash(&here.join("agent"), &[]).map_err(|x| format!("hashing agent: {x}"))?;
+        tree_hash(&repo_root.join("dvmm-agent"), &[]).map_err(|x| format!("hashing dvmm-agent: {x}"))?;
+    let proto_tree =
+        tree_hash(&repo_root.join("dvmm-proto"), &[]).map_err(|x| format!("hashing dvmm-proto: {x}"))?;
+    let cargo_lock = sha256_file_hex(&repo_root.join("Cargo.lock"))
+        .map_err(|x| format!("hashing Cargo.lock: {x}"))?;
+    let builder_digest = read_builder_pin(repo_root)
+        .map(|(_, d)| d)
+        .map_err(|x| format!("reading builder pin: {x}"))?;
     let overlay_tree =
         tree_hash(&alpine_dir.join("overlay"), &[]).map_err(|x| format!("hashing overlay: {x}"))?;
     let engine_sha = sha256_file_hex(&alpine_dir.join("compose-engine.lock"))
@@ -1259,16 +1380,17 @@ fn compute_cache_key(
     let stack_tree = tree_hash(compose_dir, &["compose.lock.yml", "stack.lock"])
         .map_err(|x| format!("hashing stack dir: {x}"))?;
     let podman_v = tool_version("podman", &["--version"]);
-    let go_v = tool_version("go", &["version"]);
 
     let manifest = format!(
         "dvmm-bake-cache v{CACHE_VERSION}\n\
          self:      {self_sha}\n\
          podman:    {podman_v}\n\
-         go:        {go_v}\n\
          engine:    {engine_sha}\n\
          kernel:    {kernel_sha}\n\
          agent:     {agent_tree}\n\
+         proto:     {proto_tree}\n\
+         cargolock: {cargo_lock}\n\
+         builder:   {builder_digest}\n\
          overlay:   {overlay_tree}\n\
          stackdir:  {stack_tree}\n\
          name:      {stack_name}\n\

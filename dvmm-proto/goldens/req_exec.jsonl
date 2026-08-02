@@ -1,0 +1,1 @@
+{"id":2,"op":"exec","container":"service","cmd":["sh","-c","psql -tAc 'select count(*) from events;'"],"timeout_s":60}

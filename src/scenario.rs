@@ -29,7 +29,7 @@
 //! ## The LAW for commands
 //!
 //! The engine never touches the control UART directly for delivery: it queues a
-//! line via [`ControlChannel::send_line`], and `main.rs` pumps it into the FIFO
+//! line via [`ControlChannel::send_frame`], and `main.rs` pumps it into the FIFO
 //! at the scheduled vtsc (on the vCPU thread). Commands are delivered at their
 //! scheduled virtual time as queue events, never as an ad-hoc side channel.
 //!
@@ -61,6 +61,8 @@ use std::time::Instant;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+
+use dvmm_proto::{decode_line, encode_line, ContainerInfo, Reply, Request};
 
 use crate::control::ControlChannel;
 use crate::vtsc::TscFrequency;
@@ -680,59 +682,15 @@ pub fn service_names(compose_lock: &[u8]) -> Result<HashSet<String>, ScenarioErr
 }
 
 // ============================================================================
-// Agent protocol (line-delimited JSON).
+// Agent protocol (line-delimited JSON) — the wire types live in `dvmm-proto`,
+// the ONE source of truth shared with the guest `dvmm-agent`. The host builds
+// [`Request`]s and parses [`Reply`]s (a permissive superset that also carries the
+// proactive hello). `ContainerInfo` is re-exported for the assertion evaluators.
 // ============================================================================
 
-#[derive(Serialize)]
-struct AgentRequest {
-    id: u64,
-    op: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    container: Option<String>,
-    /// The SECOND service for two-party network faults (partition/heal).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    peer: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cmd: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    timeout_s: Option<u64>,
-}
-
-#[derive(Deserialize, Serialize, Clone, Debug)]
-pub struct ContainerInfo {
-    #[serde(default)]
-    pub name: String,
-    #[serde(default)]
-    pub service: String,
-    #[serde(default)]
-    pub state: String,
-    #[serde(default)]
-    pub exit_code: i64,
-    #[serde(default)]
-    pub health: String,
-}
-
-#[derive(Deserialize, Default)]
-struct AgentLine {
-    #[serde(default)]
-    id: Option<u64>,
-    #[serde(default)]
-    agent: Option<String>,
-    #[serde(default)]
-    ok: Option<bool>,
-    #[serde(default)]
-    exit: Option<i64>,
-    #[serde(default)]
-    stdout: Option<String>,
-    #[serde(default)]
-    stderr: Option<String>,
-    #[serde(default)]
-    error: Option<String>,
-    #[serde(default)]
-    dur_ms: Option<u64>,
-    #[serde(default)]
-    containers: Option<Vec<ContainerInfo>>,
-}
+/// The host parses every inbound line as a permissive [`Reply`] (it also carries
+/// the proactive hello: `id`/`ok` absent, `agent` present).
+type AgentLine = Reply;
 
 // ============================================================================
 // Run metadata + FF summary + report structs (the STABLE contract).
@@ -876,6 +834,9 @@ impl ScenarioEngine {
                 "scenario_name": self.scn.name,
                 "fast_forward": self.meta.fast_forward,
                 "steps_total": self.scn.steps.len(),
+                // The control-channel wire schema (Fable §4): the run-log header
+                // records the proto version alongside the JSONL/report schema.
+                "proto_schema": dvmm_proto::SCHEMA,
             }),
         );
         self.phase = Phase::AwaitAgent;
@@ -973,28 +934,25 @@ impl ScenarioEngine {
 
     fn build_exec_req(&mut self, e: &ExecReq, timeout_secs: f64) -> (u64, Vec<u8>) {
         let id = self.new_id();
-        let req = AgentRequest {
+        let req = Request {
             id,
-            op: "exec",
+            op: "exec".into(),
             container: Some(e.container.clone()),
             peer: None,
             cmd: Some(e.argv.clone()),
             timeout_s: Some(timeout_secs.max(1.0) as u64),
         };
-        (id, serde_json::to_vec(&req).unwrap())
+        (id, encode_line(&req).unwrap())
     }
 
     fn build_containers_req(&mut self) -> (u64, Vec<u8>) {
         let id = self.new_id();
-        let req = AgentRequest {
+        let req = Request {
             id,
-            op: "containers",
-            container: None,
-            peer: None,
-            cmd: None,
-            timeout_s: None,
+            op: "containers".into(),
+            ..Default::default()
         };
-        (id, serde_json::to_vec(&req).unwrap())
+        (id, encode_line(&req).unwrap())
     }
 
     /// Build a TEST-1b fault-action request (kill/stop/start/partition/heal).
@@ -1006,15 +964,15 @@ impl ScenarioEngine {
         timeout_secs: f64,
     ) -> (u64, Vec<u8>) {
         let id = self.new_id();
-        let req = AgentRequest {
+        let req = Request {
             id,
-            op,
+            op: op.into(),
             container: a.clone(),
             peer: b.clone(),
             cmd: None,
             timeout_s: Some(timeout_secs.max(1.0) as u64),
         };
-        (id, serde_json::to_vec(&req).unwrap())
+        (id, encode_line(&req).unwrap())
     }
 
     /// Issue the implicit end-of-run container census (TEST-1b expected-death
@@ -1027,7 +985,7 @@ impl ScenarioEngine {
             "command",
             json!({ "id": id, "op": "containers(final-census)" }),
         );
-        com2.send_line(&bytes);
+        com2.send_frame(&bytes);
         self.phase = Phase::FinalCensus { id };
         self.next_deadline = Some(now.saturating_add(self.secs_to_cycles(DEFAULT_EXEC_TIMEOUT_S)));
     }
@@ -1119,7 +1077,7 @@ impl ScenarioEngine {
             Action::Exec { req, timeout } => {
                 let (id, bytes) = self.build_exec_req(&req, timeout);
                 self.log_command(now, idx, id, "exec", Some(&req));
-                com2.send_line(&bytes);
+                com2.send_frame(&bytes);
                 let deadline = now.saturating_add(self.secs_to_cycles(timeout));
                 self.phase = Phase::AwaitReply { id };
                 self.next_deadline = Some(deadline);
@@ -1127,7 +1085,7 @@ impl ScenarioEngine {
             Action::Containers { timeout } => {
                 let (id, bytes) = self.build_containers_req();
                 self.log_command(now, idx, id, "containers", None);
-                com2.send_line(&bytes);
+                com2.send_frame(&bytes);
                 let deadline = now.saturating_add(self.secs_to_cycles(timeout));
                 self.phase = Phase::AwaitReply { id };
                 self.next_deadline = Some(deadline);
@@ -1137,7 +1095,7 @@ impl ScenarioEngine {
                     now.saturating_add(self.secs_to_cycles(overall));
                 let (id, bytes) = self.build_exec_req(&req, timeout);
                 self.log_command(now, idx, id, "exec(probe)", Some(&req));
-                com2.send_line(&bytes);
+                com2.send_frame(&bytes);
                 self.phase = Phase::WaitPoll { id };
                 self.next_deadline = Some(self.wait_overall_deadline);
             }
@@ -1146,7 +1104,7 @@ impl ScenarioEngine {
                     now.saturating_add(self.secs_to_cycles(overall));
                 let (id, bytes) = self.build_containers_req();
                 self.log_command(now, idx, id, "containers(probe)", None);
-                com2.send_line(&bytes);
+                com2.send_frame(&bytes);
                 self.phase = Phase::WaitPoll { id };
                 self.next_deadline = Some(self.wait_overall_deadline);
             }
@@ -1155,7 +1113,7 @@ impl ScenarioEngine {
                 // with op + service(+peer), then awaited like any command.
                 let (id, bytes) = self.build_action_req(op, &a, &b, timeout);
                 self.log_action(now, idx, id, op, &a, &b);
-                com2.send_line(&bytes);
+                com2.send_frame(&bytes);
                 let deadline = now.saturating_add(self.secs_to_cycles(timeout));
                 self.phase = Phase::AwaitReply { id };
                 self.next_deadline = Some(deadline);
@@ -1173,13 +1131,13 @@ impl ScenarioEngine {
             ProbeReq::Exec(req) => {
                 let (id, bytes) = self.build_exec_req(&req, DEFAULT_EXEC_TIMEOUT_S);
                 self.log_command(now, idx, id, "exec(probe)", Some(&req));
-                com2.send_line(&bytes);
+                com2.send_frame(&bytes);
                 self.phase = Phase::WaitPoll { id };
             }
             ProbeReq::Containers => {
                 let (id, bytes) = self.build_containers_req();
                 self.log_command(now, idx, id, "containers(probe)", None);
-                com2.send_line(&bytes);
+                com2.send_frame(&bytes);
                 self.phase = Phase::WaitPoll { id };
             }
         }
@@ -1272,7 +1230,7 @@ impl ScenarioEngine {
 
     /// A reply line arrived from the agent.
     pub fn on_reply(&mut self, line: &[u8], now: u64, com2: &mut ControlChannel) -> Flow {
-        let parsed: AgentLine = match serde_json::from_slice(line) {
+        let parsed: AgentLine = match decode_line(line) {
             Ok(v) => v,
             Err(_) => {
                 // Non-JSON noise on ttyS1: log and ignore.
@@ -1285,14 +1243,29 @@ impl ScenarioEngine {
             }
         };
 
-        // Agent hello (proactive readiness announcement).
-        if parsed.id.is_none() && parsed.agent.is_some() {
+        // Agent hello (proactive readiness announcement). Carries the agent's
+        // wire schema + build hash — the compatibility oracle (Fable §4).
+        if parsed.is_hello() {
             if let Phase::AwaitAgent = self.phase {
                 self.t0 = now;
+                if let Some(s) = parsed.schema {
+                    if s != dvmm_proto::SCHEMA {
+                        crate::log_line(format_args!(
+                            "[dvmm][WARN] agent proto schema {s} != host {} \
+                             (host+agent should ship in lockstep)",
+                            dvmm_proto::SCHEMA
+                        ));
+                    }
+                }
                 self.logger.event(
                     now,
                     "agent_ready",
-                    json!({ "agent": parsed.agent }),
+                    json!({
+                        "agent": parsed.agent,
+                        "agent_schema": parsed.schema,
+                        "agent_build": parsed.build,
+                        "proto_schema": dvmm_proto::SCHEMA,
+                    }),
                 );
                 self.schedule(now, com2);
             }
@@ -1771,6 +1744,37 @@ fn truncate(s: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The HOST side of the shared golden round-trip (Fable §3): the committed
+    /// `dvmm-proto` fixtures decode + re-encode identically through the host's own
+    /// wire path (`Request`/`Reply` + `encode_line`/`decode_line`). With the
+    /// matching tests in `dvmm-proto` and `dvmm-agent`, every request/response
+    /// variant is exercised by BOTH the host and agent code paths.
+    #[test]
+    fn host_roundtrips_proto_goldens() {
+        use serde_json::Value;
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("dvmm-proto/goldens");
+        let mut files: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()))
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("jsonl"))
+            .collect();
+        files.sort();
+        assert!(!files.is_empty(), "no goldens in {}", dir.display());
+        for path in files {
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            let raw = std::fs::read(&path).unwrap();
+            let golden: Value = decode_line(&raw).unwrap();
+            let reenc: Value = if name.starts_with("req_") {
+                let m: Request = decode_line(&raw).unwrap_or_else(|e| panic!("{name}: {e}"));
+                serde_json::from_slice(&encode_line(&m).unwrap()).unwrap()
+            } else {
+                let m: Reply = decode_line(&raw).unwrap_or_else(|e| panic!("{name}: {e}"));
+                serde_json::from_slice(&encode_line(&m).unwrap()).unwrap()
+            };
+            assert_eq!(golden, reenc, "{name}: host round-trip mismatch");
+        }
+    }
 
     fn svc() -> HashSet<String> {
         ["postgres", "service"].iter().map(|s| s.to_string()).collect()

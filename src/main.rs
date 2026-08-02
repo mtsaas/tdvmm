@@ -627,6 +627,10 @@ struct Cli {
 enum Cmd {
     /// Bake a compose stack into a self-contained .dvmm (host tool: podman + network).
     Build(BuildCliArgs),
+    /// Build the reproducible static-musl dvmm-agent standalone (pinned builder
+    /// container). Prints `<sha256>  <path>`. Used by the size / double-build gates.
+    #[command(name = "build-agent")]
+    BuildAgent(BuildAgentArgs),
     /// Boot a raw kernel + initramfs (the low-level VMM-dev / smoke verb).
     Boot(BootArgs),
     /// Run a .dvmm stack artifact: apply its baked run-defaults, then boot (offline).
@@ -682,6 +686,14 @@ struct BuildCliArgs {
     /// pull/squash/assemble). Nightly bake-repeatability uses this to re-bake.
     #[arg(long)]
     no_cache: bool,
+}
+
+/// `dvmm build-agent` args.
+#[derive(Args)]
+struct BuildAgentArgs {
+    /// Output path for the built static-musl agent binary.
+    #[arg(short, long, value_name = "PATH", default_value = "dvmm-agent.bin")]
+    out: String,
 }
 
 /// Flags shared by `boot` and `run`. On `boot` the `Option`s fall back to the
@@ -876,6 +888,9 @@ impl EffectiveConfig {
             None => (DEFAULT_MAX_JUMP_SECS, "default"),
         };
         prov.push(format!("max-jump-secs={max_jump_secs} ({mj_src})"));
+        // The control-channel wire schema (Fable §4): the effective-config
+        // preamble records the proto version so a run log is self-describing.
+        prov.push(format!("proto-schema={} (built-in)", dvmm_proto::SCHEMA));
 
         Ok(EffectiveConfig {
             mem_mib,
@@ -958,6 +973,7 @@ fn dispatch() -> Result<i32, Box<dyn std::error::Error>> {
             validate_only: args.validate_only,
             no_cache: args.no_cache,
         }),
+        Cmd::BuildAgent(args) => build::cmd_build_agent(&args.out),
         Cmd::SeedBuild { config } => build::cmd_seed_build(&config),
         Cmd::AssembleInitramfs { config } => build::cmd_assemble_initramfs(&config),
         Cmd::Boot(args) => cmd_boot(args),

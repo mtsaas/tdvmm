@@ -14,11 +14,12 @@ project   dvmm_dogfood
 mem_mib   3072
 ram_estimate_mib  1742
 compose_lock_sha256  2064741641834d4c26a264f3beb5355592edfaaafd2f82376cf8455a2fc64682
-initramfs_sha256     44d644bf6ab769feffc4df3f7d99dfe5ca706d1b8c321e2e263c5ec0b144d334  initramfs-alpine-dogfood.cpio.gz
+initramfs_sha256     ba8f18cfbf12936e590303f2c67a3a64ccd6a371eee22921beb8f7409db5c20b  initramfs-alpine-dogfood.cpio.gz
+agent_sha256         269be188b3f4e3ccc6721713b870c3fa7ebba3f9af3b9e26acf05d8a077daf86  dvmm-agent
   image  policy=plain   upstream=docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616  diffid=sha256:0958e0fef2d6a31e1325b8bfecd99dead933363682d69850a7606599023751bc  size_mib=4
   image  policy=squash  upstream=docker.io/library/postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777  seed_tag=localhost/dvmm-postgres-57c72fd2a128:baked  src_diffid=sha256:af5b54b4903175790ece7037a66fd16496658d7030a59e2e2360f66038d74c8c  size_mib=283  GATE=ok
   pin    upstream=docker.io/library/postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777  pinned=localhost/dvmm-postgres-57c72fd2a128@sha256:cbf217007d0742829dc120c3ea9cd2621e90eb3adfeaf6684e87ce268a2ca368
 # --- informational (NOT compared for repeatability) ---
 # podman-version: 5.8.3
-# baked-at: 2026-08-02T11:20:14Z
-dvmm_sha256          070ea569d3b4f80d524560fd4b755072d0251fce72b27dea7a3f229d3d772b58  dogfood-B.dvmm
+# baked-at: 2026-08-02T14:42:32Z
+dvmm_sha256          cf09c7944e7d0ed897202934a88491b67f6a23fc47fa01a011d5459728e0f4ba  dogfood.dvmm

@@ -319,12 +319,17 @@ TEST-1b; the schema and agent protocol already leave room for it).
 
 - **Control channel.** A **second 16550** (COM2 / ttyS1) is added to the VMM,
   reusing the serial model. It is the modeled control channel between the host
-  and a tiny guest-side **`dvmm-agent`** (a static, reproducible Go binary baked
-  into every guest, running *outside* the containers). The agent **blocks reading
-  ttyS1** — a blocked read arms no timer, so it produces no wakes and an idle
-  guest with the agent baked in still fast-forwards normally. Protocol:
-  line-delimited JSON. The guest kernel gains `CONFIG_SERIAL_8250_NR_UARTS=2` so
-  ttyS1 exists (see `guest/kernel/test1a-com2.config`).
+  and a tiny guest-side **`dvmm-agent`** (a static, reproducible **Rust (musl)**
+  binary baked into every guest, running *outside* the containers). The agent
+  **blocks reading ttyS1** — a blocked read arms no timer, so it produces no wakes
+  and an idle guest with the agent baked in still fast-forwards normally.
+  Protocol: line-delimited JSON, whose types live in the **`dvmm-proto`** crate —
+  the single source of truth shared by BOTH the host and the agent (the workspace
+  is `dvmm` + `dvmm-proto` + `dvmm-agent`). The agent is cross-compiled to static
+  musl inside a **digest-pinned rust builder container** (`dvmm-agent/images.lock`)
+  so its bytes are reproducible and the `.dvmm` stays bit-identical. The guest
+  kernel gains `CONFIG_SERIAL_8250_NR_UARTS=2` so ttyS1 exists (see
+  `guest/kernel/test1a-com2.config`).
 - **The LAW for commands.** Every command is delivered by the VMM **at its
   scheduled vtsc as a queue entry** — a `(vtsc, ScenarioStep)` event that
   GENERALIZES the existing `(vtsc, StopRun)` horizon — never an ad-hoc side

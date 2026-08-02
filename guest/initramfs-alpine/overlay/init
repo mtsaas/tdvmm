@@ -104,7 +104,7 @@ echo "DVMM_ALPINE_BOOT_OK reached userspace"
 echo "kernel: $(uname -sr)   date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 echo
 
-# TEST-1a control-channel agent: a static Go binary that BLOCKS reading /dev/ttyS1
+# TEST-1a control-channel agent: a static Rust (musl) binary that BLOCKS reading /dev/ttyS1
 # (COM2). A blocked read arms no timer -> no wakes -> fast-forward-transparent. It
 # runs OUTSIDE the containers and services `dvmm test` control commands (exec /
 # container census via podman). Started in the background so it survives the

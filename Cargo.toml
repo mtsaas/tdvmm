@@ -1,9 +1,19 @@
 [package]
-name = "deterministic-vmm"
+name = "dvmm"
 version = "0.1.0"
 edition = "2021"
-description = "Step 1: a minimal single-vCPU KVM VMM that boots one Linux guest to a serial shell."
+description = "A minimal single-vCPU, fast-forwardable KVM VMM for deterministic service-stack testing."
 license = "Apache-2.0"
+
+# Cargo WORKSPACE (Fable §1): three members — this root VMM package (`dvmm`), the
+# protocol-only `dvmm-proto` lib, and the guest `dvmm-agent` bin. Single-crate-
+# two-bins was REJECTED; the agent is its own crate with a minimal dep tree.
+[workspace]
+members = ["dvmm-proto", "dvmm-agent"]
+# All three build/test by default so `cargo build --release` and the T0
+# `cargo test --release` gate cover the proto goldens + the agent, not just the VMM.
+default-members = [".", "dvmm-proto", "dvmm-agent"]
+resolver = "2"
 
 [[bin]]
 name = "dvmm"
@@ -28,6 +38,22 @@ serde_json = "1"
 sha2 = "0.10"
 serde_yaml = "0.9.34"
 regex = "1.13.1"
+# The line-JSON control-channel wire types, shared with the guest dvmm-agent.
+dvmm-proto = { path = "dvmm-proto" }
 
 [profile.release]
 debug = true
+
+# The reproducible + size-optimized profile for the guest dvmm-agent (Fable §2).
+# Profiles are workspace-global, so the agent gets its own custom profile rather
+# than mutating [profile.release] (which the VMM needs with debug=true). Built via
+# `cargo build -p dvmm-agent --profile agent-release --target x86_64-unknown-linux-musl`
+# inside the pinned musl builder container.
+[profile.agent-release]
+inherits = "release"
+opt-level = "z"
+codegen-units = 1
+lto = true
+panic = "abort"
+strip = "symbols"
+debug = false

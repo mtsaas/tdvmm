@@ -114,6 +114,14 @@ pub struct Anchors {
     pub toolchain: Toolchain,
     /// The bake's guest-RAM estimate (MiB).
     pub ram_estimate_mib: u64,
+    /// sha256 of the baked static `dvmm-agent` binary (Fable §2). `default` so
+    /// pre-agent-anchor artifacts still deserialize.
+    #[serde(default)]
+    pub agent_sha256: String,
+    /// The build hash the baked agent reports over `ping`/hello — the run-time
+    /// compatibility oracle (Fable §4). Matches `agent_build_hash` in the ping log.
+    #[serde(default)]
+    pub agent_build_hash: String,
 }
 
 /// The baked run-defaults: the config `dvmm run` applies unless a CLI flag
@@ -600,6 +608,8 @@ mod tests {
                     compose: "v5.3.1".into(),
                 },
                 ram_estimate_mib: 1742,
+                agent_sha256: "sha256agent".into(),
+                agent_build_hash: "deadbeefcafe0001".into(),
             },
             run_defaults: RunDefaults {
                 mem_mib: 3072,
