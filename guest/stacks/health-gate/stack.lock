@@ -14,8 +14,8 @@ project   dvmm_health-gate
 mem_mib   3072
 ram_estimate_mib  1044
 compose_lock_sha256  bf6f2a56e9b5c32684e711e1717294499e0e8cef3ab17ac09d148706f1beeff7
-initramfs_sha256     6a1892c537416be5c62b0f1507fac3f83dc4822841d807f5f1fc6f50dd23a60e  initramfs-alpine-health-gate.cpio.gz
-agent_sha256         ab9d4584490c3d6a57c3ab6c33ff755c2be1f972a8a1d5a17679f6fa38fd33e3  dvmm-agent
+initramfs_sha256     0e8825aa346923271d3845745245f9ce44a22ff33447173a7f33aac4caf20bf5  initramfs-alpine-health-gate.cpio.gz
+agent_sha256         c349a12a5a6df417aca96b3989d07419b2c7c9d1e184f8becae81187b0f50ad0  dvmm-agent
 builder_image        docker.io/library/alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
 builder_image        docker.io/library/debian:bookworm-slim@sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e
 builder_image        docker.io/library/rust:1.97-alpine3.22@sha256:b348cb409ac0a73de15065997a360063cf87465574a15e3e4469862cb8996f02
@@ -24,4 +24,4 @@ builder_image        docker.io/library/rust:1.97-alpine3.22@sha256:b348cb409ac0a
 # --- informational (NOT compared for repeatability) ---
 # host-probed values (podman version, baked-at) are written to the
 # cache dir's diagnostics/ side file, NEVER here (Fable guardrail §3).
-dvmm_sha256          003cd3d5959ec9a3c6dd1219e3190c230ee53f8e7648497640d18bbd1a8ce146  health-gate.dvmm
+dvmm_sha256          986d12c2c2b8a169a2a15ae59fbf9d50c1304f1fcbbf7c6305d796440ab14894  health-gate.dvmm

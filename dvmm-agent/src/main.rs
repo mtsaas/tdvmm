@@ -14,21 +14,26 @@
 //! line, and blocks again.
 //!
 //! Ops: `ping`, `exec`, `containers`, `kill`, `stop`, `start`, `partition`,
-//! `heal`. An unknown op is rejected. kill/stop/start WAIT for the container to
-//! reach its new state so a following census is deterministic.
+//! `heal`, `logs`. An unknown op is rejected. kill/stop/start WAIT for the
+//! container to reach its new state so a following census is deterministic.
+//! `logs` is a single BOUNDED read of a container's k8s-file log at a byte
+//! cursor — never a follow/tail (`-f` would defeat host fast-forward) — so the
+//! agent blocks again immediately after replying, exactly like every other op.
 //!
 //! Deps: `dvmm-proto` + `serde_json` (+ `serde` derive, already transitive) +
 //! `std` ONLY. Raw-mode termios is done with a std-only inline-asm `ioctl`
 //! syscall — no `libc`.
 
 use std::collections::BTreeMap;
-use std::fs::OpenOptions;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use dvmm_proto::{decode_line, encode_line, ContainerInfo, ErrorKind, Reply, Request, SCHEMA};
+use dvmm_proto::{
+    decode_line, encode_line, ContainerInfo, ErrorKind, Reply, Request, MAX_LOGS_CHUNK_BYTES, SCHEMA,
+};
 use serde::Deserialize;
 
 const AGENT_ID: &str = "dvmm-agent/1";
@@ -236,6 +241,7 @@ impl Agent {
             "start" => self.do_start(req),
             "partition" => self.do_partition(req),
             "heal" => self.do_heal(req),
+            "logs" => self.do_logs(req),
             other => Reply {
                 id: Some(req.id),
                 ok: Some(false),
@@ -449,6 +455,67 @@ impl Agent {
         ok_stdout(req.id, "heal", detail)
     }
 
+    /// Fetch one BOUNDED chunk of a service's container log. The compose k8s-file
+    /// backend gives every container a plain log file (path via `podman inspect
+    /// {{.LogPath}}`); we seek to `cursor`, read up to `min(max_bytes, cap)` raw
+    /// bytes, and return them with the advanced cursor + an EOF flag. The host
+    /// pages a whole log by looping from cursor 0 to `eof`. A single read, then
+    /// the agent blocks again — NEVER a follow/tail (which would defeat the host's
+    /// fast-forward).
+    fn do_logs(&self, req: &Request) -> Reply {
+        let service = req.container.clone().unwrap_or_default();
+        if service.is_empty() {
+            return err(req.id, "logs", "logs requires `container`".into());
+        }
+        let cursor = req.cursor.unwrap_or(0);
+        // Hard-cap the read at MAX_LOGS_CHUNK_BYTES regardless of a larger request,
+        // so a reply's JSON-escaped `data` can never approach the host TX_BUF_CAP.
+        let cap = req
+            .max_bytes
+            .unwrap_or(MAX_LOGS_CHUNK_BYTES)
+            .min(MAX_LOGS_CHUNK_BYTES) as usize;
+
+        // Resolve service -> a container id. Prefer a running one, but fall back to
+        // a stopped/exited container so a killed service's logs are still pullable.
+        let id = match resolve_by_service(&service, true) {
+            Ok(Some((id, _))) => id,
+            Ok(None) => match resolve_by_service(&service, false) {
+                Ok(Some((id, _))) => id,
+                Ok(None) => {
+                    return err(
+                        req.id,
+                        "logs",
+                        ErrorKind::NoContainer.msg(format!("no container for service {service}")),
+                    )
+                }
+                Err(e) => return err(req.id, "logs", ErrorKind::PodmanPs.msg(e)),
+            },
+            Err(e) => return err(req.id, "logs", ErrorKind::PodmanPs.msg(e)),
+        };
+
+        let log_path = match container_log_path(&id) {
+            Ok(p) => p,
+            Err(e) => return err(req.id, "logs", ErrorKind::PodmanPs.msg(e)),
+        };
+
+        match read_log_chunk(&log_path, cursor, cap) {
+            Ok((data, n, eof)) => Reply {
+                id: Some(req.id),
+                ok: Some(true),
+                op: Some("logs".into()),
+                data: if data.is_empty() { None } else { Some(data) },
+                next_cursor: Some(cursor.saturating_add(n as u64)),
+                eof: Some(eof),
+                ..Default::default()
+            },
+            Err(e) => err(
+                req.id,
+                "logs",
+                ErrorKind::PodmanOp.msg(format!("read log {log_path}: {e}")),
+            ),
+        }
+    }
+
     /// Rebuild our nft table from `partitions` in ONE atomic transaction. The
     /// add/delete/add idiom gives a clean slate whether or not the table pre-
     /// existed. The chain is a default-ACCEPT forward base chain, so only our
@@ -612,6 +679,59 @@ fn container_ip(id_or_name: &str) -> Result<String, String> {
         }
     }
     Err(format!("no IP for {id_or_name}"))
+}
+
+/// The container's k8s-file log path. Podman (unlike Docker) has no top-level
+/// `.LogPath`; the k8s-file backend records the file under
+/// `.HostConfig.LogConfig.Path`. With the guest's `log_driver = "k8s-file"` this
+/// is a plain file whose lines are `<RFC3339-ts> <stdout|stderr> <F|P> <message>`.
+fn container_log_path(id_or_name: &str) -> Result<String, String> {
+    let out = Command::new("podman")
+        .args([
+            "inspect",
+            "--format",
+            "{{.HostConfig.LogConfig.Path}}",
+            id_or_name,
+        ])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if p.is_empty() {
+        return Err(format!("empty LogPath for {id_or_name}"));
+    }
+    Ok(p)
+}
+
+/// Read up to `cap` raw bytes from `path` starting at `cursor`. Returns
+/// `(lossy_utf8_data, raw_bytes_read, eof)`. A short read (fewer than `cap`
+/// bytes) means the current end of the log was reached (`eof = true`). A missing
+/// log file (a container that has not logged yet) reads as an empty log at EOF —
+/// not an error. `next_cursor` is derived from `raw_bytes_read`, so paging stays
+/// byte-exact even though `data` is lossy UTF-8.
+fn read_log_chunk(path: &str, cursor: u64, cap: usize) -> std::io::Result<(String, usize, bool)> {
+    let mut f = match File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((String::new(), 0, true));
+        }
+        Err(e) => return Err(e),
+    };
+    f.seek(SeekFrom::Start(cursor))?;
+    let mut buf = vec![0u8; cap];
+    let mut total = 0usize;
+    while total < cap {
+        let n = f.read(&mut buf[total..])?;
+        if n == 0 {
+            break;
+        }
+        total += n;
+    }
+    let eof = total < cap; // short read => reached the current end of the log.
+    let data = String::from_utf8_lossy(&buf[..total]).into_owned();
+    Ok((data, total, eof))
 }
 
 /// Make bridged (intra-network) packets traverse the ip/inet netfilter hooks, so
@@ -800,5 +920,44 @@ mod tests {
     #[test]
     fn pair_key_is_order_independent() {
         assert_eq!(pair_key("a", "b"), pair_key("b", "a"));
+    }
+
+    #[test]
+    fn read_log_chunk_pages_and_flags_eof() {
+        // A log longer than the chunk cap is read in cursor-advancing pieces; the
+        // last (short) read flags EOF. next_cursor tracks RAW bytes, so paging is
+        // byte-exact.
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("dvmm-agent-logtest-{}.log", std::process::id()));
+        let body: Vec<u8> = (0..25_000u32).map(|i| b'a' + (i % 26) as u8).collect();
+        std::fs::write(&path, &body).unwrap();
+        let p = path.to_str().unwrap();
+
+        let cap = 10_000usize;
+        let (d0, n0, eof0) = read_log_chunk(p, 0, cap).unwrap();
+        assert_eq!(n0, cap);
+        assert_eq!(d0.len(), cap);
+        assert!(!eof0, "a full-cap read is not EOF");
+
+        let (_d1, n1, eof1) = read_log_chunk(p, n0 as u64, cap).unwrap();
+        assert_eq!(n1, cap);
+        assert!(!eof1);
+
+        let (_d2, n2, eof2) = read_log_chunk(p, (n0 + n1) as u64, cap).unwrap();
+        assert_eq!(n2, 5_000);
+        assert!(eof2, "a short read reached the end of the log");
+        assert_eq!(n0 + n1 + n2, body.len());
+
+        // Reading past the end returns empty + EOF (host over-read is harmless).
+        let (d3, n3, eof3) = read_log_chunk(p, body.len() as u64, cap).unwrap();
+        assert!(d3.is_empty() && n3 == 0 && eof3);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn read_log_chunk_missing_file_is_empty_eof() {
+        let (d, n, eof) = read_log_chunk("/no/such/dvmm/log/file", 0, 4096).unwrap();
+        assert!(d.is_empty() && n == 0 && eof);
     }
 }

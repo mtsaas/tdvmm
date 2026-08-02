@@ -193,6 +193,10 @@ pub(crate) struct RunArgs {
     /// Skip the default-ON member-hash verification on load.
     #[arg(long)]
     pub(crate) no_verify: bool,
+    /// Pull each service's container log into `<dir>/<service>.log` at end-of-run
+    /// (graceful stop paths only). Off by default; opt-in developer output.
+    #[arg(long, value_name = "DIR")]
+    pub(crate) logs_dir: Option<String>,
     #[command(flatten)]
     pub(crate) common: CommonRunFlags,
 }
@@ -217,6 +221,11 @@ pub(crate) struct TestArgs {
     /// Wall-clock safety timeout (seconds); a run exceeding it fails with exit 2.
     #[arg(long, value_name = "SECS", default_value_t = 600)]
     pub(crate) wall_timeout: u64,
+    /// Pull each service's container log into `<dir>/<service>.log` at scenario
+    /// finalize (after the verdict, before the VM stops). Off by default; a
+    /// sibling output that never affects the verdict, JSONL, or report.
+    #[arg(long, value_name = "DIR")]
+    pub(crate) logs_dir: Option<String>,
     #[command(flatten)]
     pub(crate) common: CommonRunFlags,
 }

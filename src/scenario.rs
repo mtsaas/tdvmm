@@ -940,6 +940,7 @@ impl ScenarioEngine {
             peer: None,
             cmd: Some(e.argv.clone()),
             timeout_s: Some(timeout_secs.max(1.0) as u64),
+            ..Default::default()
         };
         (id, encode_line(&req).unwrap())
     }
@@ -970,6 +971,7 @@ impl ScenarioEngine {
             peer: b.clone(),
             cmd: None,
             timeout_s: Some(timeout_secs.max(1.0) as u64),
+            ..Default::default()
         };
         (id, encode_line(&req).unwrap())
     }

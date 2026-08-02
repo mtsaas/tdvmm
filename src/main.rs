@@ -153,6 +153,28 @@ struct ScenarioSetup {
     meta: scenario::RunMeta,
 }
 
+/// Opt-in per-service log capture (`--logs-dir`): where to write, and the service
+/// set to pull (the run's compose.lock service names). Off unless the flag is set.
+struct LogsCapture {
+    dir: std::path::PathBuf,
+    /// Compose service names, sorted for a deterministic per-service file order.
+    services: Vec<String>,
+}
+
+/// Create `<dir>` (idempotent) and prove it is writable by round-tripping a probe
+/// file — BEFORE boot. Returns a human error so the caller can fail fast (exit 2):
+/// a `--logs-dir` that cannot be written must never surface as a late mid-run
+/// surprise. This is the ONLY `--logs-dir` failure that stops a run; every later
+/// capture error merely warns and skips (verdict-safety, Fable guardrail 4).
+fn prepare_logs_dir(dir: &str) -> Result<std::path::PathBuf, String> {
+    let path = std::path::PathBuf::from(dir);
+    std::fs::create_dir_all(&path).map_err(|e| format!("creating --logs-dir {dir}: {e}"))?;
+    let probe = path.join(".dvmm-logs-probe");
+    std::fs::write(&probe, b"ok").map_err(|e| format!("--logs-dir {dir} is not writable: {e}"))?;
+    let _ = std::fs::remove_file(&probe);
+    Ok(path)
+}
+
 /// A scheduled event in the one [`events::EventQueue`]. Every guest timer is an
 /// entry here (today that is the LAPIC deadline, the tick); the fast-forward path adds the
 /// virtual-time horizon as a first-class queue event so the run terminates
@@ -269,7 +291,7 @@ fn cmd_boot(args: BootArgs) -> Result<i32, Box<dyn std::error::Error>> {
         args.kernel,
         args.initrd
     );
-    let out = boot_and_run(&kernel, &initrd, &eff, None)?;
+    let out = boot_and_run(&kernel, &initrd, &eff, None, None)?;
     Ok(out.exit_code)
 }
 
@@ -301,7 +323,29 @@ fn cmd_run(args: RunArgs) -> Result<i32, Box<dyn std::error::Error>> {
         payload.manifest.project,
         payload.manifest.format_version,
     );
-    let out = boot_and_run(&payload.kernel, &payload.initramfs, &eff, None)?;
+
+    // `--logs-dir` (secondary on `run`): pre-create + writability-check before
+    // boot; fail fast (exit 2) if impossible. Services come from the artifact's
+    // compose.lock. Capture happens on the graceful stop paths only.
+    let logs = match args.logs_dir.as_deref() {
+        Some(dir) => {
+            let path = match prepare_logs_dir(dir) {
+                Ok(p) => p,
+                Err(e) => {
+                    dlog!("[dvmm] run: {e}");
+                    return Ok(EXIT_TEST_INFRA);
+                }
+            };
+            let mut svc: Vec<String> = scenario::service_names(&payload.compose_lock)
+                .map(|s| s.into_iter().collect())
+                .unwrap_or_default();
+            svc.sort();
+            Some(LogsCapture { dir: path, services: svc })
+        }
+        None => None,
+    };
+
+    let out = boot_and_run(&payload.kernel, &payload.initramfs, &eff, None, logs)?;
     Ok(out.exit_code)
 }
 
@@ -379,6 +423,25 @@ fn cmd_test(args: TestArgs) -> Result<i32, Box<dyn std::error::Error>> {
         jsonl_path,
         report_path,
     };
+    // `--logs-dir` (primary on `test`): pre-create + writability-check before boot;
+    // fail fast (exit 2) if impossible. Services are the statically-validated
+    // compose.lock set; capture runs at scenario finalize (after the verdict).
+    let logs = match args.logs_dir.as_deref() {
+        Some(dir) => {
+            let path = match prepare_logs_dir(dir) {
+                Ok(p) => p,
+                Err(e) => {
+                    dlog!("[dvmm][test] {e}");
+                    return Ok(EXIT_TEST_INFRA);
+                }
+            };
+            let mut svc: Vec<String> = services.iter().cloned().collect();
+            svc.sort();
+            Some(LogsCapture { dir: path, services: svc })
+        }
+        None => None,
+    };
+
     let setup = ScenarioSetup { scenario: scn, meta };
 
     // Wall-clock safety watchdog: a genuinely wedged guest that busy-loops (never
@@ -407,7 +470,7 @@ fn cmd_test(args: TestArgs) -> Result<i32, Box<dyn std::error::Error>> {
         });
     }
 
-    let out = boot_and_run(&payload.kernel, &payload.initramfs, &eff, Some(setup))?;
+    let out = boot_and_run(&payload.kernel, &payload.initramfs, &eff, Some(setup), logs)?;
     done.store(true, std::sync::atomic::Ordering::Relaxed);
     Ok(out.exit_code)
 }
@@ -496,6 +559,7 @@ fn boot_and_run(
     initrd: &[u8],
     eff: &EffectiveConfig,
     scenario: Option<ScenarioSetup>,
+    logs: Option<LogsCapture>,
 ) -> Result<RunOutcome, Box<dyn std::error::Error>> {
     let mem_size = eff.mem_mib * 1024 * 1024;
     let kvm = Kvm::new()?;
@@ -607,6 +671,7 @@ fn boot_and_run(
         eff.max_virtual_time_secs,
         eff.metrics_out.clone(),
         scenario,
+        logs,
     )
 }
 
@@ -640,6 +705,7 @@ fn run_user_backend(
     max_virtual_time_secs: Option<f64>,
     metrics_out: Option<String>,
     scenario_setup: Option<ScenarioSetup>,
+    logs: Option<LogsCapture>,
 ) -> Result<RunOutcome, Box<dyn std::error::Error>> {
     // The devices we now own, all on this thread. The LAPIC timer counts at the
     // core-crystal frequency the guest derives from CPUID 0x15 (which we pass
@@ -1087,12 +1153,66 @@ fn run_user_backend(
         );
     }
 
-    // Finalize the scenario — emit ff_stats + run_end to the JSONL,
-    // write the JSON report, print the human summary, and return the verdict's
-    // exit code (0 pass / 1 assertion fail / 2 infra). If the guest died before
-    // the scenario finished, that is an infrastructure error (exit 2).
+    // ---- End-of-run virtual-time SNAPSHOT (Fable guardrail 2: FF-neutrality) ----
+    // Everything the run log / report says about virtual time is frozen HERE,
+    // before any --logs-dir capture runs. The scenario's step ts_vtsc were already
+    // logged during the run; these snapshots (final_now, final_ff) feed finalize's
+    // ff_stats/run_end events + the JSON report. Because the log pull happens AFTER
+    // this point, it advances vtsc/jumps freely without perturbing a single
+    // reported field — a run's JSONL vtsc fields are identical with or without the
+    // flag.
+    let final_now = clock.vtsc_now();
+    let final_ff = ff_state
+        .as_ref()
+        .map(|ff| scenario::FfSummary {
+            jumps: ff.jumps,
+            virtual_seconds: ff.virtual_secs_since(vtsc_start, final_now),
+            speedup: ff.virtual_secs_since(vtsc_start, final_now) / secs.max(1e-9),
+            per_hop_mean_us: ff.mean_hop_ns() as f64 / 1000.0,
+            max_delta_s: ff.max_delta_secs(),
+        })
+        .unwrap_or_default();
+
+    // ---- Opt-in per-service log capture (--logs-dir) ---------------------------
+    // Post-verdict / end-of-run ONLY, on THIS (vCPU/control) thread — never a
+    // background thread, never concurrent with the run — driving the still-alive
+    // guest to page each container's k8s-file log out via the agent's `logs` op.
+    // Runs only on graceful stops (a Scenario verdict, or the `run` horizon) where
+    // the guest is still responsive; a guest-death stop is skipped with one
+    // warning. Every capture error warns + skips — it NEVER changes the verdict,
+    // exit code, JSONL, or report (Fable guardrails 1-5).
+    if let Some(cap) = logs.as_ref() {
+        if matches!(stop_reason, StopReason::Scenario | StopReason::Horizon) {
+            capture_logs(
+                &mut vcpu,
+                &serial,
+                &serial_drain,
+                &clock,
+                &mut lapic,
+                &mut ioapic,
+                &mut pit,
+                &mut pic,
+                &mut events,
+                &mut parker,
+                ff_state.as_mut(),
+                &mut com2,
+                cap,
+            );
+        } else {
+            dlog!(
+                "[dvmm][WARN] --logs-dir: guest stopped ({}) before logs could be \
+                 pulled — skipping log capture",
+                stop_reason.as_str()
+            );
+        }
+    }
+
+    // Finalize the scenario — emit ff_stats + run_end to the JSONL, write the JSON
+    // report, print the human summary, and return the verdict's exit code (0 pass /
+    // 1 assertion fail / 2 infra). Uses the pre-capture snapshot so --logs-dir is
+    // FF-neutral. If the guest died before the scenario finished, that is an
+    // infrastructure error (exit 2).
     if let Some(mut e) = engine {
-        let now = clock.vtsc_now();
         if !e.is_finished() {
             let reason = match stop_reason {
                 StopReason::GuestShutdown | StopReason::GuestSystemEvent | StopReason::GuestHalt => {
@@ -1101,19 +1221,9 @@ fn run_user_backend(
                 StopReason::Horizon => "scenario did not complete before the virtual-time horizon",
                 _ => "run ended before the scenario reached a verdict",
             };
-            e.record_abort(now, reason);
+            e.record_abort(final_now, reason);
         }
-        let ff_sum = ff_state
-            .as_ref()
-            .map(|ff| scenario::FfSummary {
-                jumps: ff.jumps,
-                virtual_seconds: ff.virtual_secs_since(vtsc_start, now),
-                speedup: ff.virtual_secs_since(vtsc_start, now) / secs.max(1e-9),
-                per_hop_mean_us: ff.mean_hop_ns() as f64 / 1000.0,
-                max_delta_s: ff.max_delta_secs(),
-            })
-            .unwrap_or_default();
-        let code = e.finalize(&ff_sum, secs, now);
+        let code = e.finalize(&final_ff, secs, final_now);
         return Ok(RunOutcome {
             stop: stop_reason,
             exit_code: code,
@@ -1483,6 +1593,390 @@ fn read_console_input(serial: &serial::SharedSerial) -> Option<usize> {
     }
 }
 
+// =====================================================================
+// --logs-dir: post-verdict per-service log capture
+// =====================================================================
+
+/// Validate a guest-supplied service name for use as a `<name>.log` filename.
+/// Container/service names are HOSTILE guest data, so accept only a strict
+/// `[A-Za-z0-9._-]+` single path component — never empty, never `.`/`..`, never a
+/// path separator. Returns `None` (skip that service) for anything else.
+fn sanitize_service_filename(name: &str) -> Option<String> {
+    if name.is_empty() || name == "." || name == ".." {
+        return None;
+    }
+    if name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    {
+        Some(name.to_string())
+    } else {
+        None
+    }
+}
+
+/// Reformat raw k8s-file log bytes into a readable `<ts> <stream> <message>` per
+/// line, dropping podman's `F`/`P` full/partial tag but keeping the RFC3339
+/// timestamp and the stdout/stderr tag. A line that does not parse as a k8s-file
+/// entry is passed through verbatim (robustness over strictness).
+fn format_k8s_logs(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for line in raw.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        // k8s-file entry: "<rfc3339-ts> <stdout|stderr> <F|P> <message...>".
+        let mut it = line.splitn(4, ' ');
+        let ts = it.next().unwrap_or("");
+        let stream = it.next().unwrap_or("");
+        let pf = it.next().unwrap_or("");
+        let msg = it.next().unwrap_or("");
+        if (stream == "stdout" || stream == "stderr") && (pf == "F" || pf == "P") {
+            out.push_str(ts);
+            out.push(' ');
+            out.push_str(stream);
+            out.push(' ');
+            out.push_str(msg);
+            out.push('\n');
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Real-time + virtual-time bounds on the WHOLE post-verdict capture. Generous
+/// (capture is normally sub-second) but hard: they guarantee the pull can never
+/// hang the run — a wedged agent gives up here, warns, and finalize proceeds.
+const CAPTURE_WALL_BUDGET_S: u64 = 30;
+const CAPTURE_VTSC_BUDGET_S: f64 = 120.0;
+
+/// Drive the STILL-ALIVE vCPU on this thread to fetch each service's k8s-file log
+/// via the agent's `logs` op, writing `<dir>/<service>.log`. Post-verdict /
+/// end-of-run only. This NEVER affects the verdict: a schema-too-old agent, a
+/// missing container, an unreadable log, a timeout, or a guest death all warn
+/// once and skip (partial output at worst). No `-f`/follow — a single bounded
+/// read per chunk, the host loops via `next_cursor`/`eof`.
+#[allow(clippy::too_many_arguments)]
+fn capture_logs(
+    vcpu: &mut VcpuFd,
+    serial: &serial::SharedSerial,
+    serial_drain: &serial::EventFdTrigger,
+    clock: &VirtualClock,
+    lapic: &mut Lapic,
+    ioapic: &mut Ioapic,
+    pit: &mut PitStub,
+    pic: &mut PicStub,
+    events: &mut events::EventQueue<TimerKind>,
+    parker: &mut park::Parker,
+    mut ff: Option<&mut FfState>,
+    com2: &mut control::ControlChannel,
+    cap: &LogsCapture,
+) {
+    use dvmm_proto::{encode_line, Request, MAX_LOGS_CHUNK_BYTES};
+
+    let wall_deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(CAPTURE_WALL_BUDGET_S);
+    let horizon = clock
+        .vtsc_now()
+        .wrapping_add((CAPTURE_VTSC_BUDGET_S * clock.freq().hz() as f64) as u64);
+    let mut next_id: u64 = 1;
+    let new_id = |n: &mut u64| -> u64 {
+        let id = *n;
+        *n += 1;
+        id
+    };
+
+    // Schema negotiation (Fable): a ping reports the baked agent's wire schema. An
+    // OLD artifact (schema < 2) has no `logs` op — warn ONCE and skip, never error.
+    let ping = Request {
+        id: new_id(&mut next_id),
+        op: "ping".into(),
+        ..Default::default()
+    };
+    let ping_id = ping.id;
+    let framed = encode_line(&ping).unwrap();
+    match drive_until_reply(
+        vcpu, serial, serial_drain, clock, lapic, ioapic, pit, pic, events, parker,
+        ff.as_deref_mut(), com2, &framed, ping_id, horizon, wall_deadline,
+    ) {
+        Ok(Some(rep)) => match rep.schema {
+            Some(s) if s >= 2 => {}
+            other => {
+                dlog!(
+                    "[dvmm][WARN] --logs-dir: agent proto schema {} < 2 (old artifact) — the \
+                     `logs` op is unavailable; skipping log capture",
+                    other.map(|v| v.to_string()).unwrap_or_else(|| "?".into())
+                );
+                return;
+            }
+        },
+        Ok(None) => {
+            dlog!("[dvmm][WARN] --logs-dir: agent did not answer a schema ping — skipping log capture");
+            return;
+        }
+        Err(()) => {
+            dlog!("[dvmm][WARN] --logs-dir: guest became unresponsive — skipping log capture");
+            return;
+        }
+    }
+
+    for service in &cap.services {
+        let fname = match sanitize_service_filename(service) {
+            Some(f) => f,
+            None => {
+                dlog!("[dvmm][WARN] --logs-dir: refusing unsafe service name {service:?} — skipping");
+                continue;
+            }
+        };
+        let mut raw = String::new();
+        let mut cursor: u64 = 0;
+        let mut aborted = false;
+        loop {
+            let req = Request {
+                id: new_id(&mut next_id),
+                op: "logs".into(),
+                container: Some(service.clone()),
+                cursor: Some(cursor),
+                max_bytes: Some(MAX_LOGS_CHUNK_BYTES),
+                ..Default::default()
+            };
+            let id = req.id;
+            let framed = encode_line(&req).unwrap();
+            match drive_until_reply(
+                vcpu, serial, serial_drain, clock, lapic, ioapic, pit, pic, events, parker,
+                ff.as_deref_mut(), com2, &framed, id, horizon, wall_deadline,
+            ) {
+                Ok(Some(rep)) => {
+                    if rep.ok != Some(true) {
+                        dlog!(
+                            "[dvmm][WARN] --logs-dir: agent could not read {service} log: {} — \
+                             writing what was captured",
+                            rep.error.as_deref().unwrap_or("unknown error")
+                        );
+                        break;
+                    }
+                    if let Some(d) = rep.data.as_deref() {
+                        raw.push_str(d);
+                    }
+                    let next = rep.next_cursor.unwrap_or(cursor);
+                    // Stop at EOF, or defensively if the cursor did not advance.
+                    if rep.eof == Some(true) || next <= cursor {
+                        break;
+                    }
+                    cursor = next;
+                }
+                Ok(None) => {
+                    dlog!(
+                        "[dvmm][WARN] --logs-dir: timed out pulling {service} log — writing what \
+                         was captured"
+                    );
+                    break;
+                }
+                Err(()) => {
+                    dlog!("[dvmm][WARN] --logs-dir: guest became unresponsive during capture — stopping");
+                    aborted = true;
+                    break;
+                }
+            }
+        }
+        let formatted = format_k8s_logs(&raw);
+        let path = cap.dir.join(format!("{fname}.log"));
+        match std::fs::write(&path, formatted.as_bytes()) {
+            Ok(()) => dlog!("[dvmm] --logs-dir: wrote {}", path.display()),
+            Err(e) => dlog!("[dvmm][WARN] --logs-dir: could not write {}: {e}", path.display()),
+        }
+        if aborted {
+            return;
+        }
+    }
+}
+
+/// One post-verdict control round-trip: queue `framed` (a `logs`/`ping` request),
+/// then drive the still-alive vCPU until the agent's reply with `want_id` returns
+/// (`Ok(Some)`), a bounded budget elapses (`Ok(None)` — give up this request), or
+/// the guest dies / the vCPU errors (`Err(())` — abort all capture). The
+/// capture-local `horizon` guarantees the idle park never blocks forever, and
+/// `wall_deadline` bounds it in real time too. Deliberately self-contained (it
+/// mirrors the main loop's inject/run/handle-exit shape) so the main loop stays
+/// byte-for-byte unchanged — FF-neutrality and frozen contracts (Fable).
+#[allow(clippy::too_many_arguments)]
+fn drive_until_reply(
+    vcpu: &mut VcpuFd,
+    serial: &serial::SharedSerial,
+    serial_drain: &serial::EventFdTrigger,
+    clock: &VirtualClock,
+    lapic: &mut Lapic,
+    ioapic: &mut Ioapic,
+    pit: &mut PitStub,
+    pic: &mut PicStub,
+    events: &mut events::EventQueue<TimerKind>,
+    parker: &mut park::Parker,
+    mut ff: Option<&mut FfState>,
+    com2: &mut control::ControlChannel,
+    framed: &[u8],
+    want_id: u64,
+    horizon: u64,
+    wall_deadline: std::time::Instant,
+) -> Result<Option<dvmm_proto::Reply>, ()> {
+    // Drop any stale reply still buffered from the run, then queue our request.
+    while com2.poll_line().is_some() {}
+    com2.send_frame(framed);
+    com2.pump(lapic, ioapic);
+
+    loop {
+        if std::time::Instant::now() >= wall_deadline {
+            return Ok(None);
+        }
+        let now = clock.vtsc_now();
+        // Capture-local horizon only (no scenario step here). If it fires, give up.
+        if service_timers(lapic, events, Some(horizon), None, now).horizon {
+            return Ok(None);
+        }
+        // Stream any in-flight command bytes, then drain replies looking for ours.
+        com2.pump(lapic, ioapic);
+        while let Some(line) = com2.poll_line() {
+            if let Ok(rep) = dvmm_proto::decode_line::<dvmm_proto::Reply>(&line) {
+                if rep.id == Some(want_id) {
+                    return Ok(Some(rep));
+                }
+            }
+            com2.pump(lapic, ioapic);
+        }
+
+        // Sync TPR + inject a deliverable vector (mirrors the main loop exactly).
+        let cr8 = vcpu.get_kvm_run().cr8;
+        lapic.sync_tpr_from_cr8(cr8);
+        let deliverable = lapic.deliverable_vector();
+        let (ready, if_flag) = {
+            let r = vcpu.get_kvm_run();
+            (r.ready_for_interrupt_injection, r.if_flag)
+        };
+        let mut injected = false;
+        if let Some(vec) = deliverable {
+            if ready != 0 && if_flag != 0 {
+                if inject_interrupt(vcpu, vec).is_err() {
+                    return Err(());
+                }
+                lapic.ack_injected(vec);
+                injected = true;
+            }
+        }
+        {
+            let r = vcpu.get_kvm_run();
+            r.request_interrupt_window = u8::from(deliverable.is_some() && !injected);
+            r.cr8 = u64::from(lapic.tpr() >> 4);
+        }
+
+        let exit = match vcpu.run() {
+            Ok(e) => e,
+            Err(err) => {
+                let e = err.errno();
+                if e == libc::EINTR || e == libc::EAGAIN {
+                    continue;
+                }
+                return Err(());
+            }
+        };
+        match exit {
+            VcpuExit::IoOut(port, data) => {
+                if serial::is_serial(port) {
+                    let mut s = serial.lock().unwrap();
+                    for &b in data {
+                        let _ = s.write((port - arch::SERIAL_PORT_BASE) as u8, b);
+                    }
+                    drop(s);
+                    if serial_drain.drain().is_ok() {
+                        raise_irq(lapic, ioapic, arch::SERIAL_IRQ);
+                    }
+                } else if control::ControlChannel::handles(port) {
+                    for &b in data {
+                        com2.pio_write(port, b, lapic, ioapic);
+                    }
+                } else if PitStub::handles(port) {
+                    for &b in data {
+                        pit.write(port, b);
+                    }
+                } else if PicStub::handles(port) {
+                    for &b in data {
+                        pic.write(port, b);
+                    }
+                }
+            }
+            VcpuExit::IoIn(port, data) => {
+                if serial::is_serial(port) {
+                    let mut s = serial.lock().unwrap();
+                    for b in data.iter_mut() {
+                        *b = s.read((port - arch::SERIAL_PORT_BASE) as u8);
+                    }
+                    drop(s);
+                    if serial_drain.drain().is_ok() {
+                        raise_irq(lapic, ioapic, arch::SERIAL_IRQ);
+                    }
+                } else if control::ControlChannel::handles(port) {
+                    for b in data.iter_mut() {
+                        *b = com2.pio_read(port, lapic, ioapic);
+                    }
+                } else if PitStub::handles(port) {
+                    for b in data.iter_mut() {
+                        *b = pit.read(port);
+                    }
+                } else if PicStub::handles(port) {
+                    for b in data.iter_mut() {
+                        *b = pic.read(port);
+                    }
+                } else {
+                    for b in data.iter_mut() {
+                        *b = 0xff; // open bus
+                    }
+                }
+            }
+            VcpuExit::MmioRead(addr, data) => {
+                let val = if in_lapic(addr) {
+                    lapic.mmio_read((addr - XAPIC_BASE) as u32)
+                } else if Ioapic::handles(addr) {
+                    ioapic.mmio_read(addr)
+                } else {
+                    0
+                };
+                util::write_u32_le(data, val);
+            }
+            VcpuExit::MmioWrite(addr, data) => {
+                let val = util::read_u32_le(data);
+                if in_lapic(addr) {
+                    lapic.mmio_write((addr - XAPIC_BASE) as u32, val);
+                } else if Ioapic::handles(addr) {
+                    ioapic.mmio_write(addr, val);
+                }
+            }
+            VcpuExit::IrqWindowOpen => {}
+            VcpuExit::Hlt => {
+                // A HLT with IF=0 can never wake: the guest powered off mid-capture.
+                if vcpu.get_kvm_run().if_flag == 0 {
+                    return Err(());
+                }
+                match park_until_deliverable(
+                    lapic, ioapic, events, serial, serial_drain, parker, clock, vcpu,
+                    Some(horizon), ff.as_deref_mut(), com2, None,
+                ) {
+                    Ok(ParkOutcome::Deliverable) => {}
+                    // The capture budget elapsed while idle: give up this request.
+                    Ok(ParkOutcome::Horizon) => return Ok(None),
+                    // No engine is passed, so ScenarioDone cannot arise; treat as
+                    // "keep going" defensively.
+                    Ok(ParkOutcome::ScenarioDone) => {}
+                    // e.g. an FF jump exceeded the sanity bound: abort capture.
+                    Err(_) => return Err(()),
+                }
+            }
+            VcpuExit::Shutdown | VcpuExit::SystemEvent(_, _) => return Err(()),
+            VcpuExit::FailEntry(_, _) | VcpuExit::InternalError => return Err(()),
+            _ => {}
+        }
+    }
+}
+
 /// The IOAPIC id we advertised in the MP table (num_cpus + 1, single vCPU => 2).
 fn mptable_ioapic_id() -> u8 {
     2
@@ -1529,5 +2023,39 @@ mod tests {
         assert!(!service_timers(&mut lapic, &mut events, None, scn, 4_999).scenario);
         let f = service_timers(&mut lapic, &mut events, None, scn, 5_000);
         assert!(f.scenario && !f.horizon);
+    }
+
+    #[test]
+    fn sanitize_service_filename_rejects_hostile_names() {
+        // Ordinary compose service names pass through unchanged.
+        assert_eq!(sanitize_service_filename("postgres").as_deref(), Some("postgres"));
+        assert_eq!(sanitize_service_filename("web-app_1.v2").as_deref(), Some("web-app_1.v2"));
+        // Path separators, traversal, and other metacharacters are rejected.
+        for bad in [
+            "", ".", "..", "../etc/passwd", "a/b", "a\\b", "/abs", "name with space",
+            "a\0b", "évil", "a;b", "..\\x",
+        ] {
+            assert!(
+                sanitize_service_filename(bad).is_none(),
+                "expected {bad:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn format_k8s_logs_keeps_ts_and_stream_drops_tag() {
+        let raw = "2026-08-01T00:00:00.1Z stdout F hello world\n\
+                   2026-08-01T00:00:01.2Z stderr F oops: a spaced message\n\
+                   2026-08-01T00:00:02.3Z stdout P partial-chunk\n\
+                   not a k8s line at all\n\
+                   \n";
+        let out = format_k8s_logs(raw);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "2026-08-01T00:00:00.1Z stdout hello world");
+        assert_eq!(lines[1], "2026-08-01T00:00:01.2Z stderr oops: a spaced message");
+        assert_eq!(lines[2], "2026-08-01T00:00:02.3Z stdout partial-chunk");
+        // A non-conforming line is passed through verbatim; blanks are dropped.
+        assert_eq!(lines[3], "not a k8s line at all");
+        assert_eq!(lines.len(), 4);
     }
 }

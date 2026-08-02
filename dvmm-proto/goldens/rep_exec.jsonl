@@ -1,1 +1,1 @@
-{"id":2,"ok":true,"op":"exec","exit":0,"stdout":"5\n","dur_ms":12}
+{"dur_ms":12,"exit":0,"id":2,"ok":true,"op":"exec","stdout":"5\n"}

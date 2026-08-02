@@ -14,8 +14,8 @@ project   dvmm_configpipeline
 mem_mib   3072
 ram_estimate_mib  1064
 compose_lock_sha256  52d1dc4ff2a9fdf85a672efbd5b30779a0667277dd0af7382ab7513b5f3f57bf
-initramfs_sha256     0dacc62c4c145e1bd05d802fa7377fd82706ceb9ca9716e96f08d29aa0adf3fe  initramfs-alpine-configpipeline.cpio.gz
-agent_sha256         ab9d4584490c3d6a57c3ab6c33ff755c2be1f972a8a1d5a17679f6fa38fd33e3  dvmm-agent
+initramfs_sha256     3c935cd5f5e92c47a1c792745d8b2d7a44e24f0fe2208a47b747c502eddd009b  initramfs-alpine-configpipeline.cpio.gz
+agent_sha256         c349a12a5a6df417aca96b3989d07419b2c7c9d1e184f8becae81187b0f50ad0  dvmm-agent
 builder_image        docker.io/library/alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
 builder_image        docker.io/library/debian:bookworm-slim@sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e
 builder_image        docker.io/library/rust:1.97-alpine3.22@sha256:b348cb409ac0a73de15065997a360063cf87465574a15e3e4469862cb8996f02
@@ -27,4 +27,4 @@ builder_image        docker.io/library/rust:1.97-alpine3.22@sha256:b348cb409ac0a
 # --- informational (NOT compared for repeatability) ---
 # host-probed values (podman version, baked-at) are written to the
 # cache dir's diagnostics/ side file, NEVER here (Fable guardrail §3).
-dvmm_sha256          c1ee4c423cb4f3e7d884b0978a31acfd3ee76c8532cde72fe0c48ad821ea83cc  configpipeline.dvmm
+dvmm_sha256          8b4f935b762a44b5c6159610dcfd40ffc8ab2b4e85c5a2755e72a5bd28c683d4  configpipeline.dvmm

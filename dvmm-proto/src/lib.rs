@@ -13,7 +13,7 @@
 //! One JSON object per line, `\n`-delimited, in both directions:
 //!
 //! * host → agent: a [`Request`] (`op` = `ping`/`exec`/`containers`/`kill`/
-//!   `stop`/`start`/`partition`/`heal`; unknown `op` is rejected by the agent).
+//!   `stop`/`start`/`partition`/`heal`/`logs`; unknown `op` is rejected by the agent).
 //! * agent → host: a [`Reply`]. The agent also emits one **proactive** [`Reply`]
 //!   on start — the *hello* handshake (`agent`/`schema`/`build` set, no `id`/`ok`)
 //!   — which the host waits on to mark the agent ready. `ping` echoes the same
@@ -30,7 +30,19 @@ use serde::{Deserialize, Serialize};
 /// The wire-protocol schema version. Embedded in the hello + `ping` reply and
 /// recorded in the run-log preamble. Bump on ANY change to the types below (a
 /// bump also requires regenerating the golden fixtures in the same commit).
-pub const SCHEMA: u32 = 1;
+///
+/// * 1 — the original op set (`ping`/`exec`/`containers`/`kill`/`stop`/`start`/
+///   `partition`/`heal`).
+/// * 2 — adds the `logs` op (cursor-paged per-container k8s-file log fetch).
+pub const SCHEMA: u32 = 2;
+
+/// Hard cap on a single `logs` reply's `data` payload: 128 KiB of raw k8s-file
+/// bytes. JSON-escaping can ~double that on the wire, which still stays well
+/// under the host's 1 MiB captured-TX drop threshold (`control.rs` TX_BUF_CAP) —
+/// so a reply is never silently dropped. The agent enforces this regardless of a
+/// larger requested `max_bytes`; the host loops via `next_cursor`/`eof` to read a
+/// log larger than one chunk.
+pub const MAX_LOGS_CHUNK_BYTES: u64 = 128 * 1024;
 
 // ============================================================================
 // Messages
@@ -57,6 +69,16 @@ pub struct Request {
     /// Optional per-command timeout, in (virtual) seconds inside the guest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_s: Option<u64>,
+    /// `logs`: byte offset into the target container's k8s-file log to read from.
+    /// Absent = 0 (the start of the log). The host pages a whole log by looping
+    /// from 0 and advancing to each reply's `next_cursor` until `eof`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<u64>,
+    /// `logs`: host-requested read cap in bytes. The agent reads at most
+    /// `min(max_bytes, MAX_LOGS_CHUNK_BYTES)` — the cap is a hard ceiling, never a
+    /// promise of that many bytes. Absent = the agent's own cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<u64>,
 }
 
 /// One container in a census (`containers` reply).
@@ -110,6 +132,19 @@ pub struct Reply {
     /// Agent build hash — the compatibility oracle (hello + `ping`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build: Option<String>,
+    /// `logs`: the raw k8s-file bytes read starting at the request's `cursor`
+    /// (lossy UTF-8; ≤ `MAX_LOGS_CHUNK_BYTES`). Empty payloads are omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
+    /// `logs`: `cursor + <raw bytes returned>` — the offset to pass as the next
+    /// request's `cursor`. A byte offset into the file, independent of the lossy
+    /// `data` string's length, so paging stays byte-exact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<u64>,
+    /// `logs`: true when this read reached the current end of the log (the host
+    /// stops paging). A short read (fewer bytes than the cap) implies EOF.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eof: Option<bool>,
 }
 
 impl Reply {

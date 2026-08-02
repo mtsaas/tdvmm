@@ -14,8 +14,8 @@ project   dvmm_dogfood
 mem_mib   3072
 ram_estimate_mib  1742
 compose_lock_sha256  2064741641834d4c26a264f3beb5355592edfaaafd2f82376cf8455a2fc64682
-initramfs_sha256     83d7b2181b175a06be8db4aab2c5220a30563e85840b351593cca52a185cd879  initramfs-alpine-dogfood.cpio.gz
-agent_sha256         ab9d4584490c3d6a57c3ab6c33ff755c2be1f972a8a1d5a17679f6fa38fd33e3  dvmm-agent
+initramfs_sha256     e03c2fa220ed2b6f4f7147545106b1c7f0ab83e6856af4a0759522f831503f14  initramfs-alpine-dogfood.cpio.gz
+agent_sha256         c349a12a5a6df417aca96b3989d07419b2c7c9d1e184f8becae81187b0f50ad0  dvmm-agent
 builder_image        docker.io/library/alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
 builder_image        docker.io/library/debian:bookworm-slim@sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e
 builder_image        docker.io/library/rust:1.97-alpine3.22@sha256:b348cb409ac0a73de15065997a360063cf87465574a15e3e4469862cb8996f02
@@ -25,4 +25,4 @@ builder_image        docker.io/library/rust:1.97-alpine3.22@sha256:b348cb409ac0a
 # --- informational (NOT compared for repeatability) ---
 # host-probed values (podman version, baked-at) are written to the
 # cache dir's diagnostics/ side file, NEVER here (Fable guardrail §3).
-dvmm_sha256          532557f632a15d892cd392e2148ad2edf9f10e7ab2cf916d48b1a8dbfbbe0679  m3a.dvmm
+dvmm_sha256          7dfec82475382053d46b83b8de054f8f4dfd0c50d046b4e72ba989e02966ea1d  dogfood-logs.dvmm
