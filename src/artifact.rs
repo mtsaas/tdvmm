@@ -509,7 +509,7 @@ pub fn verify(path: &str) -> Result<VerifyReport, ArtifactError> {
 }
 
 // ============================================================================
-// packing (used by `dvmm pack`, driven by bake-stack.sh)
+// packing (used by `dvmm build` — see build.rs::pack_dvmm)
 // ============================================================================
 
 /// Assemble a `.dvmm` from its parts. `manifest_in` is a (possibly partial)

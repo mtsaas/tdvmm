@@ -20,5 +20,5 @@ initramfs_sha256     44d644bf6ab769feffc4df3f7d99dfe5ca706d1b8c321e2e263c5ec0b14
   pin    upstream=docker.io/library/postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777  pinned=localhost/dvmm-postgres-57c72fd2a128@sha256:cbf217007d0742829dc120c3ea9cd2621e90eb3adfeaf6684e87ce268a2ca368
 # --- informational (NOT compared for repeatability) ---
 # podman-version: 5.8.3
-# baked-at: 2026-08-02T09:52:57Z
-dvmm_sha256          070ea569d3b4f80d524560fd4b755072d0251fce72b27dea7a3f229d3d772b58  dogfood.dvmm
+# baked-at: 2026-08-02T11:20:14Z
+dvmm_sha256          070ea569d3b4f80d524560fd4b755072d0251fce72b27dea7a3f229d3d772b58  dogfood-B.dvmm

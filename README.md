@@ -82,7 +82,9 @@ outside it, and the old Postgres workload passing through the generic path.
   **idle timeout**, so once `compose up -d` has created the containers it
   **exits** — the guest is then left holding only **conmon + the workload
   containers**, no resident engine (neither dockerd nor podman-compose is used).
-- **The bake pipeline** (`guest/bake-stack.sh`, host-side, build time). Given a
+- **The bake pipeline** (`dvmm build <compose.yml>`, host-side, build time —
+  folded into the binary in **OP-1b**; the old `guest/bake-stack.sh` +
+  `bake_compose.py` + `pack-dvmm.sh` are retired). Given a
   `compose.yml` it: validates it against the subset; for each `image:` resolves a
   digest and pulls **by digest**, squashing large images to one vfs layer
   reproducibly (`--timestamp`, config-equivalence gate); emits **`compose.lock.yml`**
@@ -117,7 +119,7 @@ Build and run a stack:
 
 ```sh
 guest/initramfs-alpine/build_rootfs.sh        # base 2a guest (busybox selftest)
-guest/bake-stack.sh guest/stacks/dogfood/compose.yml   # -> initramfs-alpine-dogfood.cpio.gz
+dvmm build guest/stacks/dogfood/compose.yml    # -> initramfs-alpine-dogfood.cpio.gz + dogfood.dvmm
 scripts/ff_demo.sh 24                          # dogfood through the FF gate set
 scripts/bake_reject_test.sh                    # the loud-rejection tests
 scripts/bake_repeat_test.sh                    # same input -> identical lock + digests
@@ -154,7 +156,7 @@ fast-forward?**
   (which reuses the existing Δvtsc histogram + jump stats).
 
 ```sh
-guest/bake-stack.sh guest/stacks/go-ab/compose.yml          # builds the Go service host-side
+dvmm build guest/stacks/go-ab/compose.yml          # builds the Go service host-side
 scripts/bake_repeat_test.sh guest/stacks/go-ab/compose.yml  # reproducible content-identity
 scripts/compare_stacks.sh dogfood go-ab                     # shell (control) vs Go (treatment)
 ```
@@ -200,9 +202,9 @@ real stacks bake unchanged. Still closed-world, single-writer, deterministic-bak
   and a named volume, both written + read back; ran at ~800× under FF.
 
 ```sh
-guest/bake-stack.sh guest/stacks/health-gate/compose.yml   # healthcheck-gating demo
+dvmm build guest/stacks/health-gate/compose.yml   # healthcheck-gating demo
 scripts/smoke_test_healthgate.sh                           # gate resolves; dependent waits
-guest/bake-stack.sh guest/stacks/rwbind/compose.yml        # rw bind + named volume demo
+dvmm build guest/stacks/rwbind/compose.yml        # rw bind + named volume demo
 scripts/smoke_test_binds.sh                                # writes land; runs under FF
 ```
 
@@ -284,7 +286,7 @@ verify it. The scripts still do the baking; the bake now ends by emitting a
   `[dvmm] effective-config: mem=3072 (baked) ff=off (flag) max-virtual-time=36h (baked) ...`.
 
 ```sh
-guest/bake-stack.sh guest/stacks/dogfood/compose.yml -o dogfood.dvmm  # bake -> one .dvmm
+dvmm build guest/stacks/dogfood/compose.yml -o dogfood.dvmm  # bake -> one .dvmm
 dvmm inspect dogfood.dvmm          # the manifest (fast; manifest member only)
 dvmm verify  dogfood.dvmm          # member hashes vs manifest + the sha256 identity
 dvmm run     dogfood.dvmm --max-virtual-time 24h   # boot it, baked defaults + overrides
@@ -348,7 +350,7 @@ TEST-1b; the schema and agent protocol already leave room for it).
   container). CI can tell "your stack is wrong" (1) from "the tool broke" (2).
 
 ```sh
-guest/bake-stack.sh guest/stacks/dogfood/compose.yml -o dogfood.dvmm  # agent baked in
+dvmm build guest/stacks/dogfood/compose.yml -o dogfood.dvmm  # agent baked in
 dvmm test dogfood.dvmm --scenario guest/stacks/dogfood/dogfood.yml    # -> PASS, exit 0
 scripts/test_scenario.sh          # the TEST-1a gate set (pass / wrong->1 / infra->2)
 ```
@@ -397,7 +399,7 @@ The fault set lives in `guest/stacks/faultlab/` — a two-service stack (`db` +
 an idle `client` that probes `db` by name) built for exactly this:
 
 ```sh
-guest/bake-stack.sh guest/stacks/faultlab/compose.yml -o faultlab.dvmm
+dvmm build guest/stacks/faultlab/compose.yml -o faultlab.dvmm
 dvmm test faultlab.dvmm --scenario guest/stacks/faultlab/kill-recover.yml    # -> PASS, exit 0
 dvmm test faultlab.dvmm --scenario guest/stacks/faultlab/partition-heal.yml  # -> PASS, exit 0
 dvmm test faultlab.dvmm --scenario guest/stacks/faultlab/unexpected-death.yml# -> FAIL, exit 1

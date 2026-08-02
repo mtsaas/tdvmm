@@ -2,9 +2,10 @@
 # Phase-2a rejection tests: prove the bake-time boundary is LOUD.
 #
 # Each corpus compose file exercises exactly one thing outside the supported
-# subset; bake-stack's validator (bake_compose.py, the same gate bake-stack runs
-# FIRST, before any image pull) must reject it -- or, for published ports, warn
-# and strip it. A silent hang at guest runtime is the failure this prevents.
+# subset; the in-binary validator (`dvmm build --validate-only`, the same gate
+# `dvmm build` runs FIRST, before any image pull) must reject it -- or, for
+# published ports, warn and strip it. A silent hang at guest runtime is the
+# failure this prevents.
 #
 # Fast + hermetic: no image pulls, no VM boot -- just the static validator.
 # Exits 0 only if every case produces its expected, greppable diagnostic.
@@ -12,8 +13,9 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-PY="$ROOT/guest/bake_compose.py"
+BIN="$ROOT/target/release/dvmm"
 CORPUS="$ROOT/guest/stacks/rejects"
+[ -x "$BIN" ] || { echo "building dvmm..."; ( cd "$ROOT" && cargo build --release ) || exit 3; }
 
 # case: <file> <expect: reject|warn> <substring the diagnostic must contain>
 #
@@ -36,7 +38,7 @@ printf '%-18s %-8s %-6s %s\n' "CASE" "EXPECT" "RESULT" "DIAGNOSTIC"
 echo "-------------------------------------------------------------------------------"
 while read -r file expect needle; do
   [ -n "${file:-}" ] || continue
-  out="$(python3 "$PY" validate "$CORPUS/$file" 2>&1 >/dev/null)"; rc=$?
+  out="$("$BIN" build --validate-only "$CORPUS/$file" 2>&1 >/dev/null)"; rc=$?
   diag="$(printf '%s' "$out" | grep -E 'DVMM_BAKE_(REJECT|WARN)' | head -1)"
   pass=0
   if [ "$expect" = "reject" ]; then

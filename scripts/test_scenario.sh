@@ -20,7 +20,11 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 [ -x "$BIN" ] || { echo "building dvmm..."; ( cd "$ROOT" && cargo build --release ) || exit 3; }
-[ -f "$DVMM" ] || { echo "FATAL: $DVMM missing — run: guest/bake-stack.sh guest/stacks/dogfood/compose.yml -o dogfood.dvmm" >&2; exit 3; }
+if [ ! -f "$DVMM" ]; then
+  echo "== dogfood.dvmm missing — baking it (dvmm build) =="
+  "$BIN" build "$ROOT/guest/stacks/dogfood/compose.yml" -o "$DVMM" || {
+    echo "FATAL: bake failed" >&2; exit 3; }
+fi
 
 PASS=0; FAIL=0
 ok()   { echo "  PASS: $*"; PASS=$((PASS+1)); }

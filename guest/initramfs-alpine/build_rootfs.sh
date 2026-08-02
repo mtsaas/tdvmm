@@ -4,14 +4,15 @@
 # v2 CLI installed, plus a baked-in, digest-pinned image store so the guest can
 # run a compose stack fully offline (closed world).
 #
-# Two modes:
+# Modes:
 #   * BASE (no stack): bakes only the busybox self-test image (via prebake) and
 #     produces initramfs-alpine.cpio.gz -- the minimal 2a container guest used by
-#     the container/busybox smoke tests and run.sh.
-#   * STACK (invoked by bake-stack.sh with SEED_OVERRIDE + STACK_* env): embeds a
-#     pre-built seed store (busybox + the stack's images), the emitted
-#     compose.lock.yml, the materialized relative RO binds, and the pinned project
-#     name, so guest init launches the stack via `docker compose up`.
+#     the container/busybox smoke tests and run.sh. THIS is the sole remaining
+#     purpose of this script: the base container guest.
+#   * STACK (SEED_OVERRIDE + STACK_* env): RETIRED. Per-stack bakes are now done
+#     entirely in the binary by `dvmm build` (OP-1b), which reimplements this
+#     assembly in Rust (src/build.rs) + emits the cpio in Rust (src/cpio.rs). The
+#     STACK branch below is kept only as dead reference and is no longer invoked.
 #
 # Reproducibility anchor: everything pinned (Alpine release + minirootfs checksum
 # + package versions + compose binary sha256 + image digests + fixed guest epoch).

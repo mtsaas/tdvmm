@@ -63,19 +63,21 @@ for stack in "${STACKS[@]}"; do
   echo "==================================================================="
   echo " ARTIFACT GATES: $stack"
   echo "==================================================================="
-  initrd="$ALPINE/initramfs-alpine-${stack}.cpio.gz"
-  lock="$ROOT/guest/stacks/$stack/stack.lock"
-  if [ ! -f "$initrd" ] || [ ! -f "$lock" ]; then
-    echo "  SKIP: $stack not baked (need $initrd + $lock; run bake-stack.sh)"; continue
+  compose="$ROOT/guest/stacks/$stack/compose.yml"
+  if [ ! -f "$compose" ]; then
+    echo "  SKIP: $stack has no compose.yml at $compose"; continue
   fi
+  # `dvmm build` writes the per-stack initramfs here (used by gate 8's raw boot).
+  initrd="$ALPINE/initramfs-alpine-${stack}.cpio.gz"
   A="$TMP/$stack-A.dvmm"; B="$TMP/$stack-B.dvmm"
   ok=1
 
-  # (1) bit-reproducible
-  "$HERE/../guest/pack-dvmm.sh" "$stack" -o "$A" >/dev/null 2>"$TMP/packA.err" || { echo "  FAIL: pack A"; cat "$TMP/packA.err"; overall=1; continue; }
-  "$HERE/../guest/pack-dvmm.sh" "$stack" -o "$B" >/dev/null 2>"$TMP/packB.err" || { echo "  FAIL: pack B"; cat "$TMP/packB.err"; overall=1; continue; }
+  # (1) bit-reproducible: `dvmm build` the SAME compose twice -> byte-identical .dvmm
+  #     (OP-1b folds the whole bake into the binary; the initramfs IS now bit-repro).
+  "$BIN" build "$compose" -o "$A" >/dev/null 2>"$TMP/packA.err" || { echo "  FAIL: build A"; tail -5 "$TMP/packA.err"; overall=1; continue; }
+  "$BIN" build "$compose" -o "$B" >/dev/null 2>"$TMP/packB.err" || { echo "  FAIL: build B"; tail -5 "$TMP/packB.err"; overall=1; continue; }
   shA="$(sha256sum "$A" | awk '{print $1}')"; shB="$(sha256sum "$B" | awk '{print $1}')"
-  if [ "$shA" = "$shB" ]; then echo "  (1) BIT-REPRODUCIBLE OK: two bakes -> identical .dvmm ($shA)"; else echo "  (1) FAIL: .dvmm differs ($shA != $shB)"; ok=0; fi
+  if [ "$shA" = "$shB" ]; then echo "  (1) BIT-REPRODUCIBLE OK: two builds -> identical .dvmm ($shA)"; else echo "  (1) FAIL: .dvmm differs ($shA != $shB)"; ok=0; fi
 
   # (2) inspect fast + valid JSON
   t0=$(date +%s.%N)

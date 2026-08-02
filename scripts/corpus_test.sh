@@ -6,7 +6,7 @@
 # gating, build: contexts, ro/rw binds, named volumes, service-name DNS), all
 # closed-world and fast-forwardable. For every corpus stack it:
 #
-#   1. BAKES it (bake-stack.sh) if the initramfs is missing or BAKE=1;
+#   1. BAKES it (`dvmm build`) if the initramfs is missing or BAKE=1;
 #   2. BOOTS it under fast-forward with a virtual-time horizon + --metrics-out
 #      (the VMM stops ITSELF at the horizon, flushing metrics -- never a SIGTERM);
 #   3. asserts FUNCTIONAL CORRECTNESS from the serial markers (services come up;
@@ -156,7 +156,7 @@ for stack in "${STACKS[@]}"; do
 
   if [ "$BAKE" = "1" ] || [ ! -f "$initrd" ]; then
     echo "[corpus] baking $stack ..."
-    if ! "$ROOT/guest/bake-stack.sh" "$compose" >"$TMP/$stack.bake.log" 2>&1; then
+    if ! "$BIN" build "$compose" >"$TMP/$stack.bake.log" 2>&1; then
       echo "  FAIL: bake error (tail):"; tail -20 "$TMP/$stack.bake.log" | sed 's/^/    /'
       RESULT[$stack]="fail:bake"; overall=1; continue
     fi

@@ -12,10 +12,10 @@ catatonit-0.2.1-r0
 conmon-2.1.13-r0
 containers-common-0.64.2-r0
 crun-1.23.1-r0
-fuse3-3.16.2-r1
-fuse3-libs-3.16.2-r1
 fuse-common-3.16.2-r1
 fuse-overlayfs-1.15-r0
+fuse3-3.16.2-r1
+fuse3-libs-3.16.2-r1
 gdbm-1.24-r0
 glib-2.84.4-r0
 gmp-6.3.0-r3

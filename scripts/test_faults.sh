@@ -25,7 +25,7 @@ trap 'rm -rf "$TMP"' EXIT
 [ -x "$BIN" ] || { echo "building dvmm..."; ( cd "$ROOT" && cargo build --release ) || exit 3; }
 if [ ! -f "$DVMM" ]; then
   echo "== faultlab.dvmm missing — baking it =="
-  "$ROOT/guest/bake-stack.sh" "$SDIR/compose.yml" -o "$DVMM" || {
+  "$BIN" build "$SDIR/compose.yml" -o "$DVMM" || {
     echo "FATAL: bake failed" >&2; exit 3; }
 fi
 

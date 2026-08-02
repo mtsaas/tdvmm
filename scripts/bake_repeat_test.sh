@@ -28,12 +28,12 @@ MAN="$ROOT/guest/stacks/$NAME/stack.lock"
 compared() { sed '/informational (NOT compared/,$d' "$1" | grep -v '^initramfs_sha256'; }
 
 echo "== bake #1 =="
-"$ROOT/guest/bake-stack.sh" "$COMPOSE" >/tmp/bake1.log 2>&1 || { echo "BAKE1 FAILED"; tail -30 /tmp/bake1.log; exit 1; }
+"$ROOT/target/release/dvmm" build "$COMPOSE" >/tmp/bake1.log 2>&1 || { echo "BAKE1 FAILED"; tail -30 /tmp/bake1.log; exit 1; }
 L1="$(sha256sum "$LOCK" | awk '{print $1}')"; M1="$(compared "$MAN")"; A1="$(awk '/^initramfs_sha256/{print $2}' "$MAN")"
 cp "$LOCK" /tmp/lock1.yml
 
 echo "== bake #2 =="
-"$ROOT/guest/bake-stack.sh" "$COMPOSE" >/tmp/bake2.log 2>&1 || { echo "BAKE2 FAILED"; tail -30 /tmp/bake2.log; exit 1; }
+"$ROOT/target/release/dvmm" build "$COMPOSE" >/tmp/bake2.log 2>&1 || { echo "BAKE2 FAILED"; tail -30 /tmp/bake2.log; exit 1; }
 L2="$(sha256sum "$LOCK" | awk '{print $1}')"; M2="$(compared "$MAN")"; A2="$(awk '/^initramfs_sha256/{print $2}' "$MAN")"
 
 echo

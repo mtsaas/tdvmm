@@ -36,7 +36,10 @@
 mod arch;
 mod artifact;
 mod boot;
+mod build;
+mod compose;
 mod control;
+mod cpio;
 mod cpuid;
 mod events;
 mod ioapic;
@@ -596,11 +599,12 @@ impl FfState {
 }
 
 // ============================================================================
-// CLI (OP-1a): clap subcommands. `boot` is today's raw kernel+initramfs dev verb
-// (smoke/VMM-dev); `run` boots a `.dvmm` artifact applying its baked run-defaults
-// (artifact users). `inspect`/`verify` read the artifact; `dump-cpuid` emits the
-// manifest CPUID profile; `pack` is the internal helper bake-stack.sh calls to
-// emit a `.dvmm` through the SAME canonical encoder `run`/`inspect`/`verify` read.
+// CLI subcommands. `build` (OP-1b) bakes a compose stack into a `.dvmm` (host
+// tool: podman + network). `boot` is the raw kernel+initramfs dev verb; `run`
+// boots a `.dvmm` applying its baked run-defaults; `test` drives a scenario;
+// `inspect`/`verify` read the artifact; `dump-cpuid` emits the manifest CPUID
+// profile. `__seed-build` / `__assemble-initramfs` are internal `podman unshare`
+// helpers `dvmm build` re-execs into.
 // ============================================================================
 
 #[derive(Parser)]
@@ -621,6 +625,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Bake a compose stack into a self-contained .dvmm (host tool: podman + network).
+    Build(BuildCliArgs),
     /// Boot a raw kernel + initramfs (the low-level VMM-dev / smoke verb).
     Boot(BootArgs),
     /// Run a .dvmm stack artifact: apply its baked run-defaults, then boot (offline).
@@ -633,9 +639,44 @@ enum Cmd {
     Verify(ArtifactArg),
     /// Print the effective guest clock/timer CPUID profile (the manifest artifact).
     DumpCpuid,
-    /// [internal] Assemble a .dvmm from parts (used by guest/bake-stack.sh).
-    #[command(hide = true)]
-    Pack(PackArgs),
+    /// [internal] Build the seed store inside `podman unshare` (used by `dvmm build`).
+    #[command(name = "__seed-build", hide = true)]
+    SeedBuild {
+        #[arg(long, value_name = "PATH")]
+        config: String,
+    },
+    /// [internal] Assemble the rootfs + emit the cpio inside `podman unshare`.
+    #[command(name = "__assemble-initramfs", hide = true)]
+    AssembleInitramfs {
+        #[arg(long, value_name = "PATH")]
+        config: String,
+    },
+}
+
+/// `dvmm build` args (clap). Mirrors bake-stack.sh's flags.
+#[derive(Args)]
+struct BuildCliArgs {
+    /// Path to the compose.yml to bake.
+    #[arg(value_name = "compose.yml")]
+    compose: String,
+    /// Output .dvmm path (default guest/initramfs-alpine/<stack>.dvmm).
+    #[arg(short, long, value_name = "PATH")]
+    out: Option<String>,
+    /// Stack name (default: the compose file's parent directory name).
+    #[arg(long, value_name = "STR")]
+    name: Option<String>,
+    /// Guest RAM in MiB (default 3072).
+    #[arg(long, value_name = "MiB")]
+    mem: Option<u64>,
+    /// Workload working-set allowance for the RAM estimate (MiB, default 512).
+    #[arg(long, value_name = "MiB")]
+    working_set: Option<u64>,
+    /// Squash images larger than this many MiB to one vfs layer (default 100).
+    #[arg(long, value_name = "MiB")]
+    squash_threshold: Option<u64>,
+    /// Only run the static compose validation (no pulls/boot); print + exit.
+    #[arg(long)]
+    validate_only: bool,
 }
 
 /// Flags shared by `boot` and `run`. On `boot` the `Option`s fall back to the
@@ -716,22 +757,6 @@ struct ArtifactArg {
     /// Path to the .dvmm stack artifact.
     #[arg(value_name = "stack.dvmm")]
     artifact: String,
-}
-
-#[derive(Args)]
-struct PackArgs {
-    /// Partial manifest JSON (anchors + run-defaults; member hashes filled in).
-    #[arg(long, value_name = "PATH")]
-    manifest_in: String,
-    #[arg(long, value_name = "PATH")]
-    kernel: String,
-    #[arg(long, value_name = "PATH")]
-    initramfs: String,
-    #[arg(long, value_name = "PATH")]
-    compose_lock: String,
-    /// Output .dvmm path.
-    #[arg(short, long, value_name = "PATH")]
-    out: String,
 }
 
 /// clap value parser for `--ff on|off` (also accepts 1/0/true/false).
@@ -918,6 +943,17 @@ fn main() {
 fn dispatch() -> Result<i32, Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     match cli.cmd {
+        Cmd::Build(args) => build::cmd_build(build::BuildArgs {
+            compose: args.compose,
+            out: args.out,
+            name: args.name,
+            mem: args.mem,
+            working_set: args.working_set,
+            squash_threshold: args.squash_threshold,
+            validate_only: args.validate_only,
+        }),
+        Cmd::SeedBuild { config } => build::cmd_seed_build(&config),
+        Cmd::AssembleInitramfs { config } => build::cmd_assemble_initramfs(&config),
         Cmd::Boot(args) => cmd_boot(args),
         Cmd::Run(args) => cmd_run(args),
         Cmd::Test(args) => cmd_test(args),
@@ -927,7 +963,6 @@ fn dispatch() -> Result<i32, Box<dyn std::error::Error>> {
             dump_cpuid(&Kvm::new()?)?;
             Ok(0)
         }
-        Cmd::Pack(args) => cmd_pack(args),
     }
 }
 
@@ -1163,25 +1198,6 @@ fn cmd_verify(path: &str) -> Result<i32, Box<dyn std::error::Error>> {
         println!("VERIFY FAIL: member-hash mismatch or missing member");
         Ok(1)
     }
-}
-
-// ---- `dvmm pack`: assemble a .dvmm from parts (internal, for bake-stack.sh) -
-
-fn cmd_pack(args: PackArgs) -> Result<i32, Box<dyn std::error::Error>> {
-    let manifest_in = std::fs::read(&args.manifest_in)
-        .map_err(|e| format!("reading {}: {e}", args.manifest_in))?;
-    let kernel =
-        std::fs::read(&args.kernel).map_err(|e| format!("reading {}: {e}", args.kernel))?;
-    let initramfs = std::fs::read(&args.initramfs)
-        .map_err(|e| format!("reading {}: {e}", args.initramfs))?;
-    let compose_lock = std::fs::read(&args.compose_lock)
-        .map_err(|e| format!("reading {}: {e}", args.compose_lock))?;
-    let bytes = artifact::pack(&manifest_in, &kernel, &initramfs, &compose_lock)?;
-    std::fs::write(&args.out, &bytes).map_err(|e| format!("writing {}: {e}", args.out))?;
-    // The identity is a pure function of the inputs; print it so the bake ledger
-    // can record it and the repeatability gate can compare.
-    println!("{}  {}", artifact::sha256_hex(&bytes), args.out);
-    Ok(0)
 }
 
 // ============================================================================
