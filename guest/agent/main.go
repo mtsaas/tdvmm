@@ -14,8 +14,22 @@
 //
 // TEST-1a ops: `ping`, `exec` (run a command in a compose service's container via
 // `podman exec`, report exit + stdout/stderr), and `containers` (a census of the
-// stack's containers). Fault ACTIONS (kill/stop/start/partition/heal) are
-// TEST-1b: an unknown op is rejected here, leaving room for them.
+// stack's containers).
+//
+// TEST-1b fault ACTIONS (this file):
+//   * kill  <service> — `podman kill` the resolved running container (SIGKILL).
+//   * stop  <service> — `podman stop` it (SIGTERM then SIGKILL after the timeout).
+//   * start <service> — `podman start` a previously stopped/killed container.
+//   * partition <A> <B> — drop all traffic between the two services' container IPs
+//     (both directions) via nftables drop rules in the guest root netns. The guest
+//     kernel has no nft `bridge` family, so this uses the `inet` family FORWARD
+//     hook; `bridge-nf-call-iptables` (already set by netavark) makes bridged
+//     intra-network packets traverse it. Rules live in our OWN table
+//     (`inet dvmm_faults`), never netavark's, and the whole ruleset is rebuilt
+//     atomically from the agent's active-partition set on every change.
+//   * heal <A> <B> | heal (all) — remove the partition rule(s).
+// kill/stop/start after the op WAIT for the container to reach its new state, so a
+// following container census is deterministic. An unknown op is still rejected.
 //
 // Build: static + reproducible, exactly like the Go A/B service —
 //   CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags="-s -w -buildid="
@@ -25,10 +39,12 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -41,11 +57,14 @@ const agentID = "dvmm-agent/1"
 const composeServiceLabel = "com.docker.compose.service"
 
 type request struct {
-	ID        uint64   `json:"id"`
-	Op        string   `json:"op"`
-	Container string   `json:"container,omitempty"`
-	Cmd       []string `json:"cmd,omitempty"`
-	TimeoutS  uint64   `json:"timeout_s,omitempty"`
+	ID        uint64 `json:"id"`
+	Op        string `json:"op"`
+	Container string `json:"container,omitempty"`
+	// Peer is the SECOND service for the two-party network faults
+	// (partition/heal); Container is the first. Empty for the single-target ops.
+	Peer     string   `json:"peer,omitempty"`
+	Cmd      []string `json:"cmd,omitempty"`
+	TimeoutS uint64   `json:"timeout_s,omitempty"`
 }
 
 type containerInfo struct {
@@ -202,8 +221,18 @@ func handle(req request) reply {
 		return doContainers(req)
 	case "exec":
 		return doExec(req)
+	case "kill":
+		return doLifecycle(req, "kill")
+	case "stop":
+		return doLifecycle(req, "stop")
+	case "start":
+		return doStart(req)
+	case "partition":
+		return doPartition(req)
+	case "heal":
+		return doHeal(req)
 	default:
-		// Unknown op (e.g. a TEST-1b fault action not yet implemented).
+		// Unknown op.
 		return reply{ID: req.ID, OK: false, Op: req.Op, Error: "unknown_op: " + req.Op}
 	}
 }
@@ -334,4 +363,243 @@ func doExec(req request) reply {
 		Stderr: stderr.String(),
 		DurMs:  dur,
 	}
+}
+
+// ============================================================================
+// TEST-1b fault executors: lifecycle (kill/stop/start) + network (partition/heal)
+// ============================================================================
+
+// runPodman runs a podman subcommand under a timeout (virtual seconds inside the
+// guest, so it fast-forwards) and captures stdout/stderr.
+func runPodman(timeoutS uint64, args ...string) (string, string, error) {
+	if timeoutS == 0 {
+		timeoutS = 60
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutS)*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "podman", args...)
+	var so, se strings.Builder
+	cmd.Stdout = &so
+	cmd.Stderr = &se
+	err := cmd.Run()
+	return so.String(), se.String(), err
+}
+
+// resolveByService finds a container of the given compose service. If wantRunning
+// it returns the first RUNNING one; otherwise the first NON-running one (for
+// `start`). Returns ("","",nil) when none matches.
+func resolveByService(service string, wantRunning bool) (id, name string, err error) {
+	out, err := exec.Command("podman", "ps", "-a", "--format", "json").Output()
+	if err != nil {
+		return "", "", err
+	}
+	var raw []podmanPS
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return "", "", err
+	}
+	for _, c := range raw {
+		match := c.Labels != nil && c.Labels[composeServiceLabel] == service
+		if !match {
+			for _, n := range c.Names {
+				if n == service {
+					match = true
+					break
+				}
+			}
+		}
+		if !match {
+			continue
+		}
+		if (c.State == "running") == wantRunning {
+			nm := ""
+			if len(c.Names) > 0 {
+				nm = c.Names[0]
+			}
+			return c.ID, nm, nil
+		}
+	}
+	return "", "", nil
+}
+
+// doLifecycle handles `kill` and `stop`: resolve the RUNNING container, run the
+// podman verb, then WAIT for it to actually stop so a following census is
+// deterministic.
+func doLifecycle(req request, op string) reply {
+	if req.Container == "" {
+		return reply{ID: req.ID, OK: false, Op: op, Error: op + " requires `container`"}
+	}
+	id, name, err := resolveByService(req.Container, true)
+	if err != nil {
+		return reply{ID: req.ID, OK: false, Op: op, Error: "podman_ps: " + err.Error()}
+	}
+	if id == "" {
+		return reply{ID: req.ID, OK: false, Op: op,
+			Error: "no_container: no running container for service " + req.Container}
+	}
+	_, se, runErr := runPodman(req.TimeoutS, op, id)
+	if runErr != nil {
+		return reply{ID: req.ID, OK: false, Op: op,
+			Error: "podman_" + op + ": " + runErr.Error() + " " + strings.TrimSpace(se)}
+	}
+	// Block until the container has actually stopped (kill does not wait; stop
+	// does, but this is idempotent + cheap and makes the census deterministic).
+	_, _, _ = runPodman(req.TimeoutS, "wait", id)
+	return reply{ID: req.ID, OK: true, Op: op, Stdout: op + " " + req.Container + " (" + name + ")"}
+}
+
+// doStart restarts a previously stopped/killed container of the service.
+func doStart(req request) reply {
+	if req.Container == "" {
+		return reply{ID: req.ID, OK: false, Op: "start", Error: "start requires `container`"}
+	}
+	id, name, err := resolveByService(req.Container, false)
+	if err != nil {
+		return reply{ID: req.ID, OK: false, Op: "start", Error: "podman_ps: " + err.Error()}
+	}
+	if id == "" {
+		// Already running? Treat as an idempotent success.
+		if rid, _, _ := resolveByService(req.Container, true); rid != "" {
+			return reply{ID: req.ID, OK: true, Op: "start", Stdout: "already running " + req.Container}
+		}
+		return reply{ID: req.ID, OK: false, Op: "start",
+			Error: "no_container: no stopped container for service " + req.Container}
+	}
+	_, se, runErr := runPodman(req.TimeoutS, "start", id)
+	if runErr != nil {
+		return reply{ID: req.ID, OK: false, Op: "start",
+			Error: "podman_start: " + runErr.Error() + " " + strings.TrimSpace(se)}
+	}
+	return reply{ID: req.ID, OK: true, Op: "start", Stdout: "start " + req.Container + " (" + name + ")"}
+}
+
+// activePartitions maps a canonical unordered service-pair key to the two
+// container IPs to drop between. The whole nft ruleset is rebuilt from this map on
+// every partition/heal, so the installed rules are always exactly the active set.
+var activePartitions = map[string][2]string{}
+
+func pairKey(a, b string) string {
+	if a > b {
+		a, b = b, a
+	}
+	return a + "\x00" + b
+}
+
+// containerIP returns the first bridge IP of a container.
+func containerIP(idOrName string) (string, error) {
+	out, err := exec.Command("podman", "inspect", "-f",
+		"{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}", idOrName).Output()
+	if err != nil {
+		return "", err
+	}
+	for _, tok := range strings.Fields(string(out)) {
+		if tok != "" {
+			return tok, nil
+		}
+	}
+	return "", fmt.Errorf("no IP for %s", idOrName)
+}
+
+// enableBridgeNetfilter makes bridged (intra-network) packets traverse the
+// ip/inet netfilter hooks, so our FORWARD drop rules see container-to-container
+// traffic. netavark already sets this; we set it defensively and ignore errors.
+func enableBridgeNetfilter() {
+	for _, p := range []string{
+		"/proc/sys/net/bridge/bridge-nf-call-iptables",
+		"/proc/sys/net/bridge/bridge-nf-call-ip6tables",
+	} {
+		_ = os.WriteFile(p, []byte("1\n"), 0644)
+	}
+}
+
+// applyPartitions rebuilds our nft table from activePartitions in ONE atomic
+// transaction. The add/delete/add idiom gives a clean slate whether or not the
+// table pre-existed. The chain is a default-ACCEPT FORWARD base chain, so only our
+// explicit drop rules matter and all other traffic falls through to netavark.
+// NB: `partition` (not the reserved keyword `fwd`) is a valid nft chain name.
+func applyPartitions() error {
+	var b strings.Builder
+	b.WriteString("add table inet dvmm_faults\n")
+	b.WriteString("delete table inet dvmm_faults\n")
+	b.WriteString("add table inet dvmm_faults\n")
+	b.WriteString("add chain inet dvmm_faults partition { type filter hook forward priority -300 ; policy accept ; }\n")
+	keys := make([]string, 0, len(activePartitions))
+	for k := range activePartitions {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		ips := activePartitions[k]
+		fmt.Fprintf(&b, "add rule inet dvmm_faults partition ip saddr %s ip daddr %s drop\n", ips[0], ips[1])
+		fmt.Fprintf(&b, "add rule inet dvmm_faults partition ip saddr %s ip daddr %s drop\n", ips[1], ips[0])
+	}
+	cmd := exec.Command("nft", "-f", "-")
+	cmd.Stdin = strings.NewReader(b.String())
+	var se strings.Builder
+	cmd.Stderr = &se
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%v: %s", err, strings.TrimSpace(se.String()))
+	}
+	return nil
+}
+
+// doPartition drops all traffic between the two services' running containers.
+func doPartition(req request) reply {
+	a, b := req.Container, req.Peer
+	if a == "" || b == "" {
+		return reply{ID: req.ID, OK: false, Op: "partition",
+			Error: "partition requires two services (`container` and `peer`)"}
+	}
+	aid, _, err := resolveByService(a, true)
+	if err != nil {
+		return reply{ID: req.ID, OK: false, Op: "partition", Error: "podman_ps: " + err.Error()}
+	}
+	bid, _, err := resolveByService(b, true)
+	if err != nil {
+		return reply{ID: req.ID, OK: false, Op: "partition", Error: "podman_ps: " + err.Error()}
+	}
+	if aid == "" || bid == "" {
+		return reply{ID: req.ID, OK: false, Op: "partition",
+			Error: fmt.Sprintf("no_container: need both running (%s running=%v, %s running=%v)",
+				a, aid != "", b, bid != "")}
+	}
+	aip, err := containerIP(aid)
+	if err != nil {
+		return reply{ID: req.ID, OK: false, Op: "partition", Error: "ip(" + a + "): " + err.Error()}
+	}
+	bip, err := containerIP(bid)
+	if err != nil {
+		return reply{ID: req.ID, OK: false, Op: "partition", Error: "ip(" + b + "): " + err.Error()}
+	}
+	enableBridgeNetfilter()
+	key := pairKey(a, b)
+	activePartitions[key] = [2]string{aip, bip}
+	if err := applyPartitions(); err != nil {
+		delete(activePartitions, key)
+		return reply{ID: req.ID, OK: false, Op: "partition", Error: "nft: " + err.Error()}
+	}
+	return reply{ID: req.ID, OK: true, Op: "partition",
+		Stdout: fmt.Sprintf("partition %s(%s) <-x-> %s(%s)", a, aip, b, bip)}
+}
+
+// doHeal removes the partition between two services, or ALL partitions when no
+// services are given (`heal` with no args).
+func doHeal(req request) reply {
+	a, b := req.Container, req.Peer
+	switch {
+	case a == "" && b == "":
+		activePartitions = map[string][2]string{}
+	case a != "" && b != "":
+		delete(activePartitions, pairKey(a, b))
+	default:
+		return reply{ID: req.ID, OK: false, Op: "heal",
+			Error: "heal needs two services (`container` and `peer`) or none (heal all)"}
+	}
+	if err := applyPartitions(); err != nil {
+		return reply{ID: req.ID, OK: false, Op: "heal", Error: "nft: " + err.Error()}
+	}
+	detail := "heal all"
+	if a != "" {
+		detail = "heal " + a + " <-> " + b
+	}
+	return reply{ID: req.ID, OK: true, Op: "heal", Stdout: detail}
 }

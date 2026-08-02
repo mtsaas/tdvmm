@@ -1,0 +1,87 @@
+# TEST-1b acceptance: KILL + RECOVER.
+#
+#   dvmm test faultlab.dvmm --scenario kill-recover.yml   ->   PASS, exit 0
+#
+# The shape the fault set exists for: a service is healthy, we KILL its dependency,
+# the dependent observably fails, we START the dependency again, and the dependent
+# RECOVERS. Every fault is a scheduled (vtsc, ScenarioStep) queue entry delivered
+# at its `at:` — replayable, logged in the JSONL with vtsc + command + result.
+#
+# `db`'s death is DELIBERATE, so it is declared in expect_death: a SIGKILLed
+# Postgres exits 137, which must NOT count as an unexpected death. (Drop the
+# expect_death line and this same run fails at the end-of-run census — see
+# unexpected-death.yml.)
+
+name: faultlab-kill-recover
+
+expect_death: [db]
+
+steps:
+  # 1. Readiness: client can reach db by name over the bridge.
+  - name: wait-db-ready
+    at: 0s
+    wait_for:
+      probe:
+        exec:
+          container: client
+          cmd: "pg_isready -h db -t 3"
+      until: exit_zero
+      every: 5s
+      timeout: 2m
+
+  # 2. Healthy: assert the dependent connects (baseline).
+  - name: assert-connected
+    at: 30s
+    exec:
+      container: client
+      cmd: "pg_isready -h db -t 3"
+    expect:
+      exit: 0
+
+  # 3. FAULT: kill the db container (SIGKILL). Expected death.
+  - name: kill-db
+    at: 1h
+    kill: db
+
+  # 4. EFFECT: the dependent now fails to reach db (connection lost).
+  - name: assert-connectivity-lost
+    at: 1h
+    wait_for:
+      probe:
+        exec:
+          container: client
+          cmd: "pg_isready -h db -t 3"
+      until: exit_nonzero
+      every: 5s
+      timeout: 2m
+
+  # 5. RECOVER: start db again.
+  - name: start-db
+    at: 2h
+    start: db
+
+  # 6. RECOVERY: the dependent reconnects once db is back.
+  - name: wait-recovered
+    at: 2h
+    wait_for:
+      probe:
+        exec:
+          container: client
+          cmd: "pg_isready -h db -t 3"
+      until: exit_zero
+      every: 5s
+      timeout: 3m
+
+  # 7. Confirm healthy again with a hard assertion.
+  - name: assert-reconnected
+    at: 2.5h
+    exec:
+      container: client
+      cmd: "pg_isready -h db -t 3"
+    expect:
+      exit: 0
+
+  # 8. No UNEXPECTED deaths (db is back running; its earlier kill was expected).
+  - name: no-unexpected-death
+    at: 2.5h
+    containers: none_exited_nonzero

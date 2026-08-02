@@ -86,6 +86,12 @@ struct RawScenario {
     name: Option<String>,
     #[serde(default)]
     run: Option<RawRun>,
+    /// Services whose container is DELIBERATELY killed/stopped by this scenario, so
+    /// an exited-nonzero container for one of them is NOT counted as an unexpected
+    /// death (TEST-1b expected-death policy). Every other exited-nonzero container
+    /// is an unexpected death → verdict fail.
+    #[serde(default)]
+    expect_death: Vec<String>,
     steps: Vec<RawStep>,
 }
 
@@ -117,6 +123,33 @@ struct RawStep {
     containers: Option<ContainersAssert>,
     #[serde(default)]
     wait_for: Option<RawWaitFor>,
+    // ---- TEST-1b fault ACTIONS (each a step at an `at:` time) ----
+    /// `kill: <service>` — SIGKILL the service's running container.
+    #[serde(default)]
+    kill: Option<String>,
+    /// `stop: <service>` — graceful stop (SIGTERM then SIGKILL).
+    #[serde(default)]
+    stop: Option<String>,
+    /// `start: <service>` — restart a previously stopped/killed container.
+    #[serde(default)]
+    start: Option<String>,
+    /// `partition: [A, B]` — drop all traffic between the two services (both ways).
+    #[serde(default)]
+    partition: Option<Vec<String>>,
+    /// `heal: [A, B]` — undo one partition; `heal: all` — undo every partition.
+    #[serde(default)]
+    heal: Option<HealSpec>,
+    /// Optional timeout for a fault action (default `DEFAULT_EXEC_TIMEOUT_S`).
+    #[serde(default)]
+    timeout: Option<String>,
+}
+
+/// `heal: all` (a string) or `heal: [A, B]` (a two-element list).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum HealSpec {
+    All(String),
+    Pair(Vec<String>),
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -197,6 +230,14 @@ pub struct Scenario {
     pub steps: Vec<PreparedStep>,
     pub source_path: String,
     pub source_sha256: String,
+    /// Services whose death is expected (deliberately killed/stopped). An
+    /// exited-nonzero container NOT in this set is an unexpected death → fail.
+    pub expect_death: HashSet<String>,
+    /// Whether to enforce the expected-death policy with an implicit end-of-run
+    /// container census. Enabled only for scenarios that could produce a death
+    /// (declare `expect_death`, or use a `kill`/`stop` action), so pure-assertion
+    /// TEST-1a scenarios are byte-for-byte unchanged.
+    pub death_policy: bool,
 }
 
 #[derive(Clone, Default)]
@@ -227,6 +268,17 @@ enum PreparedKind {
         probe: ProbeReq,
         until: PreparedUntil,
         every_secs: f64,
+        timeout_secs: f64,
+    },
+    /// A TEST-1b fault ACTION delivered to the agent at the step's `at:` vtsc.
+    Action {
+        /// Agent op: "kill" | "stop" | "start" | "partition" | "heal".
+        op: &'static str,
+        /// Primary service (the target, or partition/heal side A). `None` only for
+        /// `heal all`.
+        a: Option<String>,
+        /// Peer service (partition / heal-pair side B). `None` otherwise.
+        b: Option<String>,
         timeout_secs: f64,
     },
 }
@@ -358,18 +410,30 @@ impl Scenario {
                 .unwrap_or_else(|| format!("step[{i}]"));
             let at_secs = dur(&format!("{where_}.at"), &s.at, 0.0, true)?;
 
+            let action_count = s.kill.is_some() as u8
+                + s.stop.is_some() as u8
+                + s.start.is_some() as u8
+                + s.partition.is_some() as u8
+                + s.heal.is_some() as u8;
             let n_kinds = s.exec.is_some() as u8
                 + s.containers.is_some() as u8
-                + s.wait_for.is_some() as u8;
+                + s.wait_for.is_some() as u8
+                + action_count;
             if n_kinds != 1 {
                 return Err(ScenarioError(format!(
-                    "{where_}: a step must have exactly one of `exec`, `containers`, \
-                     `wait_for` (found {n_kinds})"
+                    "{where_}: a step must have exactly one kind (exec / containers / \
+                     wait_for / kill / stop / start / partition / heal); found {n_kinds}"
                 )));
             }
             if s.expect.is_some() && s.exec.is_none() {
                 return Err(ScenarioError(format!(
                     "{where_}: `expect` is only valid on an `exec` step"
+                )));
+            }
+            if s.timeout.is_some() && action_count == 0 {
+                return Err(ScenarioError(format!(
+                    "{where_}: a step-level `timeout` is only valid on a fault action \
+                     (kill/stop/start/partition/heal); exec/wait_for carry their own"
                 )));
             }
 
@@ -405,8 +469,7 @@ impl Scenario {
                     assert: *c,
                     timeout_secs: DEFAULT_EXEC_TIMEOUT_S,
                 }
-            } else {
-                let w = s.wait_for.as_ref().unwrap();
+            } else if let Some(w) = &s.wait_for {
                 let probe = match (&w.probe.exec, w.probe.containers) {
                     (Some(e), _) => ProbeReq::Exec(prepare_exec(e)?),
                     (None, Some(true)) => ProbeReq::Containers,
@@ -459,6 +522,74 @@ impl Scenario {
                     every_secs,
                     timeout_secs,
                 }
+            } else {
+                // A TEST-1b fault ACTION (kill/stop/start/partition/heal).
+                let timeout_secs = dur(
+                    &format!("{where_}.timeout"),
+                    &s.timeout,
+                    DEFAULT_EXEC_TIMEOUT_S,
+                    false,
+                )?;
+                let (op, a, b): (&'static str, Option<String>, Option<String>) =
+                    if let Some(svc) = &s.kill {
+                        check_service(svc.as_str())?;
+                        ("kill", Some(svc.clone()), None)
+                    } else if let Some(svc) = &s.stop {
+                        check_service(svc.as_str())?;
+                        ("stop", Some(svc.clone()), None)
+                    } else if let Some(svc) = &s.start {
+                        check_service(svc.as_str())?;
+                        ("start", Some(svc.clone()), None)
+                    } else if let Some(pair) = &s.partition {
+                        if pair.len() != 2 {
+                            return Err(ScenarioError(format!(
+                                "{where_}.partition needs exactly two services (got {})",
+                                pair.len()
+                            )));
+                        }
+                        check_service(pair[0].as_str())?;
+                        check_service(pair[1].as_str())?;
+                        if pair[0] == pair[1] {
+                            return Err(ScenarioError(format!(
+                                "{where_}.partition: the two services must differ ({:?})",
+                                pair[0]
+                            )));
+                        }
+                        ("partition", Some(pair[0].clone()), Some(pair[1].clone()))
+                    } else if let Some(h) = &s.heal {
+                        match h {
+                            HealSpec::All(v) => {
+                                if v.as_str() != "all" {
+                                    return Err(ScenarioError(format!(
+                                        "{where_}.heal: expected `all` or a two-service \
+                                         list, got {v:?}"
+                                    )));
+                                }
+                                ("heal", None, None)
+                            }
+                            HealSpec::Pair(pair) => {
+                                if pair.len() != 2 {
+                                    return Err(ScenarioError(format!(
+                                        "{where_}.heal needs exactly two services or \
+                                         `all` (got {})",
+                                        pair.len()
+                                    )));
+                                }
+                                check_service(pair[0].as_str())?;
+                                check_service(pair[1].as_str())?;
+                                ("heal", Some(pair[0].clone()), Some(pair[1].clone()))
+                            }
+                        }
+                    } else {
+                        // unreachable: n_kinds == 1 guarantees one of the above.
+                        return Err(ScenarioError(format!("{where_}: no recognized step kind")));
+                    };
+                PreparedKind::Action {
+                    op,
+                    a,
+                    b,
+                    timeout_secs,
+                }
             };
 
             let _ = i;
@@ -468,6 +599,18 @@ impl Scenario {
                 kind,
             });
         }
+
+        // Expected-death services must be real services (same check as any ref).
+        let mut expect_death = HashSet::new();
+        for svc in &raw.expect_death {
+            check_service(svc.as_str())?;
+            expect_death.insert(svc.clone());
+        }
+        // Enforce the expected-death policy (an implicit end-of-run census) only
+        // where a death could occur — a declared expect_death, or a kill/stop
+        // action — so pure-assertion TEST-1a scenarios are byte-for-byte unchanged.
+        let death_policy = !expect_death.is_empty()
+            || raw.steps.iter().any(|s| s.kill.is_some() || s.stop.is_some());
 
         let run = raw.run.map(|r| ScenarioRun {
             cmdline: r.cmdline,
@@ -492,6 +635,8 @@ impl Scenario {
             steps,
             source_path: path.to_string(),
             source_sha256,
+            expect_death,
+            death_policy,
         })
     }
 
@@ -507,6 +652,7 @@ impl Scenario {
                 PreparedKind::Exec { timeout_secs, .. } => *timeout_secs,
                 PreparedKind::Containers { timeout_secs, .. } => *timeout_secs,
                 PreparedKind::WaitFor { timeout_secs, .. } => *timeout_secs,
+                PreparedKind::Action { timeout_secs, .. } => *timeout_secs,
             };
             h = h.max(s.at_secs + step_dur);
         }
@@ -543,6 +689,9 @@ struct AgentRequest {
     op: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     container: Option<String>,
+    /// The SECOND service for two-party network faults (partition/heal).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    peer: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cmd: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -646,6 +795,9 @@ enum Phase {
     AwaitReply { id: u64 },
     WaitPoll { id: u64 },
     WaitSleep,
+    /// TEST-1b: the implicit end-of-run container census that enforces the
+    /// expected-death policy (only for scenarios that could produce a death).
+    FinalCensus { id: u64 },
     Done,
 }
 
@@ -668,6 +820,8 @@ pub struct ScenarioEngine {
     t0: u64,
     next_deadline: Option<u64>,
     wait_overall_deadline: u64,
+    /// Whether the implicit end-of-run census has already been issued.
+    final_census_done: bool,
 
     step_reports: Vec<StepReport>,
     outcome: Option<Outcome>,
@@ -695,6 +849,7 @@ impl ScenarioEngine {
             t0: 0,
             next_deadline: None,
             wait_overall_deadline: 0,
+            final_census_done: false,
             step_reports: Vec::new(),
             outcome: None,
         })
@@ -793,7 +948,16 @@ impl ScenarioEngine {
     // ---- scheduling ----
     fn schedule(&mut self, now: u64, com2: &mut ControlChannel) {
         if self.idx >= self.scn.steps.len() {
-            self.finish(now, "pass", 0, None);
+            // All steps passed. If this scenario could have produced a container
+            // death, enforce the expected-death policy with ONE final census
+            // before declaring PASS (an unexpected exited-nonzero container →
+            // fail). Pure-assertion scenarios skip this and pass immediately.
+            if self.scn.death_policy && !self.final_census_done {
+                self.final_census_done = true;
+                self.begin_final_census(now, com2);
+            } else {
+                self.finish(now, "pass", 0, None);
+            }
             return;
         }
         let target = self
@@ -813,6 +977,7 @@ impl ScenarioEngine {
             id,
             op: "exec",
             container: Some(e.container.clone()),
+            peer: None,
             cmd: Some(e.argv.clone()),
             timeout_s: Some(timeout_secs.max(1.0) as u64),
         };
@@ -825,10 +990,78 @@ impl ScenarioEngine {
             id,
             op: "containers",
             container: None,
+            peer: None,
             cmd: None,
             timeout_s: None,
         };
         (id, serde_json::to_vec(&req).unwrap())
+    }
+
+    /// Build a TEST-1b fault-action request (kill/stop/start/partition/heal).
+    fn build_action_req(
+        &mut self,
+        op: &'static str,
+        a: &Option<String>,
+        b: &Option<String>,
+        timeout_secs: f64,
+    ) -> (u64, Vec<u8>) {
+        let id = self.new_id();
+        let req = AgentRequest {
+            id,
+            op,
+            container: a.clone(),
+            peer: b.clone(),
+            cmd: None,
+            timeout_s: Some(timeout_secs.max(1.0) as u64),
+        };
+        (id, serde_json::to_vec(&req).unwrap())
+    }
+
+    /// Issue the implicit end-of-run container census (TEST-1b expected-death
+    /// policy). Enters [`Phase::FinalCensus`]; the reply is evaluated in
+    /// [`Self::on_final_census_reply`].
+    fn begin_final_census(&mut self, now: u64, com2: &mut ControlChannel) {
+        let (id, bytes) = self.build_containers_req();
+        self.logger.event(
+            now,
+            "command",
+            json!({ "id": id, "op": "containers(final-census)" }),
+        );
+        com2.send_line(&bytes);
+        self.phase = Phase::FinalCensus { id };
+        self.next_deadline = Some(now.saturating_add(self.secs_to_cycles(DEFAULT_EXEC_TIMEOUT_S)));
+    }
+
+    /// Evaluate the end-of-run census against the expected-death policy. An
+    /// exited-nonzero container NOT in `expect_death` → verdict fail (exit 1);
+    /// otherwise the run passes. A census that could not be taken does NOT fail an
+    /// otherwise-passing run (the steps already passed) — it is logged and passes.
+    fn on_final_census_reply(&mut self, now: u64, reply: &AgentLine) {
+        self.logger.event(
+            now,
+            "final_census",
+            json!({
+                "id": reply.id, "ok": reply.ok, "error": reply.error,
+                "containers": reply.containers,
+            }),
+        );
+        if reply.ok != Some(true) {
+            self.finish(now, "pass", 0, None);
+            return;
+        }
+        let empty = Vec::new();
+        let list = reply.containers.as_ref().unwrap_or(&empty);
+        match check_unexpected_deaths(list, &self.scn.expect_death) {
+            Some(bad) => self.finish(
+                now,
+                "fail",
+                1,
+                Some(format!(
+                    "unexpected container death: {bad} (not declared in expect_death)"
+                )),
+            ),
+            None => self.finish(now, "pass", 0, None),
+        }
     }
 
     fn begin_step(&mut self, now: u64, com2: &mut ControlChannel) {
@@ -849,6 +1082,7 @@ impl ScenarioEngine {
             Containers { timeout: f64 },
             WaitForExec { req: ExecReq, timeout: f64, overall: f64 },
             WaitForContainers { overall: f64 },
+            Fault { op: &'static str, a: Option<String>, b: Option<String>, timeout: f64 },
         }
         let action = match &self.scn.steps[idx].kind {
             PreparedKind::Exec { req, timeout_secs, .. } => Action::Exec {
@@ -872,6 +1106,12 @@ impl ScenarioEngine {
                 ProbeReq::Containers => Action::WaitForContainers {
                     overall: *timeout_secs,
                 },
+            },
+            PreparedKind::Action { op, a, b, timeout_secs } => Action::Fault {
+                op,
+                a: a.clone(),
+                b: b.clone(),
+                timeout: *timeout_secs,
             },
         };
 
@@ -910,6 +1150,16 @@ impl ScenarioEngine {
                 self.phase = Phase::WaitPoll { id };
                 self.next_deadline = Some(self.wait_overall_deadline);
             }
+            Action::Fault { op, a, b, timeout } => {
+                // A TEST-1b fault delivered at its scheduled vtsc (THE LAW): logged
+                // with op + service(+peer), then awaited like any command.
+                let (id, bytes) = self.build_action_req(op, &a, &b, timeout);
+                self.log_action(now, idx, id, op, &a, &b);
+                com2.send_line(&bytes);
+                let deadline = now.saturating_add(self.secs_to_cycles(timeout));
+                self.phase = Phase::AwaitReply { id };
+                self.next_deadline = Some(deadline);
+            }
         }
     }
 
@@ -941,6 +1191,26 @@ impl ScenarioEngine {
         if let Some(r) = req {
             payload["container"] = json!(r.container);
             payload["cmd"] = json!(r.argv);
+        }
+        self.logger.event(now, "command", payload);
+    }
+
+    /// Log a TEST-1b fault command at its scheduled vtsc (op + service[+peer]).
+    fn log_action(
+        &mut self,
+        now: u64,
+        idx: usize,
+        id: u64,
+        op: &str,
+        a: &Option<String>,
+        b: &Option<String>,
+    ) {
+        let mut payload = json!({ "step": idx, "id": id, "op": op, "fault": true });
+        if let Some(a) = a {
+            payload["service"] = json!(a);
+        }
+        if let Some(b) = b {
+            payload["peer"] = json!(b);
         }
         self.logger.event(now, "command", payload);
     }
@@ -980,6 +1250,16 @@ impl ScenarioEngine {
                     // WaitSleep poll time: probe again.
                     self.send_probe(now, com2);
                 }
+            }
+            Phase::FinalCensus { .. } => {
+                // The end-of-run census did not return in time. Do NOT fail an
+                // otherwise-passing run (every step already passed); log + pass.
+                self.logger.event(
+                    now,
+                    "final_census",
+                    json!({ "ok": false, "error": "final census timed out" }),
+                );
+                self.finish(now, "pass", 0, None);
             }
             Phase::Done => {}
         }
@@ -1031,6 +1311,9 @@ impl ScenarioEngine {
             Phase::WaitPoll { id: expect } if id == expect => {
                 self.on_probe_reply(now, &parsed, com2);
             }
+            Phase::FinalCensus { id: expect } if id == expect => {
+                self.on_final_census_reply(now, &parsed);
+            }
             _ => {
                 // stale / unexpected reply id — ignore.
             }
@@ -1081,7 +1364,12 @@ impl ScenarioEngine {
                 eval_exec_assertion(expect, reply)
             }
             PreparedKind::Containers { assert, .. } => {
-                eval_containers_assertion(*assert, reply)
+                eval_containers_assertion(*assert, reply, &self.scn.expect_death)
+            }
+            PreparedKind::Action { op, .. } => {
+                // A fault reached the agent and was applied (ok:true above); an
+                // action has no assertion of its own — it simply passes.
+                (true, format!("{op}: {}", reply.stdout.as_deref().unwrap_or("ok")))
             }
             _ => (false, "internal: reply for non-assertion step".to_string()),
         };
@@ -1112,7 +1400,7 @@ impl ScenarioEngine {
     fn on_probe_reply(&mut self, now: u64, reply: &AgentLine, com2: &mut ControlChannel) {
         let idx = self.idx;
         let (satisfied, detail) = match &self.scn.steps[idx].kind {
-            PreparedKind::WaitFor { until, .. } => eval_until(until, reply),
+            PreparedKind::WaitFor { until, .. } => eval_until(until, reply, &self.scn.expect_death),
             _ => (false, "internal: probe for non-wait_for step".to_string()),
         };
         self.logger.event(
@@ -1277,6 +1565,7 @@ fn step_kind_str(k: &PreparedKind) -> &'static str {
         PreparedKind::Exec { .. } => "exec",
         PreparedKind::Containers { .. } => "containers",
         PreparedKind::WaitFor { .. } => "wait_for",
+        PreparedKind::Action { op, .. } => op,
     }
 }
 
@@ -1323,7 +1612,11 @@ fn eval_exec_assertion(expect: &PreparedExpect, reply: &AgentLine) -> (bool, Str
     (ok, notes.join(", "))
 }
 
-fn eval_containers_assertion(assert: ContainersAssert, reply: &AgentLine) -> (bool, String) {
+fn eval_containers_assertion(
+    assert: ContainersAssert,
+    reply: &AgentLine,
+    expect_death: &HashSet<String>,
+) -> (bool, String) {
     let empty = Vec::new();
     let list = reply.containers.as_ref().unwrap_or(&empty);
     match assert {
@@ -1342,9 +1635,14 @@ fn eval_containers_assertion(assert: ContainersAssert, reply: &AgentLine) -> (bo
             }
         }
         ContainersAssert::NoneExitedNonzero => {
+            // A container that exited nonzero is only a violation if its death was
+            // NOT expected (TEST-1b): a deliberately killed/stopped service listed
+            // in `expect_death` is exempt.
             let bad: Vec<String> = list
                 .iter()
-                .filter(|c| c.state == "exited" && c.exit_code != 0)
+                .filter(|c| {
+                    c.state == "exited" && c.exit_code != 0 && !expect_death.contains(&c.service)
+                })
                 .map(|c| format!("{}=exit{}", disp_name(c), c.exit_code))
                 .collect();
             if bad.is_empty() {
@@ -1356,7 +1654,23 @@ fn eval_containers_assertion(assert: ContainersAssert, reply: &AgentLine) -> (bo
     }
 }
 
-fn eval_until(until: &PreparedUntil, reply: &AgentLine) -> (bool, String) {
+/// The first container that exited nonzero and is NOT in the expected-death set,
+/// or `None` if every nonzero exit was expected. Backs the implicit end-of-run
+/// census (TEST-1b expected-death policy).
+fn check_unexpected_deaths(
+    list: &[ContainerInfo],
+    expect_death: &HashSet<String>,
+) -> Option<String> {
+    list.iter()
+        .find(|c| c.state == "exited" && c.exit_code != 0 && !expect_death.contains(&c.service))
+        .map(|c| format!("{}=exit{}", disp_name(c), c.exit_code))
+}
+
+fn eval_until(
+    until: &PreparedUntil,
+    reply: &AgentLine,
+    expect_death: &HashSet<String>,
+) -> (bool, String) {
     // A probe whose command could not run (ok:false) is simply "not ready yet".
     let ok = reply.ok == Some(true);
     match until {
@@ -1377,11 +1691,12 @@ fn eval_until(until: &PreparedUntil, reply: &AgentLine) -> (bool, String) {
             (ok && s.trim().contains(sub), format!("output_contains {sub:?}"))
         }
         PreparedUntil::AllRunning => {
-            let (r, d) = eval_containers_assertion(ContainersAssert::AllRunning, reply);
+            let (r, d) = eval_containers_assertion(ContainersAssert::AllRunning, reply, expect_death);
             (ok && r, d)
         }
         PreparedUntil::NoneExitedNonzero => {
-            let (r, d) = eval_containers_assertion(ContainersAssert::NoneExitedNonzero, reply);
+            let (r, d) =
+                eval_containers_assertion(ContainersAssert::NoneExitedNonzero, reply, expect_death);
             (ok && r, d)
         }
     }
@@ -1586,7 +1901,8 @@ steps:
             ]),
             ..Default::default()
         };
-        assert!(eval_containers_assertion(ContainersAssert::AllRunning, &reply).0);
+        let none = HashSet::new();
+        assert!(eval_containers_assertion(ContainersAssert::AllRunning, &reply, &none).0);
         let reply2 = AgentLine {
             id: Some(1),
             ok: Some(true),
@@ -1595,7 +1911,70 @@ steps:
             ]),
             ..Default::default()
         };
-        assert!(!eval_containers_assertion(ContainersAssert::AllRunning, &reply2).0);
-        assert!(!eval_containers_assertion(ContainersAssert::NoneExitedNonzero, &reply2).0);
+        assert!(!eval_containers_assertion(ContainersAssert::AllRunning, &reply2, &none).0);
+        assert!(!eval_containers_assertion(ContainersAssert::NoneExitedNonzero, &reply2, &none).0);
+        // But if `service`'s death is EXPECTED, none_exited_nonzero passes.
+        let expect: HashSet<String> = ["service".to_string()].into_iter().collect();
+        assert!(eval_containers_assertion(ContainersAssert::NoneExitedNonzero, &reply2, &expect).0);
+    }
+
+    #[test]
+    fn accepts_fault_action_steps() {
+        let y = "\
+name: faults
+expect_death: [postgres]
+steps:
+  - at: 1h
+    kill: postgres
+  - at: 2h
+    start: postgres
+  - at: 3h
+    partition: [postgres, service]
+  - at: 4h
+    heal: [postgres, service]
+  - at: 5h
+    heal: all
+";
+        let s = scn_from(y).unwrap();
+        assert_eq!(s.steps.len(), 5);
+        assert!(s.death_policy, "kill + expect_death must enable the death policy");
+        assert!(s.expect_death.contains("postgres"));
+    }
+
+    #[test]
+    fn rejects_fault_unknown_service() {
+        let e = err_of("steps:\n  - at: 1h\n    kill: nope\n");
+        assert!(e.contains("nope"), "{}", e);
+        let e = err_of("steps:\n  - at: 1h\n    partition: [service, nope]\n");
+        assert!(e.contains("nope"), "{}", e);
+    }
+
+    #[test]
+    fn rejects_expect_death_unknown_service() {
+        let e = err_of("expect_death: [nope]\nsteps:\n  - at: 1h\n    kill: service\n");
+        assert!(e.contains("nope"), "{}", e);
+    }
+
+    #[test]
+    fn rejects_partition_wrong_arity_and_action_plus_kind() {
+        let e = err_of("steps:\n  - at: 1h\n    partition: [service]\n");
+        assert!(e.contains("two services"), "{}", e);
+        // exec + a fault action on the same step -> not exactly one kind.
+        let e = err_of(
+            "steps:\n  - at: 1h\n    kill: service\n    exec: { container: service, cmd: \"true\" }\n",
+        );
+        assert!(e.contains("exactly one"), "{}", e);
+    }
+
+    #[test]
+    fn check_unexpected_deaths_honors_expect_death() {
+        let list = vec![
+            ContainerInfo { name: "p".into(), service: "postgres".into(), state: "exited".into(), exit_code: 137, health: String::new() },
+            ContainerInfo { name: "s".into(), service: "service".into(), state: "running".into(), exit_code: 0, health: String::new() },
+        ];
+        let none = HashSet::new();
+        assert!(check_unexpected_deaths(&list, &none).is_some(), "unexpected death must be flagged");
+        let expect: HashSet<String> = ["postgres".to_string()].into_iter().collect();
+        assert!(check_unexpected_deaths(&list, &expect).is_none(), "expected death must be exempt");
     }
 }

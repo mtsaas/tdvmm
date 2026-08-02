@@ -358,6 +358,56 @@ platform testing itself: `wait_for` Postgres ready, fast-forward through virtual
 hours, then `exec` a `psql` probe asserting the events-table row count **accrues**
 and then **caps** at MAX_ROWS.
 
+## TEST-1b — fault injection (the core testing value)
+
+You can now inject **failures** and check how a stack behaves under them and
+recovers. Faults are scenario **action steps** at an `at:` time, delivered the
+exact same way assertions are — as scheduled `(vtsc, ScenarioStep)` queue entries
+(THE LAW: no side channels, replayable) — so a fault at `at: 24h` fast-forwards
+through idle like any other deadline and lands on time.
+
+- **Action step kinds** (extend the scenario schema, same static pre-boot
+  validation as assertions — unknown service ⇒ exit 2 before boot):
+  - **`kill <service>`** / **`stop <service>`** / **`start <service>`** —
+    container lifecycle (`podman kill`/`stop`/`start` on the resolved
+    compose-service container; kill/stop then WAIT for the container to actually
+    stop, so a following census is deterministic).
+  - **`partition [A, B]`** / **`heal [A, B]`** (or **`heal: all`**) — a network
+    fault: drop **all** traffic between the two services' container IPs, both
+    directions. The agent resolves each service→container→IP and installs
+    **nftables drop rules** in the guest root netns, in its OWN table
+    (`inet dvmm_faults`), rebuilt atomically from the active-partition set on every
+    change; `heal` removes them. (The guest kernel has no nft `bridge` family, so
+    this uses the `inet` FORWARD hook — `bridge-nf-call-iptables`, already set by
+    netavark, makes bridged intra-network packets traverse it.)
+- **Expected-death policy.** A scenario declares deliberately-killed services with
+  a top-level `expect_death: [<service>...]`. Any **other** container that exits
+  nonzero is an **unexpected death → verdict fail (exit 1)** — enforced by an
+  implicit end-of-run container census (and honored by the `containers:
+  none_exited_nonzero` assertion). A SIGKILLed Postgres exits 137; declaring it in
+  `expect_death` is what stops that from failing the run.
+- **Effect + recovery are ordinary assertions.** Use the existing `wait_for` /
+  `exec` / `containers` steps to prove the fault took hold (e.g. a `pg_isready`
+  probe now returns nonzero) and that recovery worked (it returns zero again).
+- **Replayable log.** Every fault is one JSONL line with its `ts_vtsc`, op, and
+  service(+peer), plus its `command_result` — the reproduction package a replay
+  needs.
+
+The fault set lives in `guest/stacks/faultlab/` — a two-service stack (`db` +
+an idle `client` that probes `db` by name) built for exactly this:
+
+```sh
+guest/bake-stack.sh guest/stacks/faultlab/compose.yml -o faultlab.dvmm
+dvmm test faultlab.dvmm --scenario guest/stacks/faultlab/kill-recover.yml    # -> PASS, exit 0
+dvmm test faultlab.dvmm --scenario guest/stacks/faultlab/partition-heal.yml  # -> PASS, exit 0
+dvmm test faultlab.dvmm --scenario guest/stacks/faultlab/unexpected-death.yml# -> FAIL, exit 1
+scripts/test_faults.sh    # the TEST-1b gate set (kill+recover / partition+heal / unexpected-death / scheduled-at-vtsc / unknown-service)
+```
+
+> **netem delay/loss is TEST-2, not here.** It needs `sch_netem` in the pinned
+> kernel (deliberately not built in), so a scenario that asks for it is a loud
+> reject — do not rebuild the kernel for it in this slice.
+
 ## What it does
 
 - 1 vCPU, 64-bit long mode, direct kernel boot (loads an ELF `vmlinux`).

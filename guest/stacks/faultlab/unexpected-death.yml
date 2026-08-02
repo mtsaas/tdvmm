@@ -1,0 +1,35 @@
+# TEST-1b negative gate: an UNEXPECTED container death -> verdict FAIL (exit 1).
+#
+#   dvmm test faultlab.dvmm --scenario unexpected-death.yml   ->   FAIL, exit 1
+#
+# Identical fault to kill-recover.yml's kill step, but WITHOUT declaring the death
+# in `expect_death`. The SIGKILLed db exits 137; because it was not declared
+# expected, the `containers: none_exited_nonzero` assertion (and the implicit
+# end-of-run census) flags it as an unexpected death and the run fails with exit 1.
+# This is the proof that unexpected container failures are caught.
+
+name: faultlab-unexpected-death
+
+# NOTE: deliberately NO `expect_death:` here.
+
+steps:
+  - name: wait-db-ready
+    at: 0s
+    wait_for:
+      probe:
+        exec:
+          container: client
+          cmd: "pg_isready -h db -t 3"
+      until: exit_zero
+      every: 5s
+      timeout: 2m
+
+  # Kill db but do NOT declare it expected.
+  - name: kill-db-undeclared
+    at: 1h
+    kill: db
+
+  # The undeclared nonzero exit is an unexpected death -> FAIL (exit 1).
+  - name: catches-unexpected-death
+    at: 1.5h
+    containers: none_exited_nonzero

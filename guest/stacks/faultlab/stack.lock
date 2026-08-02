@@ -9,16 +9,16 @@
 # (a SOURCE_DATE_EPOCH-normalized, reproducible filesystem hash) + the pinned
 # build_base digests + the Go toolchain. Same source -> same content_id.
 #
-stack     dogfood
-project   dvmm_dogfood
+stack     faultlab
+project   dvmm_faultlab
 mem_mib   3072
 ram_estimate_mib  1742
-compose_lock_sha256  2064741641834d4c26a264f3beb5355592edfaaafd2f82376cf8455a2fc64682
-initramfs_sha256     44d644bf6ab769feffc4df3f7d99dfe5ca706d1b8c321e2e263c5ec0b144d334  initramfs-alpine-dogfood.cpio.gz
+compose_lock_sha256  52172f67d285af1c5ccb94015f3dba2872dd5b7a33dd0323558f46f161dc4620
+initramfs_sha256     104fc74963b909b023cd1d538cc9864ea5b7421a739084e603b002b8447aa0f0  initramfs-alpine-faultlab.cpio.gz
   image  policy=plain   upstream=docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616  diffid=sha256:0958e0fef2d6a31e1325b8bfecd99dead933363682d69850a7606599023751bc  size_mib=4
   image  policy=squash  upstream=docker.io/library/postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777  seed_tag=localhost/dvmm-postgres-57c72fd2a128:baked  src_diffid=sha256:af5b54b4903175790ece7037a66fd16496658d7030a59e2e2360f66038d74c8c  size_mib=283  GATE=ok
   pin    upstream=docker.io/library/postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777  pinned=localhost/dvmm-postgres-57c72fd2a128@sha256:cbf217007d0742829dc120c3ea9cd2621e90eb3adfeaf6684e87ce268a2ca368
 # --- informational (NOT compared for repeatability) ---
 # podman-version: 5.8.3
-# baked-at: 2026-08-02T09:52:57Z
-dvmm_sha256          070ea569d3b4f80d524560fd4b755072d0251fce72b27dea7a3f229d3d772b58  dogfood.dvmm
+# baked-at: 2026-08-02T09:48:44Z
+dvmm_sha256          e14e853739b7d6615c02053d95a6b0fa44c3d86006c4900abd53bb2fb58e0be6  faultlab.dvmm

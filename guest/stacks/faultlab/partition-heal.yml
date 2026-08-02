@@ -1,0 +1,62 @@
+# TEST-1b acceptance: PARTITION + HEAL.
+#
+#   dvmm test faultlab.dvmm --scenario partition-heal.yml   ->   PASS, exit 0
+#
+# Two services communicate; we drop all traffic between them (a network partition
+# via nftables drop rules on the bridge, both directions), observe connectivity is
+# LOST, then HEAL (remove the rules) and observe it is RESTORED. No container is
+# killed, so there is no expected-death here — both stay running throughout.
+
+name: faultlab-partition-heal
+
+steps:
+  # 1. Readiness / baseline connectivity.
+  - name: wait-connected
+    at: 0s
+    wait_for:
+      probe:
+        exec:
+          container: client
+          cmd: "pg_isready -h db -t 3"
+      until: exit_zero
+      every: 5s
+      timeout: 2m
+
+  # 2. FAULT: partition client <-x-> db (nftables drop, both directions).
+  - name: partition
+    at: 1h
+    partition: [client, db]
+
+  # 3. EFFECT: the connection is now lost (SYNs are dropped -> pg_isready fails).
+  - name: assert-connectivity-lost
+    at: 1h
+    wait_for:
+      probe:
+        exec:
+          container: client
+          cmd: "pg_isready -h db -t 3"
+      until: exit_nonzero
+      every: 5s
+      timeout: 2m
+
+  # 4. HEAL: remove the partition rules for this pair.
+  - name: heal
+    at: 2h
+    heal: [client, db]
+
+  # 5. RECOVERY: connectivity is restored.
+  - name: assert-restored
+    at: 2h
+    wait_for:
+      probe:
+        exec:
+          container: client
+          cmd: "pg_isready -h db -t 3"
+      until: exit_zero
+      every: 5s
+      timeout: 2m
+
+  # 6. Both services stayed up the whole time (a partition kills nothing).
+  - name: both-still-running
+    at: 2.5h
+    containers: all_running
