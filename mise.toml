@@ -1,0 +1,10 @@
+[tools]
+rust = "1.97"
+
+[tasks.build]
+description = "Build the dvmm binary in release mode (-> ./target/release/dvmm)"
+run = "cargo build --release"
+
+[tasks.install]
+description = "Build and install the dvmm binary to ~/.cargo/bin (must be on PATH)"
+run = "cargo install --path . --locked"
