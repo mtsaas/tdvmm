@@ -1,0 +1,21 @@
+# busybox init table for the deterministic-vmm test guest.
+#
+# Why busybox init (not a bare `exec sh`): a plain shell as PID 1 dies on `exit`
+# (kernel panic "Attempted to kill init!"), and it ignores the SIGUSR2/SIGTERM
+# that busybox `poweroff`/`reboot` send to PID 1 — so the guest could not be shut
+# down by name. busybox init instead:
+#   * RESPAWNS the shell, so `exit` yields a fresh prompt (VMM keeps running);
+#   * relays `poweroff`  -> reboot(RB_POWER_OFF) -> the kernel's `cli; hlt`
+#     terminal halt (no ACPI), which the VMM recognizes as a clean stop (0);
+#   * relays `reboot`    -> reboot(RB_AUTOBOOT)  -> triple fault (reboot=t) ->
+#     KVM_EXIT_SHUTDOWN -> the VMM stops (0).
+#
+# Setup (mounts, boot marker) is done by /init BEFORE it execs busybox init, so
+# no ::sysinit entry is needed here.
+
+# Interactive shell on the serial console (/dev/console == ttyS0). respawn ==
+# restart it whenever it exits.
+::respawn:/bin/busybox sh
+
+# On shutdown/reboot, flush and unmount read-only before the machine resets.
+::shutdown:/bin/busybox umount -a -r

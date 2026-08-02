@@ -1,0 +1,24 @@
+#!/bin/busybox sh
+# PID 1 for the deterministic-vmm test guest.
+# Permanent fixture: the minimal guest used for later clock/fast-forward work.
+
+/bin/busybox mkdir -p /proc /sys /dev /bin /sbin
+/bin/busybox mount -t proc     none /proc 2>/dev/null
+/bin/busybox mount -t sysfs    none /sys  2>/dev/null
+/bin/busybox mount -t devtmpfs none /dev  2>/dev/null
+
+# Make sure our stdio is the serial console.
+exec 0</dev/console 1>/dev/console 2>/dev/console
+
+# Install busybox applet symlinks so `ls`, `cat`, etc. work in the shell.
+/bin/busybox --install -s /bin 2>/dev/null
+
+echo
+echo "DVMM_BOOT_OK reached userspace"
+echo "kernel: $(/bin/busybox uname -sr)"
+echo
+
+# Hand PID 1 to busybox init (reads /etc/inittab): it RESPAWNS the serial shell
+# so `exit` gives a fresh prompt instead of panicking the kernel, and relays
+# `poweroff`/`reboot` to the kernel's shutdown paths. See /etc/inittab.
+exec /bin/busybox init

@@ -1,0 +1,9 @@
+# REJECT-CORPUS: absolute host bind-mount source -> HARD REJECT.
+# A closed-world guest has no host filesystem to bind; only relative RO binds are
+# materialized. An absolute source must fail the bake with a clear message.
+services:
+  app:
+    image: docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616
+    command: ["sh", "-c", "sleep 1"]
+    volumes:
+      - /etc/passwd:/mnt/passwd:ro

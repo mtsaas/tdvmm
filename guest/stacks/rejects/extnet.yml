@@ -1,0 +1,12 @@
+# REJECT-CORPUS: external network -> HARD REJECT.
+# An external network is a pre-existing network the guest cannot own or reproduce
+# in the closed world. bake-stack must reject it with a clear message.
+services:
+  app:
+    image: docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616
+    command: ["sh", "-c", "sleep 1"]
+    networks:
+      - corp
+networks:
+  corp:
+    external: true

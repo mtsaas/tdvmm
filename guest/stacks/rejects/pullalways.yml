@@ -1,0 +1,8 @@
+# REJECT-CORPUS: pull_policy: always -> HARD REJECT.
+# The guest runs --pull=never in a closed world; a service demanding an always-pull
+# can never be satisfied offline, so bake-stack rejects it at build time.
+services:
+  app:
+    image: docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616
+    command: ["sh", "-c", "sleep 1"]
+    pull_policy: always

@@ -1,0 +1,50 @@
+# deterministic-vmm Phase-2a DOGFOOD stack.
+#
+# This is the exact Phase-1 workload (Postgres + an insert-a-row / trim-to-cap
+# service) re-expressed as a docker-compose stack, so it can be driven through
+# the GENERIC 2a pipeline: bake-stack -> compose.lock.yml -> guest -> compose up.
+# It replaces the hand-rolled workload.sh with the supported-subset compose path.
+#
+# 2a is IMAGE-based only (build: contexts are 2b). So the insert/trim service is
+# NOT a separately-built image here: it reuses the pinned Postgres image (which
+# already ships /bin/sh + psql + pg_isready) with its entrypoint overridden to run
+# a bind-mounted shell loop. Every image below is therefore ONE real upstream
+# registry digest -- the cleanest possible closed-world pin, and what makes the
+# emitted compose.lock.yml byte-identical on every bake.
+#
+# Two relative READ-ONLY binds (the SQL schema and the loop script) exercise the
+# 2a bind-materialization path: bake-stack copies them into the guest image at a
+# fixed path and rewrites the lockfile to in-guest absolute paths.
+#
+# Knobs (INTERVAL_SECONDS / MAX_ROWS) use compose ${VAR:-default} interpolation so
+# the committed lockfile stays deterministic while the FF demo / smoke tests can
+# still override cadence + cap via the kernel cmdline (dvmm.interval= / .maxrows=).
+
+services:
+  postgres:
+    # Pinned by digest (= postgres 16.14-alpine). bake-stack pulls BY this digest
+    # and re-pins the same digest into compose.lock.yml.
+    image: docker.io/library/postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+    environment:
+      POSTGRES_HOST_AUTH_METHOD: trust
+      POSTGRES_DB: appdb
+    shm_size: 256m
+    volumes:
+      - ./schema.sql:/docker-entrypoint-initdb.d/10-schema.sql:ro
+
+  service:
+    image: docker.io/library/postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+    depends_on:
+      - postgres
+    # Override the postgres entrypoint: this container is NOT a database, it is the
+    # insert/trim client. It reaches the db container BY NAME ("postgres") over the
+    # compose network (netavark + aardvark DNS).
+    entrypoint: ["/bin/sh", "/opt/dvmm/service-loop.sh"]
+    environment:
+      INTERVAL_SECONDS: "${DVMM_INTERVAL:-3600}"
+      MAX_ROWS: "${DVMM_MAXROWS:-1000}"
+      PGHOST: postgres
+      PGUSER: postgres
+      PGDATABASE: appdb
+    volumes:
+      - ./service-loop.sh:/opt/dvmm/service-loop.sh:ro

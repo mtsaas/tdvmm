@@ -1,0 +1,18 @@
+# deterministic-vmm Step 2b "service" image.
+#
+# Ours, so it is built SINGLE-LAYER from the start (prebake_images.sh builds it
+# with `podman build --squash-all`) -- the same one-layer policy the pinned
+# postgres image is repackaged to, no special cases. Under the vfs graph driver
+# every layer is a full cumulative copy, so a single layer keeps the baked store
+# (and thus guest RAM) small.
+#
+# Alpine + the Postgres 16 client only. The workload is a POSIX-shell sleep-loop
+# (service-loop.sh) -- NOT Go/JVM -- so the guest genuinely HLTs between inserts.
+#
+# Base pinned by digest (alpine:3.22.5); client pinned to the pg16-matching
+# version in Alpine 3.22 main. These two lines ARE the service's provenance pins;
+# prebake_images.sh records them + the built layer's DiffID into images.lock.
+FROM docker.io/library/alpine@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
+RUN apk add --no-cache postgresql16-client=16.14-r0
+COPY --chmod=0755 service-loop.sh /usr/local/bin/service-loop.sh
+ENTRYPOINT ["/usr/local/bin/service-loop.sh"]

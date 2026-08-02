@@ -1,0 +1,49 @@
+# deterministic-vmm Phase-2b (item 3) HEALTHCHECK-GATING test stack.
+#
+# Proves the guest-side healthcheck ticker resolves compose's
+# depends_on: {condition: service_healthy} gate: service `dependent` starts ONLY
+# after service `gate` reports HEALTHY.
+#
+# The gate is healthy only AFTER a delay: it sleeps, then touches a readiness
+# file, and its healthcheck tests for exactly that file. So the ordering is REAL
+# (not incidental): until the file exists the check fails and health stays
+# "starting", so compose blocks `up` on the gate -- and only the ticker running
+# `podman healthcheck run` (no systemd in this guest) can flip it to healthy.
+#
+# All busybox, closed-world, fast-forwardable: the gate's `sleep 30` is a virtual
+# sleep that fast-forward collapses, so the gate reaches healthy in real
+# milliseconds while the guest believes 30 s passed.
+#
+# The healthcheck interval (2s) matches the ticker's default cadence (dvmm.hc_tick,
+# default 2). start_period (60s) comfortably exceeds the 30 s readiness delay, so
+# pre-readiness failures never trip `retries` -> unhealthy.
+services:
+  gate:
+    image: docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616
+    command:
+      - /bin/sh
+      - -c
+      - |
+        echo "DVMM_GATE_STARTING ts=$$(date -u +%H:%M:%S)"
+        sleep 30
+        touch /tmp/ready
+        echo "DVMM_GATE_READY ts=$$(date -u +%H:%M:%S)"
+        while :; do sleep 3600; done
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/ready"]
+      interval: 2s
+      timeout: 2s
+      retries: 3
+      start_period: 60s
+
+  dependent:
+    image: docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616
+    depends_on:
+      gate:
+        condition: service_healthy
+    command:
+      - /bin/sh
+      - -c
+      - |
+        echo "DVMM_DEPENDENT_STARTED gate-was-healthy ts=$$(date -u +%H:%M:%S)"
+        while :; do sleep 3600; done

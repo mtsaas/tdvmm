@@ -1,0 +1,7 @@
+# Reject fixture: a build: context whose base image is NOT digest-pinned.
+services:
+  app:
+    build:
+      context: ./buildunpinned
+      dockerfile: Dockerfile
+    image: localhost/x:1

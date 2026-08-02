@@ -1,0 +1,41 @@
+# deterministic-vmm Phase-2b (item 4) RW-BIND + NAMED-VOLUME test stack.
+#
+# Exercises the two bind/volume capabilities added in 2b:
+#
+#   - a RELATIVE READ-WRITE bind (./data -> /data:rw). bake-stack MATERIALIZES the
+#     source into the guest image (exactly like an RO bind) and rewrites it to an
+#     in-guest absolute path, but mounts it rw. The baked ./data/seed.txt proves
+#     materialization (its content is visible in the guest); writes to /data land
+#     and are readable within the run. They are EPHEMERAL -- the guest fs is tmpfs,
+#     so a reboot restores the identical baked initial state (fine, closed world).
+#
+#   - a NAMED VOLUME (work -> /work). podman creates it in the tmpfs-backed store,
+#     so it is ephemeral and empty + identical every run. Writes to it land and
+#     are readable within the run.
+#
+# All busybox, closed-world, fast-forwardable (the heartbeat sleeps are virtual
+# sleeps fast-forward collapses).
+services:
+  writer:
+    image: docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616
+    volumes:
+      - ./data:/data:rw     # relative RW bind -> materialized, mounted rw
+      - work:/work          # named volume -> tmpfs-backed, ephemeral
+    command:
+      - /bin/sh
+      - -c
+      - |
+        echo "DVMM_RW_SEED=$$(cat /data/seed.txt 2>/dev/null)"
+        echo "run-$$(date -u +%s)" > /data/written.txt
+        echo "DVMM_RWBIND_OK=$$(cat /data/written.txt 2>/dev/null)"
+        echo "hello-volume" > /work/vol.txt
+        echo "DVMM_VOLUME_OK=$$(cat /work/vol.txt 2>/dev/null)"
+        i=0
+        while :; do
+          i=$$((i+1))
+          echo "DVMM_RW_HEARTBEAT iter=$$i data=$$(cat /data/written.txt 2>/dev/null) vol=$$(cat /work/vol.txt 2>/dev/null) ts=$$(date -u +%H:%M:%S)"
+          sleep 3600
+        done
+
+volumes:
+  work:

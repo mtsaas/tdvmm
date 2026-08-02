@@ -1,0 +1,10 @@
+# REJECT-CORPUS: absolute host bind-mount source (READ-WRITE) -> HARD REJECT.
+# 2b added RELATIVE read-write binds, but the closed-world boundary is unchanged:
+# an ABSOLUTE host path has no meaning in the guest (no host filesystem), rw or
+# ro. bake-stack must reject it with a clear message regardless of mode.
+services:
+  app:
+    image: docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616
+    command: ["sh", "-c", "sleep 1"]
+    volumes:
+      - /var/data:/mnt/data:rw

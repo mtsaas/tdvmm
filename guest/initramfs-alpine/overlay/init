@@ -1,0 +1,137 @@
+#!/bin/sh
+# PID 1 for the deterministic-vmm Alpine container guest (Step 2a).
+#
+# The whole rootfs lives in RAM. This init brings up just enough of a system to
+# run rootful podman with a bridge network, entirely offline (closed world),
+# then a container self-test and (interactively) a shell.
+#
+# Two stages:
+#   A. Relocate the rootfs from the initramfs (ramfs) onto a tmpfs and
+#      switch_root into it. This is REQUIRED for containers: an OCI runtime
+#      (crun) pivot_root()s into the container rootfs, and the kernel refuses
+#      pivot_root when the mount-namespace root has no parent mount -- which is
+#      exactly the initramfs rootfs. A tmpfs root (still entirely in RAM) has
+#      the initramfs as its parent, so container pivot_root works.
+#   B. Mount pseudo-filesystems + cgroup v2, set the fixed clock, seed the
+#      container store on a size-capped tmpfs, run the self-test, hand off a
+#      shell (or, in autotest mode, stop the machine).
+#
+# No RTC exists (that is Step 3); the clock is set to a fixed baked-in epoch so
+# every boot starts at an identical wall time.
+
+BB=/bin/busybox
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+# ------------------------- Stage A: pivot to tmpfs root ---------------------
+if [ ! -f /.on-tmpfs-root ]; then
+  $BB mount -t proc proc /proc 2>/dev/null
+  NEW=/newroot
+  $BB mkdir -p "$NEW"
+  # Root tmpfs holds the whole in-RAM tree (Alpine + podman + the compose engine +
+  # the baked seed store). A cap, not a reservation -- actual RAM = actual content.
+  $BB mount -t tmpfs -o size=2048m,mode=0755 tmpfs "$NEW"
+
+  # Copy the initramfs tree into the tmpfs (skip virtual fs + the target).
+  cd /
+  for e in $($BB ls -A /); do
+    case "$e" in proc|sys|dev|run|tmp|newroot) continue ;; esac
+    $BB cp -a "/$e" "$NEW"/
+  done
+
+  # Recreate mountpoints + the console nodes stage B needs before devtmpfs.
+  $BB mkdir -p "$NEW/proc" "$NEW/sys" "$NEW/dev" "$NEW/run" "$NEW/tmp" "$NEW/mnt"
+  $BB mknod "$NEW/dev/console" c 5 1  2>/dev/null
+  $BB mknod "$NEW/dev/null"    c 1 3  2>/dev/null
+  $BB mknod "$NEW/dev/ttyS0"   c 4 64 2>/dev/null
+  : > "$NEW/.on-tmpfs-root"
+
+  $BB umount /proc 2>/dev/null
+  exec $BB switch_root "$NEW" /init
+fi
+
+# ------------------------- Stage B: container guest -------------------------
+log() { echo "[init] $*"; }
+
+# pseudo-filesystems
+mkdir -p /proc /sys /dev /run /tmp /var/lib/containers
+mount -t proc     proc     /proc
+mount -t sysfs    sysfs    /sys
+mount -t devtmpfs dev      /dev     2>/dev/null || true
+mkdir -p /dev/pts /dev/shm
+mount -t devpts   devpts   /dev/pts 2>/dev/null || true
+mount -t tmpfs    shm      /dev/shm
+mount -t tmpfs    tmpfs    /run
+mount -t tmpfs    tmpfs    /tmp
+
+# Make sure our stdio is the serial console.
+exec 0</dev/console 1>/dev/console 2>/dev/console
+
+# Private mount propagation (container runtimes expect this; systemd would
+# normally set it).
+mount --make-rprivate / 2>/dev/null || true
+
+# cgroup v2 (unified)
+mkdir -p /sys/fs/cgroup
+mount -t cgroup2 cgroup2 /sys/fs/cgroup 2>/dev/null || log "WARNING: cgroup2 mount failed"
+
+# fixed wall clock (no RTC)
+if [ -r /etc/dvmm-build-epoch ]; then
+  EPOCH="$(cat /etc/dvmm-build-epoch)"
+  date -s "@$EPOCH" >/dev/null 2>&1 || true
+fi
+
+# loopback + hostname
+ip link set lo up 2>/dev/null || true
+hostname dvmm-guest 2>/dev/null || true
+
+# container storage: size-capped tmpfs seeded from the baked image store.
+# 3072m headroom for compose stacks: under the vfs graph driver each running
+# container's rootfs is a full copy of its image, so (for the dogfood) two
+# postgres-image containers + the store image + the seed coexist here. Cap, not
+# reservation -- RAM used tracks actual content, bounded by the 3 GiB guest.
+mount -t tmpfs -o size=2560m,mode=0700 tmpfs /var/lib/containers
+if [ -d /var/lib/containers-seed ]; then
+  cp -a /var/lib/containers-seed/. /var/lib/containers/ 2>/dev/null || true
+  # reclaim the seed's second copy from the root tmpfs now that it is in place.
+  rm -rf /var/lib/containers-seed 2>/dev/null || true
+fi
+mkdir -p /run/containers /run/podman
+
+echo
+echo "DVMM_ALPINE_BOOT_OK reached userspace"
+echo "kernel: $(uname -sr)   date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+echo
+
+# Stack mode (Phase 2a): launch the baked docker-compose stack via the generic
+# compose path (never powers off; the host acceptance test watches serial and
+# stops the VMM). `dvmm.workload=1` is accepted as a back-compat alias.
+if grep -qE 'dvmm\.(stack|workload)=1' /proc/cmdline 2>/dev/null; then
+  echo "[init] launching compose stack: $(cat /etc/dvmm-stack-name 2>/dev/null)"
+  if [ -x /usr/local/bin/compose-up.sh ] && [ -f /var/lib/dvmm-stack/compose.lock.yml ]; then
+    exec /usr/local/bin/compose-up.sh
+  fi
+  echo "[init] ERROR: stack mode requested but no baked stack present"
+fi
+
+# container self-test (network create + podman run)  [Step 2a, unchanged]
+if [ -x /usr/local/bin/container-selftest.sh ]; then
+  /usr/local/bin/container-selftest.sh
+fi
+
+# In automated smoke mode, stop the machine so the VMM exits; otherwise hand
+# off to an interactive serial shell. A reboot (with reboot=t on the cmdline)
+# triple-faults, which the VMM reports as KVM_EXIT_SHUTDOWN and exits cleanly.
+if grep -q 'dvmm.autotest=1' /proc/cmdline 2>/dev/null; then
+  echo "[init] autotest complete; stopping the machine"
+  sync
+  reboot -f
+  echo b > /proc/sysrq-trigger 2>/dev/null || true
+  exec /bin/sh
+else
+  # Hand PID 1 to busybox init (reads our /etc/inittab): it RESPAWNS the serial
+  # shell so `exit` gives a fresh prompt instead of panicking the kernel, and
+  # relays `poweroff`/`reboot` to the kernel's shutdown paths. All the guest
+  # setup above already ran (init did it), so the inittab has no ::sysinit.
+  exec /sbin/init
+fi

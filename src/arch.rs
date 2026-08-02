@@ -1,0 +1,50 @@
+//! Magic guest-physical addresses and other x86_64 layout constants.
+//!
+//! Values cribbed from Firecracker's `arch/x86_64/layout.rs` and the Linux
+//! 64-bit boot protocol. Keep these in one place so the boot-time writers
+//! (page tables, GDT, zero page, MPTable, E820) all agree.
+
+/// Where the uncompressed kernel is loaded (1 MiB). Also the start of "high" RAM.
+pub const HIMEM_START: u64 = 0x0010_0000;
+
+/// The Linux "zero page" (`boot_params`) address. `%rsi` points here at entry.
+pub const ZERO_PAGE_START: u64 = 0x7000;
+
+/// Kernel command line location and cap.
+pub const CMDLINE_START: u64 = 0x0002_0000;
+pub const CMDLINE_MAX_SIZE: usize = 2048;
+
+/// Boot GDT / IDT scratch locations (below the page tables).
+pub const BOOT_GDT_OFFSET: u64 = 0x500;
+pub const BOOT_IDT_OFFSET: u64 = 0x520;
+
+/// Initial identity-mapped page tables for entering 64-bit long mode.
+pub const PML4_START: u64 = 0x9000;
+pub const PDPTE_START: u64 = 0xa000;
+pub const PDE_START: u64 = 0xb000;
+
+/// Initial stack pointer for the boot vCPU.
+pub const BOOT_STACK_POINTER: u64 = 0x8ff0;
+
+/// Start of the "system data" region (EBDA). We drop the MPTable here; it is
+/// also where the guest kernel scans for the MP floating pointer.
+pub const SYSTEM_MEM_START: u64 = 0x0009_fc00;
+/// RSDP scan location / top of the system-data region.
+pub const RSDP_ADDR: u64 = 0x000e_0000;
+/// Size of the reserved system-data region [SYSTEM_MEM_START, RSDP_ADDR).
+pub const SYSTEM_MEM_SIZE: u64 = RSDP_ADDR - SYSTEM_MEM_START;
+
+/// TSS address required by KVM on Intel (KVM_SET_TSS_ADDR) before KVM_RUN.
+pub const KVM_TSS_ADDRESS: u64 = 0xfffb_d000;
+
+/// Start of the 32-bit MMIO gap (3 GiB). Step 1 only supports guests whose RAM
+/// fits entirely below this, so guest memory is a single contiguous region.
+pub const MMIO_MEM_START: u64 = 0xc000_0000;
+
+/// Legacy 16550 UART base port and its ISA IRQ line.
+pub const SERIAL_PORT_BASE: u16 = 0x3f8;
+pub const SERIAL_IRQ: u32 = 4;
+
+/// POST diagnostic port (checkpoint codes). We silently swallow writes here so
+/// early-boot BIOS-style probing does not fault out.
+pub const POST_PORT: u16 = 0x80;
