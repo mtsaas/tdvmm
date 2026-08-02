@@ -240,6 +240,57 @@ All three fast-forward at hundreds of × with a per-hop mean well under the 500 
 (the same VMM property the dogfood/go-ab comparison measures); the numbers are a stack
 property, the ≤500 µs mean is the hard VMM gate.
 
+## OP-1a — the `.dvmm` single-file artifact + the run/inspect/verify/boot verbs
+
+Everything a baked stack needs to run is now packed into **one self-contained
+file**, `<stack>.dvmm`, and the binary grew developer verbs to run, inspect, and
+verify it. The scripts still do the baking; the bake now ends by emitting a
+`.dvmm`.
+
+- **The format (v1).** A plain, **uncompressed outer tar** (`tar tvf` reads it)
+  with four members in a fixed canonical order: `manifest.json`,
+  `compose.lock.yml`, `kernel` (the vmlinux), `initramfs` (the per-stack guest,
+  already gzip'd). The encoding is **deterministic** — `mtime=0`, `uid=0`,
+  `gid=0`, fixed mode, fixed order, no volatile fields — so identical inputs
+  produce a **byte-identical** `.dvmm`. Identity = **sha256 of the whole file**
+  (there is no embedded self-hash — chicken-and-egg); `manifest.json` records a
+  sha256 for every *other* member and `verify` closes the loop. `manifest.json`
+  also carries the full anchor set (member hashes, the effective-CPUID snapshot,
+  the compose-engine version+hash, image digests + squash/build provenance, the
+  bake toolchain versions, the RAM estimate) and the **baked run-defaults** (mem,
+  cmdline, ff, horizon). Member-name prefixes `scenario/`, `record.log`, and
+  `snapshot/` are **reserved** for later phases (the reader ignores unknown
+  members). The Rust side (`src/artifact.rs`) is a hand-rolled deterministic
+  USTAR writer/reader — full control over the byte layout for the reproducible
+  guarantee, and cheap single-member reads so `inspect` never touches the big
+  payloads.
+
+- **`dvmm run <stack.dvmm> [overrides]`** — load the artifact **into memory** (no
+  temp-dir extraction: the kernel is parsed from a byte buffer, the initramfs
+  written straight into guest RAM), apply the baked run-defaults, and boot. Fully
+  **offline** (only `/dev/kvm`; no network, no host deps). Member-hash
+  verification on load is **default-ON** (`--no-verify` to skip) — a corrupt or
+  tampered artifact is refused before boot.
+- **`dvmm inspect <stack.dvmm>`** — print `manifest.json` (reads **only** the
+  manifest member; milliseconds even for a 200 MiB artifact).
+- **`dvmm verify <stack.dvmm>`** — recompute every member hash against the
+  manifest and print the file's sha256 identity; **nonzero exit** on any mismatch.
+- **`dvmm boot --kernel <..> --initrd <..> [flags]`** — the original raw
+  invocation, preserved as the low-level dev verb (smoke tests + VMM development
+  use `boot`; artifact users use `run`).
+- **Override precedence is LOCKED: baked run-defaults < CLI flags.** Every run
+  prints an **effective-config** line with per-knob provenance (the future
+  record-log preamble), e.g.
+  `[dvmm] effective-config: mem=3072 (baked) ff=off (flag) max-virtual-time=36h (baked) ...`.
+
+```sh
+guest/bake-stack.sh guest/stacks/dogfood/compose.yml -o dogfood.dvmm  # bake -> one .dvmm
+dvmm inspect dogfood.dvmm          # the manifest (fast; manifest member only)
+dvmm verify  dogfood.dvmm          # member hashes vs manifest + the sha256 identity
+dvmm run     dogfood.dvmm --max-virtual-time 24h   # boot it, baked defaults + overrides
+scripts/artifact_test.sh dogfood svcchain          # the OP-1a acceptance gate set
+```
+
 ## Interactive-console polish
 
 Two cosmetic fixes make an interactive `run.sh` session read cleanly, **without**
@@ -489,7 +540,7 @@ guest/initramfs-alpine/build_rootfs.sh
 #     INTERVAL_SECONDS=3600, MAX_ROWS=1000). With fast-forward ON (the default),
 #     the hourly sleeps collapse — the guest runs ~1000x virtual-time. Add
 #     `--ff off` for the Step-3b real-time park (interactive console / A/B):
-./target/release/dvmm \
+./target/release/dvmm boot \
   --kernel guest/kernel/vmlinux-6.1.128 \
   --initrd guest/initramfs-alpine/initramfs-alpine.cpio.gz \
   --mem 3072 --ff on \

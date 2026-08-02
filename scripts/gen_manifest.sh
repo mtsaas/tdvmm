@@ -3,7 +3,7 @@
 #
 # The manifest records the Phase-1 reproducibility anchors together in one place:
 #   - the boot artifacts:  vmlinux sha256 + initramfs sha256
-#   - the effective guest CPUID profile the VMM presents (from `dvmm --dump-cpuid`)
+#   - the effective guest CPUID profile the VMM presents (from `dvmm dump-cpuid`)
 #
 # Why the CPUID belongs here: the guest's declared LAPIC-timer / TSC frequency now
 # hangs off the passed-through CPUID leaf 0x15 crystal (Step 3a/3b/4). Recording the
@@ -39,7 +39,7 @@ sha() { sha256sum "$1" | cut -d' ' -f1; }
 
 VM_SHA="$(sha "$VMLINUX")"
 IN_SHA="$(sha "$INITRD")"
-CPUID="$("$BIN" --dump-cpuid 2>/dev/null)"
+CPUID="$("$BIN" dump-cpuid 2>/dev/null)"
 CPUID_SHA="$(printf '%s\n' "$CPUID" | sha256sum | cut -d' ' -f1)"
 
 # Compose engine (owed from 2a): the pinned Docker Compose v2 CLI version + the
@@ -64,7 +64,7 @@ initramfs  sha256=$IN_SHA  guest/initramfs-alpine/initramfs-alpine.cpio.gz
 cpuid      sha256=$CPUID_SHA  (effective guest CPUID, userspace backend; block below)
 compose    version=$COMPOSE_VERSION  sha256=$COMPOSE_SHA256  (Docker Compose v2 CLI baked into the guest; source guest/initramfs-alpine/compose-engine.lock)
 
-# ===== effective guest CPUID (userspace backend; dvmm --dump-cpuid) =====
+# ===== effective guest CPUID (userspace backend; dvmm dump-cpuid) =====
 $CPUID
 EOF
 )"

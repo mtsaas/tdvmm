@@ -34,6 +34,7 @@
 //! converts a virtual-time deadline into either a real wait or a jump.
 
 mod arch;
+mod artifact;
 mod boot;
 mod cpuid;
 mod events;
@@ -49,6 +50,7 @@ mod regs;
 mod serial;
 mod vtsc;
 
+use clap::{Args, Parser, Subcommand};
 use kvm_bindings::{kvm_interrupt, KVM_MAX_CPUID_ENTRIES};
 use kvm_ioctls::{Kvm, VcpuExit, VcpuFd};
 use vmm_sys_util::ioctl::ioctl_with_ref;
@@ -564,45 +566,233 @@ impl FfState {
     }
 }
 
-struct Config {
-    kernel: Option<String>,
-    initrd: Option<String>,
-    mem_mib: u64,
-    cmdline: String,
-    /// Fast-forward on idle (Step 4). Default ON; `--ff off` restores the 3b
-    /// real-wait park (A/B for timing bugs; the right mode for an interactive
-    /// console).
-    fast_forward: bool,
-    /// Whether `--ff`/`--fast-forward` was explicitly passed (vs. the binary
-    /// default). Only drives the startup mode statement's "how it was chosen"
-    /// text — never the FF decision itself.
-    ff_explicit: bool,
-    /// Single-jump sanity bound in seconds (gate 3); abort if a jump exceeds it.
-    max_jump_secs: f64,
-    /// Virtual-time horizon in seconds: if set, the run terminates (distinct exit
-    /// status + diagnostic dump) when vtsc reaches `vtsc_start + this`. Enforced
-    /// as a `(vtsc, StopRun)` queue event, so it is deterministic and replayable.
-    /// A wedged guest hits any sane horizon in seconds of real time; a legitimate
-    /// long idle also hits it (correct — a run has a bounded virtual duration).
-    max_virtual_time_secs: Option<f64>,
-    /// If set, print the effective guest CPUID profile and exit (no VM run).
-    dump_cpuid: bool,
-    /// If set (FF on), write the machine-parseable per-run fast-forward metrics
-    /// block to this path at stop (consumed by the comparison harness). No effect
-    /// when FF is off (no jumps to account for).
+// ============================================================================
+// CLI (OP-1a): clap subcommands. `boot` is today's raw kernel+initramfs dev verb
+// (smoke/VMM-dev); `run` boots a `.dvmm` artifact applying its baked run-defaults
+// (artifact users). `inspect`/`verify` read the artifact; `dump-cpuid` emits the
+// manifest CPUID profile; `pack` is the internal helper bake-stack.sh calls to
+// emit a `.dvmm` through the SAME canonical encoder `run`/`inspect`/`verify` read.
+// ============================================================================
+
+#[derive(Parser)]
+#[command(
+    name = "dvmm",
+    about = "deterministic KVM VMM — run/inspect/verify a .dvmm stack, or boot raw artifacts",
+    long_about = "A single-vCPU, fast-forwardable KVM VMM. `run` boots a self-contained \
+                  .dvmm stack artifact (baked defaults, overridable by flags); `boot` is \
+                  the low-level raw kernel+initramfs verb for VMM development.\n\n\
+                  Durations (--max-virtual-time): a bare number is seconds, or use a \
+                  suffix (ms, s, m, h), e.g. 500ms, 30s, 5m, 2h.",
+    version
+)]
+struct Cli {
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Boot a raw kernel + initramfs (the low-level VMM-dev / smoke verb).
+    Boot(BootArgs),
+    /// Run a .dvmm stack artifact: apply its baked run-defaults, then boot (offline).
+    Run(RunArgs),
+    /// Print a .dvmm artifact's manifest.json (reads ONLY the manifest member).
+    Inspect(ArtifactArg),
+    /// Verify a .dvmm: recompute member hashes vs the manifest; print its sha256 identity.
+    Verify(ArtifactArg),
+    /// Print the effective guest clock/timer CPUID profile (the manifest artifact).
+    DumpCpuid,
+    /// [internal] Assemble a .dvmm from parts (used by guest/bake-stack.sh).
+    #[command(hide = true)]
+    Pack(PackArgs),
+}
+
+/// Flags shared by `boot` and `run`. On `boot` the `Option`s fall back to the
+/// binary defaults; on `run` a `None` means "use the artifact's baked default"
+/// and `Some` means the flag overrides it (baked < flag, Fable-locked).
+#[derive(Args, Clone)]
+struct CommonRunFlags {
+    /// Guest RAM in MiB.
+    #[arg(long, value_name = "MiB")]
+    mem: Option<u64>,
+    /// Kernel command line.
+    #[arg(long, value_name = "STR")]
+    cmdline: Option<String>,
+    /// Fast-forward idle time: on|off.
+    #[arg(long, value_parser = parse_onoff, value_name = "on|off")]
+    ff: Option<bool>,
+    /// Single-jump sanity bound (seconds); a larger jump aborts the run.
+    #[arg(long, value_name = "N")]
+    max_jump_secs: Option<f64>,
+    /// Virtual-time horizon (duration); stop with exit 3 when reached.
+    #[arg(long, value_name = "DUR")]
+    max_virtual_time: Option<String>,
+    /// Write the per-run fast-forward metrics block to this path at stop.
+    #[arg(long, value_name = "PATH")]
     metrics_out: Option<String>,
 }
 
-fn usage() -> ! {
-    dlog!(
-        "usage: dvmm --kernel <vmlinux> --initrd <initramfs> [--mem <MiB>] \
-         [--cmdline <str>] [--ff on|off] [--max-jump-secs <n>] \
-         [--max-virtual-time <dur>] [--metrics-out <path>] [--dump-cpuid]\n\
-         \n\
-         <dur> is a duration: a bare number is seconds, or use a suffix\n\
-         (ms, s, m, h), e.g. 500ms, 30s, 5m, 2h."
-    );
-    std::process::exit(2);
+#[derive(Args)]
+struct BootArgs {
+    /// Path to the uncompressed ELF vmlinux.
+    #[arg(long, value_name = "PATH")]
+    kernel: String,
+    /// Path to the initramfs.
+    #[arg(long, value_name = "PATH")]
+    initrd: String,
+    #[command(flatten)]
+    common: CommonRunFlags,
+}
+
+#[derive(Args)]
+struct RunArgs {
+    /// Path to the .dvmm stack artifact.
+    #[arg(value_name = "stack.dvmm")]
+    artifact: String,
+    /// Skip the default-ON member-hash verification on load.
+    #[arg(long)]
+    no_verify: bool,
+    #[command(flatten)]
+    common: CommonRunFlags,
+}
+
+#[derive(Args)]
+struct ArtifactArg {
+    /// Path to the .dvmm stack artifact.
+    #[arg(value_name = "stack.dvmm")]
+    artifact: String,
+}
+
+#[derive(Args)]
+struct PackArgs {
+    /// Partial manifest JSON (anchors + run-defaults; member hashes filled in).
+    #[arg(long, value_name = "PATH")]
+    manifest_in: String,
+    #[arg(long, value_name = "PATH")]
+    kernel: String,
+    #[arg(long, value_name = "PATH")]
+    initramfs: String,
+    #[arg(long, value_name = "PATH")]
+    compose_lock: String,
+    /// Output .dvmm path.
+    #[arg(short, long, value_name = "PATH")]
+    out: String,
+}
+
+/// clap value parser for `--ff on|off` (also accepts 1/0/true/false).
+fn parse_onoff(s: &str) -> Result<bool, String> {
+    match s {
+        "on" | "1" | "true" => Ok(true),
+        "off" | "0" | "false" => Ok(false),
+        _ => Err(format!("expected on|off (got {s:?})")),
+    }
+}
+
+/// The resolved run configuration + a per-knob provenance string for the
+/// EFFECTIVE-CONFIG line (the future record-log preamble). Provenance is
+/// `baked` (from the artifact), `flag` (a CLI override), or `default` (binary
+/// default). Override precedence is LOCKED: baked < flag.
+struct EffectiveConfig {
+    mem_mib: u64,
+    cmdline: String,
+    fast_forward: bool,
+    /// Whether `--ff` was explicitly passed — feeds ONLY the FF mode statement's
+    /// "how chosen" wording, never the FF decision.
+    ff_explicit: bool,
+    max_jump_secs: f64,
+    max_virtual_time_secs: Option<f64>,
+    metrics_out: Option<String>,
+    /// The formatted per-knob provenance, e.g.
+    /// `mem=3072 (baked) ff=off (flag) horizon=36h (baked) ...`.
+    provenance: String,
+}
+
+impl EffectiveConfig {
+    /// Resolve for `dvmm boot`: no baked defaults; each knob is a flag override of
+    /// the binary default.
+    fn from_boot(f: &CommonRunFlags) -> Result<EffectiveConfig, Box<dyn std::error::Error>> {
+        Self::resolve(f, None)
+    }
+
+    /// Resolve for `dvmm run`: the artifact's baked run-defaults, each overridable
+    /// by the corresponding CLI flag (baked < flag).
+    fn from_run(
+        f: &CommonRunFlags,
+        baked: &artifact::RunDefaults,
+    ) -> Result<EffectiveConfig, Box<dyn std::error::Error>> {
+        Self::resolve(f, Some(baked))
+    }
+
+    fn resolve(
+        f: &CommonRunFlags,
+        baked: Option<&artifact::RunDefaults>,
+    ) -> Result<EffectiveConfig, Box<dyn std::error::Error>> {
+        let mut prov: Vec<String> = Vec::new();
+
+        // mem
+        let (mem_mib, mem_src) = match (f.mem, baked) {
+            (Some(v), _) => (v, "flag"),
+            (None, Some(b)) => (b.mem_mib, "baked"),
+            (None, None) => (DEFAULT_MEM_MIB, "default"),
+        };
+        prov.push(format!("mem={mem_mib} ({mem_src})"));
+
+        // cmdline
+        let (cmdline, cl_src) = match (&f.cmdline, baked) {
+            (Some(v), _) => (v.clone(), "flag"),
+            (None, Some(b)) => (b.cmdline.clone(), "baked"),
+            (None, None) => (DEFAULT_CMDLINE.to_string(), "default"),
+        };
+        prov.push(format!("cmdline={cmdline:?} ({cl_src})"));
+
+        // fast-forward
+        let ff_explicit = f.ff.is_some();
+        let (fast_forward, ff_src) = match (f.ff, baked) {
+            (Some(v), _) => (v, "flag"),
+            (None, Some(b)) => (b.fast_forward, "baked"),
+            (None, None) => (true, "default"),
+        };
+        prov.push(format!(
+            "ff={} ({ff_src})",
+            if fast_forward { "on" } else { "off" }
+        ));
+
+        // max-virtual-time (horizon)
+        let (max_virtual_time_secs, mvt_disp, mvt_src) = match (&f.max_virtual_time, baked) {
+            (Some(s), _) => (Some(parse_dur(s)?), s.clone(), "flag"),
+            (None, Some(b)) => match &b.max_virtual_time {
+                Some(s) => (Some(parse_dur(s)?), s.clone(), "baked"),
+                None => (None, "unset".to_string(), "baked"),
+            },
+            (None, None) => (None, "unset".to_string(), "default"),
+        };
+        prov.push(format!("max-virtual-time={mvt_disp} ({mvt_src})"));
+
+        // max-jump-secs (no baked value)
+        let (max_jump_secs, mj_src) = match f.max_jump_secs {
+            Some(v) if v.is_finite() && v > 0.0 => (v, "flag"),
+            Some(_) => return Err("--max-jump-secs must be finite and > 0".into()),
+            None => (DEFAULT_MAX_JUMP_SECS, "default"),
+        };
+        prov.push(format!("max-jump-secs={max_jump_secs} ({mj_src})"));
+
+        Ok(EffectiveConfig {
+            mem_mib,
+            cmdline,
+            fast_forward,
+            ff_explicit,
+            max_jump_secs,
+            max_virtual_time_secs,
+            metrics_out: f.metrics_out.clone(),
+            provenance: prov.join(" "),
+        })
+    }
+}
+
+/// Parse a duration string to seconds, erroring (not exiting) on junk — for the
+/// resolution path, which propagates errors.
+fn parse_dur(s: &str) -> Result<f64, Box<dyn std::error::Error>> {
+    parse_duration_secs(s).ok_or_else(|| format!("invalid duration {s:?}").into())
 }
 
 /// Parse a duration to seconds (f64). A bare number is seconds; suffixes `ms`,
@@ -627,77 +817,6 @@ fn parse_duration_secs(s: &str) -> Option<f64> {
         .filter(|&secs| secs.is_finite() && secs > 0.0)
 }
 
-fn parse_args() -> Config {
-    let mut kernel = None;
-    let mut initrd = None;
-    let mut mem_mib = DEFAULT_MEM_MIB;
-    let mut cmdline = DEFAULT_CMDLINE.to_string();
-    let mut fast_forward = true;
-    let mut ff_explicit = false;
-    let mut max_jump_secs = DEFAULT_MAX_JUMP_SECS;
-    let mut max_virtual_time_secs = None;
-    let mut dump_cpuid = false;
-    let mut metrics_out = None;
-
-    let mut args = std::env::args().skip(1);
-    while let Some(a) = args.next() {
-        match a.as_str() {
-            "--kernel" => kernel = args.next(),
-            "--initrd" => initrd = args.next(),
-            "--mem" => {
-                mem_mib = args
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or_else(|| usage());
-            }
-            "--cmdline" => cmdline = args.next().unwrap_or_else(|| usage()),
-            "--ff" | "--fast-forward" => {
-                fast_forward = match args.next().as_deref() {
-                    Some("on") | Some("1") | Some("true") => true,
-                    Some("off") | Some("0") | Some("false") => false,
-                    _ => usage(),
-                };
-                ff_explicit = true;
-            }
-            "--max-jump-secs" => {
-                max_jump_secs = args
-                    .next()
-                    .and_then(|v| v.parse::<f64>().ok())
-                    .filter(|&n| n.is_finite() && n > 0.0)
-                    .unwrap_or_else(|| usage());
-            }
-            "--max-virtual-time" => {
-                max_virtual_time_secs = Some(
-                    args.next()
-                        .as_deref()
-                        .and_then(parse_duration_secs)
-                        .unwrap_or_else(|| usage()),
-                );
-            }
-            "--dump-cpuid" => dump_cpuid = true,
-            "--metrics-out" => metrics_out = Some(args.next().unwrap_or_else(|| usage())),
-            "-h" | "--help" => usage(),
-            other => {
-                dlog!("unknown argument: {other}");
-                usage();
-            }
-        }
-    }
-
-    Config {
-        kernel,
-        initrd,
-        mem_mib,
-        cmdline,
-        fast_forward,
-        ff_explicit,
-        max_jump_secs,
-        max_virtual_time_secs,
-        dump_cpuid,
-        metrics_out,
-    }
-}
-
 /// The startup fast-forward **mode statement** (spec item 1): the FF state plus
 /// how it was chosen. Rendered identically whether or not stdin is a tty, and
 /// ALWAYS printed at startup, so the effective default is visible to a human and
@@ -714,7 +833,7 @@ fn ff_mode_statement(fast_forward: bool, ff_explicit: bool) -> String {
 }
 
 fn main() {
-    match run() {
+    match dispatch() {
         Ok(code) => std::process::exit(code),
         Err(err) => {
             dlog!("dvmm: fatal: {err}");
@@ -723,27 +842,182 @@ fn main() {
     }
 }
 
-fn run() -> Result<i32, Box<dyn std::error::Error>> {
-    let cfg = parse_args();
-    let mem_size = cfg.mem_mib * 1024 * 1024;
+/// Parse the CLI and dispatch to a subcommand handler.
+fn dispatch() -> Result<i32, Box<dyn std::error::Error>> {
+    let cli = Cli::parse();
+    match cli.cmd {
+        Cmd::Boot(args) => cmd_boot(args),
+        Cmd::Run(args) => cmd_run(args),
+        Cmd::Inspect(a) => cmd_inspect(&a.artifact),
+        Cmd::Verify(a) => cmd_verify(&a.artifact),
+        Cmd::DumpCpuid => {
+            dump_cpuid(&Kvm::new()?)?;
+            Ok(0)
+        }
+        Cmd::Pack(args) => cmd_pack(args),
+    }
+}
 
-    // --- KVM ---
-    let kvm = Kvm::new()?;
+// ---- `dvmm boot`: raw kernel + initramfs (low-level dev verb) ---------------
 
-    // `--dump-cpuid`: emit the effective guest CPUID profile (the manifest
-    // artifact) and exit — no VM, no kernel/initrd needed.
-    if cfg.dump_cpuid {
-        dump_cpuid(&kvm)?;
-        return Ok(0);
+fn cmd_boot(args: BootArgs) -> Result<i32, Box<dyn std::error::Error>> {
+    let eff = EffectiveConfig::from_boot(&args.common)?;
+    let kernel = std::fs::read(&args.kernel)
+        .map_err(|e| format!("opening kernel {}: {e}", args.kernel))?;
+    let initrd = std::fs::read(&args.initrd)
+        .map_err(|e| format!("opening initrd {}: {e}", args.initrd))?;
+    dlog!(
+        "[dvmm] boot: kernel={} initrd={}",
+        args.kernel,
+        args.initrd
+    );
+    let stop = boot_and_run(&kernel, &initrd, &eff)?;
+    Ok(stop.exit_code())
+}
+
+// ---- `dvmm run`: a .dvmm stack artifact (baked defaults + overrides) --------
+
+fn cmd_run(args: RunArgs) -> Result<i32, Box<dyn std::error::Error>> {
+    // Load the artifact's members into memory (NO temp-dir extraction): manifest
+    // + kernel + initramfs + compose.lock (the last for the on-load verify).
+    let payload = artifact::read_for_run(&args.artifact)?;
+
+    // Member-hash verify on load is DEFAULT-ON (`--no-verify` to skip): recompute
+    // each payload member's sha256 and compare to the manifest, so a corrupted or
+    // tampered artifact is caught before we boot it.
+    if args.no_verify {
+        dlog!("[dvmm] run: member-hash verify SKIPPED (--no-verify)");
+    } else {
+        verify_payload_or_bail(&args.artifact, &payload)?;
+        dlog!(
+            "[dvmm] run: {} member hashes verified against manifest (identity {})",
+            payload.manifest.members.len(),
+            &artifact::file_sha256_hex(&args.artifact)?[..16],
+        );
     }
 
-    // Startup mode statement (item 1) + interactive banner (item 4). The mode
-    // statement is ALWAYS printed. When stdin is a tty we additionally append a
-    // quit hint (one banner line) and, if FF is on, emit an advisory warning.
+    let eff = EffectiveConfig::from_run(&args.common, &payload.manifest.run_defaults)?;
+    dlog!(
+        "[dvmm] run: stack={} project={} (format v{})",
+        payload.manifest.stack,
+        payload.manifest.project,
+        payload.manifest.format_version,
+    );
+    let stop = boot_and_run(&payload.kernel, &payload.initramfs, &eff)?;
+    Ok(stop.exit_code())
+}
+
+/// Recompute the run payload's member hashes and bail (error) on any mismatch —
+/// the default-ON on-load integrity check for `run`.
+fn verify_payload_or_bail(
+    path: &str,
+    payload: &artifact::RunPayload,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let m = &payload.manifest;
+    let checks = [
+        (artifact::MEMBER_COMPOSE_LOCK, &payload.compose_lock),
+        (artifact::MEMBER_KERNEL, &payload.kernel),
+        (artifact::MEMBER_INITRAMFS, &payload.initramfs),
+    ];
+    for (name, bytes) in checks {
+        let expected = m
+            .member(name)
+            .ok_or_else(|| format!("{path}: manifest has no hash for member {name:?}"))?;
+        let actual = artifact::sha256_hex(bytes);
+        if actual != expected.sha256 {
+            return Err(format!(
+                "{path}: member {name:?} hash MISMATCH (manifest {}, actual {}) — \
+                 artifact is corrupt or tampered; refusing to boot (pass --no-verify to override)",
+                expected.sha256, actual
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+// ---- `dvmm inspect`: print manifest.json (manifest member only) -------------
+
+fn cmd_inspect(path: &str) -> Result<i32, Box<dyn std::error::Error>> {
+    // Reads ONLY the first member (manifest.json) — never the big kernel/initramfs.
+    let manifest = artifact::read_manifest(path)?;
+    let json = manifest.to_canonical_json()?;
+    // manifest.json to stdout verbatim (a machine can pipe it to jq).
+    use std::io::Write;
+    std::io::stdout().write_all(&json)?;
+    Ok(0)
+}
+
+// ---- `dvmm verify`: member hashes vs manifest + the file identity -----------
+
+fn cmd_verify(path: &str) -> Result<i32, Box<dyn std::error::Error>> {
+    let report = artifact::verify(path)?;
+    // Identity first (always printed, even on failure — it names the file checked).
+    println!("dvmm-artifact: {path}");
+    println!("sha256 (identity): {}", report.file_sha256);
+    for c in &report.checks {
+        println!(
+            "  {:<16} {}  {}",
+            c.name,
+            if c.ok { "OK  " } else { "FAIL" },
+            if c.ok {
+                c.actual.clone()
+            } else {
+                format!("expected {} got {}", c.expected, c.actual)
+            }
+        );
+    }
+    for name in &report.missing {
+        println!("  {name:<16} MISSING (in manifest, absent from archive)");
+    }
+    if report.all_ok() {
+        println!("VERIFY OK: all {} member hashes match the manifest", report.checks.len());
+        Ok(0)
+    } else {
+        println!("VERIFY FAIL: member-hash mismatch or missing member");
+        Ok(1)
+    }
+}
+
+// ---- `dvmm pack`: assemble a .dvmm from parts (internal, for bake-stack.sh) -
+
+fn cmd_pack(args: PackArgs) -> Result<i32, Box<dyn std::error::Error>> {
+    let manifest_in = std::fs::read(&args.manifest_in)
+        .map_err(|e| format!("reading {}: {e}", args.manifest_in))?;
+    let kernel =
+        std::fs::read(&args.kernel).map_err(|e| format!("reading {}: {e}", args.kernel))?;
+    let initramfs = std::fs::read(&args.initramfs)
+        .map_err(|e| format!("reading {}: {e}", args.initramfs))?;
+    let compose_lock = std::fs::read(&args.compose_lock)
+        .map_err(|e| format!("reading {}: {e}", args.compose_lock))?;
+    let bytes = artifact::pack(&manifest_in, &kernel, &initramfs, &compose_lock)?;
+    std::fs::write(&args.out, &bytes).map_err(|e| format!("writing {}: {e}", args.out))?;
+    // The identity is a pure function of the inputs; print it so the bake ledger
+    // can record it and the repeatability gate can compare.
+    println!("{}  {}", artifact::sha256_hex(&bytes), args.out);
+    Ok(0)
+}
+
+// ============================================================================
+// The shared boot path — used by BOTH `boot` (raw) and `run` (artifact).
+// ============================================================================
+
+/// Set up the VM from in-memory kernel + initramfs byte buffers and the resolved
+/// [`EffectiveConfig`], then hand off to the vCPU loop. The kernel is parsed from
+/// bytes and the initramfs written straight into guest RAM — no temp files.
+fn boot_and_run(
+    kernel: &[u8],
+    initrd: &[u8],
+    eff: &EffectiveConfig,
+) -> Result<StopReason, Box<dyn std::error::Error>> {
+    let mem_size = eff.mem_mib * 1024 * 1024;
+    let kvm = Kvm::new()?;
+
+    // Startup FF mode statement (item 1) + interactive banner. Always printed;
     // isatty gates ONLY the banner/advisory wording, never the FF decision.
     {
         let tty = serial::stdin_is_tty();
-        let mode = ff_mode_statement(cfg.fast_forward, cfg.ff_explicit);
+        let mode = ff_mode_statement(eff.fast_forward, eff.ff_explicit);
         if tty {
             dlog!(
                 "[dvmm] {mode} — quit the guest with `poweroff` or `reboot` \
@@ -752,9 +1026,7 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
         } else {
             dlog!("[dvmm] {mode}");
         }
-        // Advisory (telemetry, NOT behavior): fast-forward at an interactive
-        // console races the guest clock and pins a host core.
-        if cfg.fast_forward && tty {
+        if eff.fast_forward && tty {
             dlog!(
                 "[dvmm][WARN] fast-forward is ON at an interactive console — it \
                  races the guest clock and pins a host core; pass `--ff off` for \
@@ -763,21 +1035,10 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
         }
     }
 
-    let kernel_path = cfg.kernel.clone().unwrap_or_else(|| usage());
-    let initrd_path = cfg.initrd.clone().unwrap_or_else(|| usage());
-    let mut kernel_file = std::fs::File::open(&kernel_path)
-        .map_err(|e| format!("opening kernel {kernel_path}: {e}"))?;
-    let mut initrd_file = std::fs::File::open(&initrd_path)
-        .map_err(|e| format!("opening initrd {initrd_path}: {e}"))?;
-
-    dlog!(
-        "[dvmm] kernel={} initrd={} mem={} MiB ff={} cmdline={:?}",
-        kernel_path,
-        initrd_path,
-        cfg.mem_mib,
-        if cfg.fast_forward { "on" } else { "off" },
-        cfg.cmdline
-    );
+    // The EFFECTIVE-CONFIG line (spec item 3): the resolved knobs with per-knob
+    // provenance (baked < flag). This is the future record-log preamble — every
+    // run emits it, so a harness/log can reconstruct exactly what was run and why.
+    dlog!("[dvmm] effective-config: {}", eff.provenance);
 
     // --- VM ---
     let vm = kvm.create_vm()?;
@@ -821,9 +1082,9 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
         );
     }
 
-    // --- Load kernel + initrd ---
-    let entry = boot::load_kernel(&guest_mem, &mut kernel_file)?;
-    let initrd_cfg = boot::load_initrd(&guest_mem, &mut initrd_file, mem_size)?;
+    // --- Load kernel + initrd (straight from the in-memory buffers) ---
+    let entry = boot::load_kernel(&guest_mem, kernel)?;
+    let initrd_cfg = boot::load_initrd(&guest_mem, initrd, mem_size)?;
     dlog!(
         "[dvmm] vmlinux entry {:#x}, initramfs {} bytes @ {:#x}",
         entry.0, initrd_cfg.size, initrd_cfg.address
@@ -837,7 +1098,7 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
     // register storage; no in-kernel LAPIC to program.)
 
     // --- System config (cmdline, MPTable, E820, zero page) ---
-    boot::configure_system(&guest_mem, &cfg.cmdline, Some(initrd_cfg), mem_size, 1)?;
+    boot::configure_system(&guest_mem, &eff.cmdline, Some(initrd_cfg), mem_size, 1)?;
 
     // --- Serial console ---
     let (serial, serial_drain) = serial::new_serial()?;
@@ -849,17 +1110,16 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
         RAW_TTY.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
-    let stop = run_user_backend(
+    run_user_backend(
         vcpu,
         serial,
         serial_drain,
         clock,
-        cfg.fast_forward,
-        cfg.max_jump_secs,
-        cfg.max_virtual_time_secs,
-        cfg.metrics_out.clone(),
-    )?;
-    Ok(stop.exit_code())
+        eff.fast_forward,
+        eff.max_jump_secs,
+        eff.max_virtual_time_secs,
+        eff.metrics_out.clone(),
+    )
 }
 
 /// Queue an interrupt `vector` for injection on the next KVM entry

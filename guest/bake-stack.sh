@@ -42,6 +42,7 @@ PY="$HERE/bake_compose.py"
 # --- args -------------------------------------------------------------------
 COMPOSE=""
 STACK_NAME=""
+DVMM_OUT=""
 # 2a spec default is 4 GiB, but the current VMM maps guest RAM only BELOW the
 # 32-bit MMIO gap (arch.rs MMIO_MEM_START = 0xc000_0000 = 3 GiB), so 4 GiB is not
 # bootable without a VMM high-memory region (VMM-core work, outside 2a's
@@ -54,6 +55,7 @@ SQUASH_THRESHOLD_MIB=100  # images larger than this are squashed to one vfs laye
 while [ $# -gt 0 ]; do
   case "$1" in
     --name)        STACK_NAME="$2"; shift 2 ;;
+    -o|--out)      DVMM_OUT="$2"; shift 2 ;;
     --mem)         MEM_MIB="$2"; shift 2 ;;
     --working-set) WORKING_SET_MIB="$2"; shift 2 ;;
     --squash-threshold) SQUASH_THRESHOLD_MIB="$2"; shift 2 ;;
@@ -359,9 +361,24 @@ STACK_LOCK_FILE="$HERE/stacks/${STACK_NAME}/stack.lock"
 # stash the emitted lock next to the manifest for inspection / diffing.
 cp "$LOCK" "$HERE/stacks/${STACK_NAME}/compose.lock.yml"
 
+# --- 8. pack the single-file .dvmm artifact (OP-1a) -------------------------
+# Fold the just-built boot artifacts + provenance into ONE self-contained,
+# deterministic .dvmm via the SAME canonical encoder `dvmm run/inspect/verify`
+# read (guest/pack-dvmm.sh -> `dvmm pack`). No volatile fields, so re-baking the
+# same inputs yields a BYTE-IDENTICAL .dvmm.
+echo "== pack .dvmm artifact =="
+[ -n "$DVMM_OUT" ] || DVMM_OUT="$ALPINE_DIR/${STACK_NAME}.dvmm"
+"$HERE/pack-dvmm.sh" "$STACK_NAME" -o "$DVMM_OUT"
+DVMM_SHA="$(sha256sum "$DVMM_OUT" | awk '{print $1}')"
+# record the artifact identity in the stack ledger (stable; comparable across bakes).
+{
+  echo "dvmm_sha256          $DVMM_SHA  $(basename "$DVMM_OUT")"
+} >> "$STACK_LOCK_FILE"
+
 echo
 echo "== bake-stack DONE =="
 echo "   initramfs: $OUT"
 echo "   sha256:    $ART_SHA"
 echo "   lock:      $HERE/stacks/${STACK_NAME}/compose.lock.yml (sha256 $LOCK_SHA)"
 echo "   manifest:  $STACK_LOCK_FILE"
+echo "   .dvmm:     $DVMM_OUT (sha256 $DVMM_SHA)  <- the single-file artifact"

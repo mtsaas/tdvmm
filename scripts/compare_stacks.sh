@@ -67,7 +67,7 @@ run_stack() {
   local cmdline="console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable dvmm.stack=1 dvmm.interval=$INTERVAL dvmm.maxrows=$MAX_ROWS"
   local start_wall end_wall pid
   start_wall=$(date +%s.%N)
-  "$BIN" --kernel "$KERNEL" --initrd "$initrd" --mem "$MEM" --ff on \
+  "$BIN" boot --kernel "$KERNEL" --initrd "$initrd" --mem "$MEM" --ff on \
     --max-jump-secs "$MAX_JUMP_SECS" --max-virtual-time "$MAX_VIRTUAL_TIME" \
     --metrics-out "$metrics" --cmdline "$cmdline" </dev/null >"$log" 2>&1 &
   pid=$!

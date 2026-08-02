@@ -89,7 +89,7 @@ run_case() {
   start=$(date +%s)
   # `timeout` returns the VMM's own exit code if it self-exits before TOTAL, or
   # 124 if it had to be killed (a wedge / still-running).
-  timeout "$TOTAL" "$BIN" --kernel "$KERNEL" --initrd "$INITRD" --mem "$MEM" "$@" \
+  timeout "$TOTAL" "$BIN" boot --kernel "$KERNEL" --initrd "$INITRD" --mem "$MEM" "$@" \
     < "$fifo" > "$log" 2>&1
   rc=$?
   end=$(date +%s)

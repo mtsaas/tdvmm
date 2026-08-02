@@ -21,7 +21,7 @@ MEM="${MEM:-2048}"
 FF="${FF:-off}"
 
 cargo build --release --manifest-path "$ROOT/Cargo.toml"
-exec "$ROOT/target/release/dvmm" \
+exec "$ROOT/target/release/dvmm" boot \
   --kernel "$KERNEL" \
   --initrd "$INITRD" \
   --mem "$MEM" \

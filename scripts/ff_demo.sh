@@ -53,7 +53,7 @@ trap cleanup EXIT
 CMDLINE="console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable dvmm.stack=1 dvmm.interval=$INTERVAL dvmm.maxrows=$MAX_ROWS"
 echo "[ff_demo] boot: interval=${INTERVAL}s max_rows=$MAX_ROWS target=${TARGET_HOURS} virtual-hours mem=${MEM}MiB ff=ON max-virtual-time=${MAX_VIRTUAL_TIME}"
 START_WALL=$(date +%s.%N)
-"$BIN" --kernel "$KERNEL" --initrd "$INITRD" --mem "$MEM" --ff on --max-jump-secs "$MAX_JUMP_SECS" \
+"$BIN" boot --kernel "$KERNEL" --initrd "$INITRD" --mem "$MEM" --ff on --max-jump-secs "$MAX_JUMP_SECS" \
   --max-virtual-time "$MAX_VIRTUAL_TIME" \
   --cmdline "$CMDLINE" </dev/null >"$LOG" 2>&1 &
 PID=$!

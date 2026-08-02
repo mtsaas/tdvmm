@@ -38,7 +38,7 @@ LOG="$(mktemp)"; trap 'rm -f "$LOG"' EXIT
 CMDLINE="console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable dvmm.stack=1"
 echo "[rw] boot: mem=${MEM}MiB ff=ON horizon=${MAX_VIRTUAL_TIME} wall_timeout=${WALL_TIMEOUT}s"
 START=$(date +%s.%N)
-timeout "$WALL_TIMEOUT" "$BIN" --kernel "$KERNEL" --initrd "$INITRD" --mem "$MEM" --ff on \
+timeout "$WALL_TIMEOUT" "$BIN" boot --kernel "$KERNEL" --initrd "$INITRD" --mem "$MEM" --ff on \
   --max-virtual-time "$MAX_VIRTUAL_TIME" --cmdline "$CMDLINE" </dev/null >"$LOG" 2>&1
 rc=$?
 WALL=$(awk "BEGIN{printf \"%.1f\", $(date +%s.%N)-$START}")

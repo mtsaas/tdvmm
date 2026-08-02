@@ -27,7 +27,7 @@ cleanup() { kill "$PID" 2>/dev/null; wait "$PID" 2>/dev/null; rm -f "$LOG"; }
 trap cleanup EXIT
 
 # Run detached with no interactive input; capture serial output.
-"$BIN" --kernel "$KERNEL" --initrd "$INITRD" --mem 256 </dev/null >"$LOG" 2>&1 &
+"$BIN" boot --kernel "$KERNEL" --initrd "$INITRD" --mem 256 </dev/null >"$LOG" 2>&1 &
 PID=$!
 
 deadline=$(( $(date +%s) + TIMEOUT ))

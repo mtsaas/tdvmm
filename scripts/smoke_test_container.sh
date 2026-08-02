@@ -43,7 +43,7 @@ trap cleanup EXIT
 # Run detached, no interactive input; capture serial output. dvmm.autotest=1
 # makes the guest power off after the self-test.
 CMDLINE="console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable dvmm.autotest=1"
-"$BIN" --kernel "$KERNEL" --initrd "$INITRD" --mem "$MEM" \
+"$BIN" boot --kernel "$KERNEL" --initrd "$INITRD" --mem "$MEM" \
   --max-virtual-time "$MAX_VIRTUAL_TIME" --cmdline "$CMDLINE" \
   </dev/null >"$LOG" 2>&1 &
 PID=$!

@@ -170,7 +170,7 @@ for stack in "${STACKS[@]}"; do
   cmdline="console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable dvmm.stack=1 dvmm.hc_tick=$HC_TICK dvmm.interval=$INTERVAL dvmm.maxrows=$MAX_ROWS"
   echo "[corpus] boot: mem=${MEM}MiB ff=ON horizon=${MAX_VIRTUAL_TIME} hc_tick=${HC_TICK}s wall_timeout=${WALL_TIMEOUT}s"
   start=$(date +%s.%N)
-  timeout "$WALL_TIMEOUT" "$BIN" --kernel "$KERNEL" --initrd "$initrd" --mem "$MEM" --ff on \
+  timeout "$WALL_TIMEOUT" "$BIN" boot --kernel "$KERNEL" --initrd "$initrd" --mem "$MEM" --ff on \
     --max-virtual-time "$MAX_VIRTUAL_TIME" --metrics-out "$metrics" --cmdline "$cmdline" \
     </dev/null >"$log" 2>&1
   rc=$?

@@ -56,7 +56,7 @@ trap cleanup EXIT
 
 CMDLINE="console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable dvmm.stack=1 dvmm.interval=$INTERVAL_SECONDS dvmm.maxrows=$MAX_ROWS"
 echo "[smoke] boot: mem=${MEM}MiB interval=${INTERVAL_SECONDS}s max_rows=$MAX_ROWS past_cap=$PAST_CAP ff=$FF timeout=${TIMEOUT}s max-virtual-time=${MAX_VIRTUAL_TIME}"
-"$BIN" --kernel "$KERNEL" --initrd "$INITRD" --mem "$MEM" --ff "$FF" \
+"$BIN" boot --kernel "$KERNEL" --initrd "$INITRD" --mem "$MEM" --ff "$FF" \
   --max-virtual-time "$MAX_VIRTUAL_TIME" --cmdline "$CMDLINE" \
   </dev/null >"$LOG" 2>&1 &
 PID=$!

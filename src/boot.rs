@@ -5,8 +5,7 @@
 //! ACPI: we build **no** ACPI tables and deliberately leave `acpi_rsdp_addr`
 //! unset, so the guest falls back to the MPTable / boot-CPU path.
 
-use std::fs::File;
-use std::io::Read;
+use std::io::Cursor;
 
 use linux_loader::configurator::linux::LinuxBootConfigurator;
 use linux_loader::configurator::{BootConfigurator, BootParams};
@@ -47,28 +46,30 @@ pub struct InitrdConfig {
     pub size: usize,
 }
 
-/// Load an uncompressed ELF `vmlinux` into guest memory, returning the entry point.
-pub fn load_kernel(mem: &GuestMemoryMmap, kernel: &mut File) -> Result<GuestAddress, BootError> {
+/// Load an uncompressed ELF `vmlinux` into guest memory, returning the entry
+/// point. The kernel is parsed straight from a byte buffer (`linux-loader` reads
+/// the ELF via `Read + Seek`) — the same path whether it came from a file
+/// (`dvmm boot`) or from a `.dvmm` member read into memory (`dvmm run`). No temp
+/// files, no extraction.
+pub fn load_kernel(mem: &GuestMemoryMmap, kernel: &[u8]) -> Result<GuestAddress, BootError> {
+    let mut cursor = Cursor::new(kernel);
     let result = Elf::load(
         mem,
         None,
-        kernel,
+        &mut cursor,
         Some(GuestAddress(arch::HIMEM_START)),
     )
     .map_err(be("loading vmlinux ELF"))?;
     Ok(result.kernel_load)
 }
 
-/// Load a raw initramfs image near the top of low RAM (page-aligned).
+/// Load a raw initramfs image near the top of low RAM (page-aligned), straight
+/// from a byte buffer into guest RAM (no temp-dir extraction).
 pub fn load_initrd(
     mem: &GuestMemoryMmap,
-    initrd: &mut File,
+    data: &[u8],
     mem_size: u64,
 ) -> Result<InitrdConfig, BootError> {
-    let mut data = Vec::new();
-    initrd
-        .read_to_end(&mut data)
-        .map_err(be("reading initramfs"))?;
     let size = data.len();
 
     // Highest low-RAM region determines placement.
@@ -81,7 +82,7 @@ pub fn load_initrd(
     }
     let address = (lowmem_end - size as u64) & !0xfffu64; // 4 KiB aligned
 
-    mem.write_slice(&data, GuestAddress(address))
+    mem.write_slice(data, GuestAddress(address))
         .map_err(be("writing initramfs to guest memory"))?;
     Ok(InitrdConfig {
         address,
