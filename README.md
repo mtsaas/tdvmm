@@ -308,6 +308,56 @@ isatty signal, never off wall-clock):
   emitted for every harness path (non-tty, `--metrics-out`, or a horizon set) and the
   on-stop summary + metrics file are unaffected.
 
+## TEST-1a — test a stack against a scenario (`dvmm test`)
+
+You can now *test* a stack: drive virtual time, wait for readiness, probe guest
+state, assert, and get a verdict — `dvmm test <stack.dvmm> --scenario s.yml`.
+This is the developer-testing foundation (fault injection is the next slice,
+TEST-1b; the schema and agent protocol already leave room for it).
+
+- **Control channel.** A **second 16550** (COM2 / ttyS1) is added to the VMM,
+  reusing the serial model. It is the modeled control channel between the host
+  and a tiny guest-side **`dvmm-agent`** (a static, reproducible Go binary baked
+  into every guest, running *outside* the containers). The agent **blocks reading
+  ttyS1** — a blocked read arms no timer, so it produces no wakes and an idle
+  guest with the agent baked in still fast-forwards normally. Protocol:
+  line-delimited JSON. The guest kernel gains `CONFIG_SERIAL_8250_NR_UARTS=2` so
+  ttyS1 exists (see `guest/kernel/test1a-com2.config`).
+- **The LAW for commands.** Every command is delivered by the VMM **at its
+  scheduled vtsc as a queue entry** — a `(vtsc, ScenarioStep)` event that
+  GENERALIZES the existing `(vtsc, StopRun)` horizon — never an ad-hoc side
+  channel. `at: 24h` therefore fast-forwards through idle exactly like any other
+  deadline. IRQ3 (COM2) was already routed identity to IO-APIC pin 3 by the MP
+  table, so no interrupt-routing change was needed.
+- **Scenario (host YAML).** A timeline of steps. Each has an `at:` virtual
+  duration and one kind: `exec` (run a command in a container; assert exit code
+  and/or a stdout regex — covers SQL via psql, HTTP via curl), `containers`
+  (`all_running` / `none_exited_nonzero`), or `wait_for` (poll a probe every
+  `every:` until a predicate holds or `timeout:` passes — readiness). **Static
+  validation** happens before boot (sub-second): unknown keys, bad durations, a
+  bad regex, or an unknown service (checked against the artifact's
+  `compose.lock.yml`) are rejected loudly.
+- **Verdict.** A structured **JSONL run log** (one line per event: scenario
+  steps, commands + results, probe outcomes, assertions, container census, FF
+  stats) plus a **JSON report** file and a human summary table. The artifact
+  sha256 + the scenario (+ its sha256) + the JSONL = a reproduction package. This
+  schema is a documented, versioned contract (`schema: 1`), shared with the
+  future e2e runner. **Exit codes:** `0` all assertions passed; `1` an assertion
+  / readiness failure (or a container exited nonzero); `2` an infrastructure
+  error (bad scenario, boot/bake/agent failure, or the agent couldn't reach a
+  container). CI can tell "your stack is wrong" (1) from "the tool broke" (2).
+
+```sh
+guest/bake-stack.sh guest/stacks/dogfood/compose.yml -o dogfood.dvmm  # agent baked in
+dvmm test dogfood.dvmm --scenario guest/stacks/dogfood/dogfood.yml    # -> PASS, exit 0
+scripts/test_scenario.sh          # the TEST-1a gate set (pass / wrong->1 / infra->2)
+```
+
+The **dogfood-as-scenario** acceptance (`guest/stacks/dogfood/dogfood.yml`) is the
+platform testing itself: `wait_for` Postgres ready, fast-forward through virtual
+hours, then `exec` a `psql` probe asserting the events-table row count **accrues**
+and then **caps** at MAX_ROWS.
+
 ## What it does
 
 - 1 vCPU, 64-bit long mode, direct kernel boot (loads an ELF `vmlinux`).

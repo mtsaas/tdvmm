@@ -14,11 +14,12 @@ project   dvmm_svcchain
 mem_mib   3072
 ram_estimate_mib  1752
 compose_lock_sha256  7e94a1c3f67e820d8f2f5210c212c444ab5e1913ff979a5db7779485af32e1e7
-initramfs_sha256     6b60a37e55b0111e0ea11c5e618485afde3c71b074228da8fe08d4eec1e57895  initramfs-alpine-svcchain.cpio.gz
+initramfs_sha256     4448b27349d42bf95760997afd1e3ca2a6bf1a508a66a194c4a8f2e76a0c9ddf  initramfs-alpine-svcchain.cpio.gz
   image  policy=plain   upstream=docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616  diffid=sha256:0958e0fef2d6a31e1325b8bfecd99dead933363682d69850a7606599023751bc  size_mib=4
   image  policy=plain   upstream=docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616  diffid=sha256:0958e0fef2d6a31e1325b8bfecd99dead933363682d69850a7606599023751bc  size_mib=4
   image  policy=squash  upstream=docker.io/library/postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777  seed_tag=localhost/dvmm-postgres-57c72fd2a128:baked  src_diffid=sha256:af5b54b4903175790ece7037a66fd16496658d7030a59e2e2360f66038d74c8c  size_mib=283  GATE=ok
   pin    upstream=docker.io/library/postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777  pinned=localhost/dvmm-postgres-57c72fd2a128@sha256:cbf217007d0742829dc120c3ea9cd2621e90eb3adfeaf6684e87ce268a2ca368
 # --- informational (NOT compared for repeatability) ---
 # podman-version: 5.8.3
-# baked-at: 2026-08-02T06:14:36Z
+# baked-at: 2026-08-02T08:58:11Z
+dvmm_sha256          75cff44e758a1cf38318019a19127e294e75151ecdabb7b112088f5ef9d98fb7  svcchain.dvmm

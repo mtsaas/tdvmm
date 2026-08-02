@@ -105,6 +105,17 @@ if [ ! -f "$COMPOSE_CACHE" ]; then
 fi
 echo "${COMPOSE_SHA256}  ${COMPOSE_CACHE}" | sha256sum -c -
 
+# --- build the TEST-1a control-channel agent (static, reproducible) ----------
+# A tiny stdlib-only Go binary baked into EVERY guest. Built host-side with the
+# same reproducible flags as the Go A/B service (CGO off, -trimpath, no VCS/build
+# id), so its bytes — and thus the initramfs + .dvmm — are identical bake-to-bake.
+command -v go >/dev/null || { echo "ERROR: host 'go' is required to build dvmm-agent"; exit 1; }
+AGENT_SRC="$HERE/../agent"
+AGENT_BIN="$WORK/dvmm-agent"
+echo "building dvmm-agent (static, reproducible) ..."
+( cd "$AGENT_SRC" && CGO_ENABLED=0 GOTOOLCHAIN=local GOFLAGS=-trimpath \
+    go build -trimpath -buildvcs=false -ldflags="-s -w -buildid=" -o "$AGENT_BIN" . )
+
 # --- seed store: BASE bakes busybox via prebake; STACK reuses bake-stack's ---
 if [ -n "$SEED_OVERRIDE" ]; then
   SEED="$SEED_OVERRIDE"
@@ -121,7 +132,7 @@ fi
 
 # --- build the rootfs + pack the initramfs, all as root-in-userns -----------
 export WORK TARBALL MIRROR ALPINE_BRANCH BUILD_EPOCH GEN OUT GRAPH_DRIVER \
-       SEED HERE SELFTEST_IMAGE_REF COMPOSE_CACHE \
+       SEED HERE SELFTEST_IMAGE_REF COMPOSE_CACHE AGENT_BIN \
        STACK_NAME STACK_PROJECT STACK_LOCK STACK_BINDS STACK_MEM
 printf '%s\n' "${PKGS[@]}" > "$WORK/pkgs.txt"
 
@@ -159,6 +170,9 @@ chmod 0755 "$ROOTFS/init" \
 #     (the v2 binary works standalone), driven against podman's Docker-compat API.
 install -D -m 0755 "$COMPOSE_CACHE" "$ROOTFS/usr/local/bin/docker-compose"
 
+# 4c. bake the TEST-1a control-channel agent (blocks on ttyS1; FF-transparent).
+install -D -m 0755 "$AGENT_BIN" "$ROOTFS/usr/local/bin/dvmm-agent"
+
 # 5. bake the fixed clock epoch + the self-test image reference
 printf '%s\n' "$BUILD_EPOCH"          > "$ROOTFS/etc/dvmm-build-epoch"
 printf '%s\n' "$SELFTEST_IMAGE_REF"   > "$ROOTFS/etc/dvmm-image-ref"   # 2a selftest
@@ -185,14 +199,40 @@ rm -rf "$ROOTFS/var/cache/apk/"* "$ROOTFS/etc/resolv.conf"
 rm -rf "$ROOTFS/root/.config/containers" 2>/dev/null || true
 : > "$ROOTFS/etc/resolv.conf"   # empty file present as a mount/overwrite target
 
+# 7a0. Normalize containers/storage "created" timestamps. c/storage records a
+# nanosecond bake-time in each layer/image record (layers.json, images.json), the
+# deepest seed non-determinism (variable-length -> shifts the whole cpio). Pin
+# them to the fixed guest epoch; the DIGESTS (the content identity gated by
+# bake_repeat_test.sh) are untouched, and podman only uses `created` for display.
+find "$ROOTFS/var/lib/containers-seed" -name '*.json' -type f -exec \
+  sed -i -E 's/"created":"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z"/"created":"2026-08-01T00:00:00Z"/g' {} + 2>/dev/null || true
+
+# 7a. Zero containers/storage lock files: c/storage writes a random per-writer
+# "last-write" token into *.lock, the last CONTENT-level source of seed
+# non-determinism. The guest re-initializes them on first use, so emptying them is
+# safe (and the seed is read-only baked state anyway).
+find "$ROOTFS" -name '*.lock' -type f -exec truncate -s 0 {} + 2>/dev/null || true
+
+# 7b. Normalize ALL mtimes to the fixed build epoch. `cpio --reproducible`
+# renumbers inodes + zeroes devno but does NOT touch mtime, and directories +
+# freshly-installed files (apk, install, the built agent) otherwise carry the
+# current wall time — the last remaining source of initramfs non-determinism.
+# -h so symlinks' own mtimes are set too. This is what makes two bakes byte-
+# identical (the .dvmm bit-reproducibility gate).
+find "$ROOTFS" -exec touch -h -d "@$BUILD_EPOCH" {} + 2>/dev/null || true
+
 # 8. pack: a device-node cpio segment (gen_init_cpio) + the bulk tree
 cat > "$WORK/nodes.manifest" <<EOF
 dir /dev 0755 0 0
 nod /dev/console 0600 0 0 c 5 1
 nod /dev/null 0666 0 0 c 1 3
 nod /dev/ttyS0 0660 0 0 c 4 64
+nod /dev/ttyS1 0660 0 0 c 4 65
 EOF
-"$GEN" "$WORK/nodes.manifest" > "$WORK/nodes.cpio"
+# -t <epoch>: stamp the device-node mtimes with the FIXED build epoch (not the
+# current time), so this cpio segment is byte-identical bake-to-bake — required
+# for a bit-reproducible initramfs / .dvmm.
+"$GEN" -t "$BUILD_EPOCH" "$WORK/nodes.manifest" > "$WORK/nodes.cpio"
 
 CPIO_REPRO=""
 if cpio --usage 2>&1 | grep -q -- --reproducible; then CPIO_REPRO="--reproducible"; fi
@@ -201,7 +241,15 @@ if cpio --usage 2>&1 | grep -q -- --reproducible; then CPIO_REPRO="--reproducibl
     | LC_ALL=C sort -z \
     | cpio --null --create --format=newc --owner=0:0 --quiet $CPIO_REPRO ) > "$WORK/rootfs.cpio"
 
-cat "$WORK/nodes.cpio" "$WORK/rootfs.cpio" | gzip -9 > "$OUT"
+# Zero every entry's c_ino (there are no hardlinks, so it is cosmetic) — cpio's
+# --reproducible inode renumbering is not stable for a few store files. This is
+# the final step that makes the initramfs byte-identical across bakes.
+cat "$WORK/nodes.cpio" "$WORK/rootfs.cpio" > "$WORK/combined.cpio"
+python3 "$HERE/zero_cpio_inodes.py" "$WORK/combined.cpio"
+
+# -n: do not store the original name or a timestamp in the gzip header (the input
+# is a pipe, but -n makes the deterministic header explicit).
+gzip -9 -n < "$WORK/combined.cpio" > "$OUT"
 UNSHARE
 
 cp "$WORK/packages.lock" "$HERE/packages.lock"

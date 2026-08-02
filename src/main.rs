@@ -36,6 +36,7 @@
 mod arch;
 mod artifact;
 mod boot;
+mod control;
 mod cpuid;
 mod events;
 mod ioapic;
@@ -47,6 +48,7 @@ mod park;
 mod pic;
 mod pit;
 mod regs;
+mod scenario;
 mod serial;
 mod vtsc;
 
@@ -165,6 +167,9 @@ enum StopReason {
     /// `--max-virtual-time` horizon fired as a `(vtsc, StopRun)` queue event.
     /// VMM policy stop, deterministic in virtual time.
     Horizon,
+    /// TEST-1a: the `--scenario` reached a verdict (all steps done, or a failure).
+    /// The process exit code comes from the scenario verdict, not `exit_code()`.
+    Scenario,
 }
 
 impl StopReason {
@@ -174,6 +179,9 @@ impl StopReason {
             | StopReason::GuestSystemEvent
             | StopReason::GuestHalt => EXIT_GUEST_STOP,
             StopReason::Horizon => EXIT_HORIZON,
+            // Placeholder: a scenario run's real exit code is the verdict's (see
+            // `RunOutcome` / `ScenarioEngine::finalize`); this is never used.
+            StopReason::Scenario => EXIT_GUEST_STOP,
         }
     }
 
@@ -185,8 +193,25 @@ impl StopReason {
             StopReason::GuestSystemEvent => "guest_system_event",
             StopReason::GuestHalt => "guest_halt",
             StopReason::Horizon => "horizon",
+            StopReason::Scenario => "scenario",
         }
     }
+}
+
+/// The result of a full boot+run: why it stopped, and the process exit code. For
+/// `boot`/`run` the code is `stop.exit_code()`; for `test` it is the scenario
+/// verdict's code (0 pass / 1 assertion fail / 2 infrastructure).
+struct RunOutcome {
+    #[allow(dead_code)]
+    stop: StopReason,
+    exit_code: i32,
+}
+
+/// Everything `dvmm test` needs to run a scenario, built before boot and handed
+/// to the vCPU loop (which builds the engine once the virtual clock exists).
+struct ScenarioSetup {
+    scenario: scenario::Scenario,
+    meta: scenario::RunMeta,
 }
 
 /// A scheduled event in the one [`events::EventQueue`]. Every guest timer is an
@@ -200,6 +225,10 @@ enum TimerKind {
     /// `--max-virtual-time`: when vtsc reaches the horizon, stop the run. A
     /// deterministic virtual-time event, not a real-time policy.
     StopRun,
+    /// TEST-1a: a scenario step's scheduled `at:` (or a poll/reply deadline) has
+    /// arrived. GENERALIZES `StopRun` — a control command is delivered at its
+    /// scheduled vtsc through the same one queue, never an ad-hoc side channel.
+    ScenarioStep,
 }
 
 // ---- Δvtsc jump histogram (Step 4 instrumentation) -------------------------
@@ -596,6 +625,8 @@ enum Cmd {
     Boot(BootArgs),
     /// Run a .dvmm stack artifact: apply its baked run-defaults, then boot (offline).
     Run(RunArgs),
+    /// Test a .dvmm stack against a scenario: drive virtual time, assert, verdict.
+    Test(TestArgs),
     /// Print a .dvmm artifact's manifest.json (reads ONLY the manifest member).
     Inspect(ArtifactArg),
     /// Verify a .dvmm: recompute member hashes vs the manifest; print its sha256 identity.
@@ -657,6 +688,30 @@ struct RunArgs {
 }
 
 #[derive(Args)]
+struct TestArgs {
+    /// Path to the .dvmm stack artifact.
+    #[arg(value_name = "stack.dvmm")]
+    artifact: String,
+    /// The scenario YAML (steps + assertions).
+    #[arg(long, value_name = "PATH")]
+    scenario: String,
+    /// Skip the default-ON member-hash verification on load.
+    #[arg(long)]
+    no_verify: bool,
+    /// JSONL run-log path (default `<artifact>.jsonl`).
+    #[arg(long, value_name = "PATH")]
+    jsonl: Option<String>,
+    /// JSON report path (default `<artifact>.report.json`).
+    #[arg(long, value_name = "PATH")]
+    report: Option<String>,
+    /// Wall-clock safety timeout (seconds); a run exceeding it fails with exit 2.
+    #[arg(long, value_name = "SECS", default_value_t = 600)]
+    wall_timeout: u64,
+    #[command(flatten)]
+    common: CommonRunFlags,
+}
+
+#[derive(Args)]
 struct ArtifactArg {
     /// Path to the .dvmm stack artifact.
     #[arg(value_name = "stack.dvmm")]
@@ -711,7 +766,7 @@ impl EffectiveConfig {
     /// Resolve for `dvmm boot`: no baked defaults; each knob is a flag override of
     /// the binary default.
     fn from_boot(f: &CommonRunFlags) -> Result<EffectiveConfig, Box<dyn std::error::Error>> {
-        Self::resolve(f, None)
+        Self::resolve(f, None, None)
     }
 
     /// Resolve for `dvmm run`: the artifact's baked run-defaults, each overridable
@@ -720,37 +775,51 @@ impl EffectiveConfig {
         f: &CommonRunFlags,
         baked: &artifact::RunDefaults,
     ) -> Result<EffectiveConfig, Box<dyn std::error::Error>> {
-        Self::resolve(f, Some(baked))
+        Self::resolve(f, Some(baked), None)
+    }
+
+    /// Resolve for `dvmm test`: baked run-defaults, overridable by the scenario's
+    /// `run:` block, overridable by CLI flags. Precedence: baked < scenario < flag.
+    fn from_test(
+        f: &CommonRunFlags,
+        baked: &artifact::RunDefaults,
+        scn: &scenario::ScenarioRun,
+    ) -> Result<EffectiveConfig, Box<dyn std::error::Error>> {
+        Self::resolve(f, Some(baked), Some(scn))
     }
 
     fn resolve(
         f: &CommonRunFlags,
         baked: Option<&artifact::RunDefaults>,
+        scn: Option<&scenario::ScenarioRun>,
     ) -> Result<EffectiveConfig, Box<dyn std::error::Error>> {
         let mut prov: Vec<String> = Vec::new();
 
-        // mem
-        let (mem_mib, mem_src) = match (f.mem, baked) {
-            (Some(v), _) => (v, "flag"),
-            (None, Some(b)) => (b.mem_mib, "baked"),
-            (None, None) => (DEFAULT_MEM_MIB, "default"),
+        // mem: flag > scenario > baked > default.
+        let (mem_mib, mem_src) = match (f.mem, scn.and_then(|s| s.mem), baked) {
+            (Some(v), _, _) => (v, "flag"),
+            (None, Some(v), _) => (v, "scenario"),
+            (None, None, Some(b)) => (b.mem_mib, "baked"),
+            (None, None, None) => (DEFAULT_MEM_MIB, "default"),
         };
         prov.push(format!("mem={mem_mib} ({mem_src})"));
 
         // cmdline
-        let (cmdline, cl_src) = match (&f.cmdline, baked) {
-            (Some(v), _) => (v.clone(), "flag"),
-            (None, Some(b)) => (b.cmdline.clone(), "baked"),
-            (None, None) => (DEFAULT_CMDLINE.to_string(), "default"),
+        let (cmdline, cl_src) = match (&f.cmdline, scn.and_then(|s| s.cmdline.as_ref()), baked) {
+            (Some(v), _, _) => (v.clone(), "flag"),
+            (None, Some(v), _) => (v.clone(), "scenario"),
+            (None, None, Some(b)) => (b.cmdline.clone(), "baked"),
+            (None, None, None) => (DEFAULT_CMDLINE.to_string(), "default"),
         };
         prov.push(format!("cmdline={cmdline:?} ({cl_src})"));
 
         // fast-forward
         let ff_explicit = f.ff.is_some();
-        let (fast_forward, ff_src) = match (f.ff, baked) {
-            (Some(v), _) => (v, "flag"),
-            (None, Some(b)) => (b.fast_forward, "baked"),
-            (None, None) => (true, "default"),
+        let (fast_forward, ff_src) = match (f.ff, scn.and_then(|s| s.ff), baked) {
+            (Some(v), _, _) => (v, "flag"),
+            (None, Some(v), _) => (v, "scenario"),
+            (None, None, Some(b)) => (b.fast_forward, "baked"),
+            (None, None, None) => (true, "default"),
         };
         prov.push(format!(
             "ff={} ({ff_src})",
@@ -758,13 +827,15 @@ impl EffectiveConfig {
         ));
 
         // max-virtual-time (horizon)
-        let (max_virtual_time_secs, mvt_disp, mvt_src) = match (&f.max_virtual_time, baked) {
-            (Some(s), _) => (Some(parse_dur(s)?), s.clone(), "flag"),
-            (None, Some(b)) => match &b.max_virtual_time {
+        let scn_mvt = scn.and_then(|s| s.max_virtual_time.as_ref());
+        let (max_virtual_time_secs, mvt_disp, mvt_src) = match (&f.max_virtual_time, scn_mvt, baked) {
+            (Some(s), _, _) => (Some(parse_dur(s)?), s.clone(), "flag"),
+            (None, Some(s), _) => (Some(parse_dur(s)?), s.clone(), "scenario"),
+            (None, None, Some(b)) => match &b.max_virtual_time {
                 Some(s) => (Some(parse_dur(s)?), s.clone(), "baked"),
                 None => (None, "unset".to_string(), "baked"),
             },
-            (None, None) => (None, "unset".to_string(), "default"),
+            (None, None, None) => (None, "unset".to_string(), "default"),
         };
         prov.push(format!("max-virtual-time={mvt_disp} ({mvt_src})"));
 
@@ -797,7 +868,8 @@ fn parse_dur(s: &str) -> Result<f64, Box<dyn std::error::Error>> {
 
 /// Parse a duration to seconds (f64). A bare number is seconds; suffixes `ms`,
 /// `s`, `m`, `h` are honored. Returns `None` on anything unparseable or <= 0.
-fn parse_duration_secs(s: &str) -> Option<f64> {
+/// Shared with `scenario.rs` for `at:` / `every:` / `timeout:` durations.
+pub(crate) fn parse_duration_secs(s: &str) -> Option<f64> {
     let s = s.trim();
     let (num, mult) = if let Some(v) = s.strip_suffix("ms") {
         (v, 0.001)
@@ -848,6 +920,7 @@ fn dispatch() -> Result<i32, Box<dyn std::error::Error>> {
     match cli.cmd {
         Cmd::Boot(args) => cmd_boot(args),
         Cmd::Run(args) => cmd_run(args),
+        Cmd::Test(args) => cmd_test(args),
         Cmd::Inspect(a) => cmd_inspect(&a.artifact),
         Cmd::Verify(a) => cmd_verify(&a.artifact),
         Cmd::DumpCpuid => {
@@ -871,8 +944,8 @@ fn cmd_boot(args: BootArgs) -> Result<i32, Box<dyn std::error::Error>> {
         args.kernel,
         args.initrd
     );
-    let stop = boot_and_run(&kernel, &initrd, &eff)?;
-    Ok(stop.exit_code())
+    let out = boot_and_run(&kernel, &initrd, &eff, None)?;
+    Ok(out.exit_code)
 }
 
 // ---- `dvmm run`: a .dvmm stack artifact (baked defaults + overrides) --------
@@ -903,8 +976,121 @@ fn cmd_run(args: RunArgs) -> Result<i32, Box<dyn std::error::Error>> {
         payload.manifest.project,
         payload.manifest.format_version,
     );
-    let stop = boot_and_run(&payload.kernel, &payload.initramfs, &eff)?;
-    Ok(stop.exit_code())
+    let out = boot_and_run(&payload.kernel, &payload.initramfs, &eff, None)?;
+    Ok(out.exit_code)
+}
+
+// ---- `dvmm test`: drive a .dvmm stack against a scenario (verdict) ----------
+
+/// Infrastructure-error exit code for `dvmm test` (the CI contract): 0 = all
+/// assertions passed, 1 = an assertion / readiness failure (from the scenario
+/// verdict), 2 = an infrastructure error (bad scenario, or a boot/bake/agent
+/// failure — the tool broke, not your stack).
+const EXIT_TEST_INFRA: i32 = 2;
+
+fn cmd_test(args: TestArgs) -> Result<i32, Box<dyn std::error::Error>> {
+    // Load the artifact (kernel + initramfs + compose.lock + manifest).
+    let payload = match artifact::read_for_run(&args.artifact) {
+        Ok(p) => p,
+        Err(e) => {
+            dlog!("[dvmm][test] infrastructure error: {e}");
+            return Ok(EXIT_TEST_INFRA);
+        }
+    };
+    if !args.no_verify {
+        if let Err(e) = verify_payload_or_bail(&args.artifact, &payload) {
+            dlog!("[dvmm][test] infrastructure error: {e}");
+            return Ok(EXIT_TEST_INFRA);
+        }
+    }
+
+    // STATIC validation (before boot; sub-second). Service names come from the
+    // artifact's compose.lock.yml; unknown keys / durations / regex / services
+    // fail loudly here.
+    let services = match scenario::service_names(&payload.compose_lock) {
+        Ok(s) => s,
+        Err(e) => {
+            dlog!("[dvmm][test] scenario rejected: {e}");
+            return Ok(EXIT_TEST_INFRA);
+        }
+    };
+    let scn = match scenario::Scenario::load_and_validate(&args.scenario, &services) {
+        Ok(s) => s,
+        Err(e) => {
+            dlog!("[dvmm][test] scenario rejected (static validation): {e}");
+            return Ok(EXIT_TEST_INFRA);
+        }
+    };
+
+    // Resolve the run config: baked < scenario.run < CLI flags. If no horizon was
+    // set anywhere, apply the scenario's implicit end-horizon (last step + slack)
+    // so a wedged run is bounded in virtual time.
+    let mut eff = EffectiveConfig::from_test(&args.common, &payload.manifest.run_defaults, &scn.run)?;
+    if eff.max_virtual_time_secs.is_none() {
+        let h = scn.implicit_horizon_secs();
+        eff.max_virtual_time_secs = Some(h);
+        dlog!(
+            "[dvmm][test] implicit end-horizon: {:.0}s of virtual time (last step + slack)",
+            h
+        );
+    }
+
+    let artifact_sha = artifact::file_sha256_hex(&args.artifact)?;
+    let jsonl_path = args
+        .jsonl
+        .clone()
+        .unwrap_or_else(|| format!("{}.jsonl", args.artifact));
+    let report_path = args
+        .report
+        .clone()
+        .unwrap_or_else(|| format!("{}.report.json", args.artifact));
+
+    dlog!(
+        "[dvmm][test] stack={} scenario={} ({} steps) artifact-sha256={}",
+        payload.manifest.stack,
+        scn.source_path,
+        scn.steps.len(),
+        &artifact_sha[..16],
+    );
+
+    let meta = scenario::RunMeta {
+        stack: payload.manifest.stack.clone(),
+        artifact_sha256: artifact_sha,
+        fast_forward: eff.fast_forward,
+        jsonl_path,
+        report_path,
+    };
+    let setup = ScenarioSetup { scenario: scn, meta };
+
+    // Wall-clock safety watchdog: a genuinely wedged guest that busy-loops (never
+    // HLTs) is bounded by the virtual-time horizon in seconds of wall time, but a
+    // hard hang (e.g. a stuck host ioctl) is caught here → exit 2. The JSONL is
+    // flushed per line, so a hard exit still leaves a complete partial log.
+    let wall_timeout = args.wall_timeout;
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let done = done.clone();
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now()
+                + std::time::Duration::from_secs(wall_timeout.max(1));
+            while std::time::Instant::now() < deadline {
+                if done.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            if !done.load(std::sync::atomic::Ordering::Relaxed) {
+                crate::log_line(format_args!(
+                    "[dvmm][test] WALL-CLOCK TIMEOUT after {wall_timeout}s — aborting (exit 2)"
+                ));
+                std::process::exit(EXIT_TEST_INFRA);
+            }
+        });
+    }
+
+    let out = boot_and_run(&payload.kernel, &payload.initramfs, &eff, Some(setup))?;
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
+    Ok(out.exit_code)
 }
 
 /// Recompute the run payload's member hashes and bail (error) on any mismatch —
@@ -1009,7 +1195,8 @@ fn boot_and_run(
     kernel: &[u8],
     initrd: &[u8],
     eff: &EffectiveConfig,
-) -> Result<StopReason, Box<dyn std::error::Error>> {
+    scenario: Option<ScenarioSetup>,
+) -> Result<RunOutcome, Box<dyn std::error::Error>> {
     let mem_size = eff.mem_mib * 1024 * 1024;
     let kvm = Kvm::new()?;
 
@@ -1119,6 +1306,7 @@ fn boot_and_run(
         eff.max_jump_secs,
         eff.max_virtual_time_secs,
         eff.metrics_out.clone(),
+        scenario,
     )
 }
 
@@ -1151,7 +1339,8 @@ fn run_user_backend(
     max_jump_secs: f64,
     max_virtual_time_secs: Option<f64>,
     metrics_out: Option<String>,
-) -> Result<StopReason, Box<dyn std::error::Error>> {
+    scenario_setup: Option<ScenarioSetup>,
+) -> Result<RunOutcome, Box<dyn std::error::Error>> {
     // The devices we now own, all on this thread. The LAPIC timer counts at the
     // core-crystal frequency the guest derives from CPUID 0x15 (which we pass
     // through). counts->TSC-cycles uses the EXACT CPUID-0x15 integer ratio
@@ -1176,6 +1365,16 @@ fn run_user_backend(
     // knows when to wake. No timer state lives outside it + the LAPIC.
     let mut events: events::EventQueue<TimerKind> = events::EventQueue::new();
     let mut parker = park::Parker::new()?;
+
+    // TEST-1a control channel: the 2nd 16550 (COM2 / ttyS1). Always present so the
+    // guest agent's ttyS1 always works; the scenario engine is what is optional.
+    let mut com2 = control::ControlChannel::new()?;
+    // The scenario engine (only for `dvmm test`). Built here so it has the virtual
+    // clock's frequency for its cycles<->duration math.
+    let mut engine: Option<scenario::ScenarioEngine> = match scenario_setup {
+        Some(s) => Some(scenario::ScenarioEngine::new(s.scenario, clock.freq(), s.meta)?),
+        None => None,
+    };
 
     // Fast-forward state (Step 4): the jump-cost/speedup accounting + the
     // single-jump sanity bound. `None` when FF is off (the 3b real-wait park).
@@ -1240,15 +1439,61 @@ fn run_user_backend(
         if fast_forward { "ON" } else { "OFF" }
     );
 
+    // Arm the scenario (records run_start + the agent-ready backstop deadline).
+    if let Some(e) = engine.as_mut() {
+        e.start(vtsc_start);
+    }
+
     loop {
-        // (1) Fire any due guest timer, then reconcile the queue to the LAPIC's
-        //     current armed deadline (there is at most one). Also carries the
-        //     virtual-time horizon; a fired StopRun (guest busy-looping past the
-        //     horizon without HLTing) stops the run here.
-        if service_timers(&mut lapic, &mut events, horizon_vtsc, clock.vtsc_now()) {
+        // (1) Fire any due guest timer + the horizon + the scenario deadline, then
+        //     reconcile the queue to the LAPIC's current armed deadline. A fired
+        //     StopRun stops the run; a fired ScenarioStep drives the engine (which
+        //     may deliver a command as a queue event — never a side channel).
+        let now = clock.vtsc_now();
+        let scn_deadline = engine.as_ref().and_then(|e| e.next_deadline());
+        let fired = service_timers(&mut lapic, &mut events, horizon_vtsc, scn_deadline, now);
+        if fired.horizon {
+            if let Some(e) = engine.as_mut() {
+                e.record_abort(now, "scenario did not complete before the virtual-time horizon");
+                stop_reason = StopReason::Scenario;
+                break;
+            }
             stop_reason = StopReason::Horizon;
             report_horizon(ff_state.as_ref(), start);
             break;
+        }
+        if fired.scenario {
+            if let Some(e) = engine.as_mut() {
+                let _ = e.on_due(now, &mut com2);
+                com2.pump(&mut lapic, &ioapic);
+                if e.is_finished() {
+                    stop_reason = StopReason::Scenario;
+                    break;
+                }
+            }
+        }
+
+        // (1b) Stream any in-flight command bytes to the guest, then drain the
+        //      agent's reply lines and feed them to the engine (advancing steps /
+        //      deciding the verdict). With no scenario, discard agent chatter to
+        //      keep the capture buffer bounded.
+        com2.pump(&mut lapic, &ioapic);
+        if let Some(e) = engine.as_mut() {
+            let mut finished = false;
+            while let Some(line) = com2.poll_line() {
+                let _ = e.on_reply(&line, clock.vtsc_now(), &mut com2);
+                com2.pump(&mut lapic, &ioapic);
+                if e.is_finished() {
+                    finished = true;
+                    break;
+                }
+            }
+            if finished {
+                stop_reason = StopReason::Scenario;
+                break;
+            }
+        } else {
+            while com2.poll_line().is_some() {}
         }
 
         // (2) Sync task priority from the guest's CR8 (mov %cr8 path).
@@ -1300,6 +1545,11 @@ fn run_user_backend(
                     if serial_drain.drain().is_ok() {
                         raise_irq(&mut lapic, &ioapic, arch::SERIAL_IRQ);
                     }
+                } else if control::ControlChannel::handles(port) {
+                    // COM2 / ttyS1 — the control channel (agent TX = its replies).
+                    for &b in data {
+                        com2.pio_write(port, b, &mut lapic, &ioapic);
+                    }
                 } else if PitStub::handles(port) {
                     for &b in data {
                         pit.write(port, b);
@@ -1321,6 +1571,12 @@ fn run_user_backend(
                     drop(s);
                     if serial_drain.drain().is_ok() {
                         raise_irq(&mut lapic, &ioapic, arch::SERIAL_IRQ);
+                    }
+                } else if control::ControlChannel::handles(port) {
+                    // COM2 / ttyS1 — the agent reading a command (RBR) or a status
+                    // register. Draining the RX FIFO here frees room for `pump`.
+                    for b in data.iter_mut() {
+                        *b = com2.pio_read(port, &mut lapic, &ioapic);
                     }
                 } else if PitStub::handles(port) {
                     for b in data.iter_mut() {
@@ -1413,11 +1669,28 @@ fn run_user_backend(
                     &vcpu,
                     horizon_vtsc,
                     ff_state.as_mut(),
+                    &mut com2,
+                    engine.as_mut(),
                 )?;
-                if let ParkOutcome::Horizon = outcome {
-                    stop_reason = StopReason::Horizon;
-                    report_horizon(ff_state.as_ref(), start);
-                    break;
+                match outcome {
+                    ParkOutcome::Horizon => {
+                        if let Some(e) = engine.as_mut() {
+                            e.record_abort(
+                                clock.vtsc_now(),
+                                "scenario did not complete before the virtual-time horizon",
+                            );
+                            stop_reason = StopReason::Scenario;
+                            break;
+                        }
+                        stop_reason = StopReason::Horizon;
+                        report_horizon(ff_state.as_ref(), start);
+                        break;
+                    }
+                    ParkOutcome::ScenarioDone => {
+                        stop_reason = StopReason::Scenario;
+                        break;
+                    }
+                    ParkOutcome::Deliverable => {}
                 }
             }
             VcpuExit::Shutdown => {
@@ -1513,7 +1786,44 @@ fn run_user_backend(
             ),
         );
     }
-    Ok(stop_reason)
+
+    // TEST-1a: finalize the scenario — emit ff_stats + run_end to the JSONL,
+    // write the JSON report, print the human summary, and return the verdict's
+    // exit code (0 pass / 1 assertion fail / 2 infra). If the guest died before
+    // the scenario finished, that is an infrastructure error (exit 2).
+    if let Some(mut e) = engine {
+        let now = clock.vtsc_now();
+        if !e.is_finished() {
+            let reason = match stop_reason {
+                StopReason::GuestShutdown | StopReason::GuestSystemEvent | StopReason::GuestHalt => {
+                    "guest stopped before the scenario completed"
+                }
+                StopReason::Horizon => "scenario did not complete before the virtual-time horizon",
+                _ => "run ended before the scenario reached a verdict",
+            };
+            e.record_abort(now, reason);
+        }
+        let ff_sum = ff_state
+            .as_ref()
+            .map(|ff| scenario::FfSummary {
+                jumps: ff.jumps,
+                virtual_seconds: ff.virtual_secs_since(vtsc_start, now),
+                speedup: ff.virtual_secs_since(vtsc_start, now) / secs.max(1e-9),
+                per_hop_mean_us: ff.mean_hop_ns() as f64 / 1000.0,
+                max_delta_s: ff.max_delta_secs(),
+            })
+            .unwrap_or_default();
+        let code = e.finalize(&ff_sum, secs, now);
+        return Ok(RunOutcome {
+            stop: stop_reason,
+            exit_code: code,
+        });
+    }
+
+    Ok(RunOutcome {
+        stop: stop_reason,
+        exit_code: stop_reason.exit_code(),
+    })
 }
 
 /// Print the `--max-virtual-time` diagnostic dump at a horizon stop: total jump
@@ -1544,14 +1854,22 @@ fn report_horizon(ff: Option<&FfState>, start: std::time::Instant) {
 /// of `events.rs`: every guest timer — and the `--max-virtual-time` horizon — is
 /// a `(vtsc, event)` entry, and Step 4 drains the same queue after a time-jump.
 ///
-/// Returns `true` iff the horizon's `StopRun` event fired (vtsc reached the
-/// budget), i.e. the run should stop.
+/// Which special (non-LAPIC) queue events fired this drain. `horizon` = the
+/// `--max-virtual-time` StopRun; `scenario` = a `(vtsc, ScenarioStep)` deadline
+/// (TEST-1a) — the caller then drives the scenario engine.
+#[derive(Default, Clone, Copy)]
+struct Fired {
+    horizon: bool,
+    scenario: bool,
+}
+
 fn service_timers(
     lapic: &mut Lapic,
     events: &mut events::EventQueue<TimerKind>,
     horizon: Option<u64>,
+    scenario: Option<u64>,
     now: u64,
-) -> bool {
+) -> Fired {
     events.clear();
     if let Some(dl) = lapic.timer_deadline() {
         events.push(dl, TimerKind::LapicDeadline);
@@ -1559,7 +1877,10 @@ fn service_timers(
     if let Some(h) = horizon {
         events.push(h, TimerKind::StopRun);
     }
-    let mut horizon_reached = false;
+    if let Some(sd) = scenario {
+        events.push(sd, TimerKind::ScenarioStep);
+    }
+    let mut fired = Fired::default();
     while let Some(ev) = events.pop_due(now) {
         // Queue-discipline assertion (gate 5): an event is only ever serviced at
         // or after its scheduled vtsc — never before. Always-on (release too).
@@ -1574,18 +1895,23 @@ fn service_timers(
                 lapic.fire_timer_if_due(now);
             }
             TimerKind::StopRun => {
-                horizon_reached = true;
+                fired.horizon = true;
+            }
+            TimerKind::ScenarioStep => {
+                fired.scenario = true;
             }
         }
     }
-    horizon_reached
+    fired
 }
 
-/// How a park returned: either an interrupt became deliverable (wake the guest)
-/// or the `--max-virtual-time` horizon fired inside the park (stop the run).
+/// How a park returned: an interrupt became deliverable (wake the guest), the
+/// `--max-virtual-time` horizon fired (stop), or the scenario reached its verdict
+/// while parked (TEST-1a — stop).
 enum ParkOutcome {
     Deliverable,
     Horizon,
+    ScenarioDone,
 }
 
 /// Idle park: the guest HLTed, so make it wait until an interrupt becomes
@@ -1608,15 +1934,42 @@ fn park_until_deliverable(
     vcpu: &VcpuFd,
     horizon: Option<u64>,
     ff: Option<&mut FfState>,
+    com2: &mut control::ControlChannel,
+    engine: Option<&mut scenario::ScenarioEngine>,
 ) -> Result<ParkOutcome, Box<dyn std::error::Error>> {
     match ff {
         Some(ff) => fast_forward_until_deliverable(
-            lapic, ioapic, events, serial, serial_drain, parker, clock, vcpu, horizon, ff,
+            lapic, ioapic, events, serial, serial_drain, parker, clock, vcpu, horizon, ff, com2,
+            engine,
         ),
         None => real_wait_until_deliverable(
-            lapic, ioapic, events, serial, serial_drain, parker, clock, horizon,
+            lapic, ioapic, events, serial, serial_drain, parker, clock, horizon, com2, engine,
         ),
     }
+}
+
+/// Handle a scenario deadline that fired inside the park: drive the engine (which
+/// may deliver a command — raising IRQ3 makes an interrupt deliverable, so the
+/// park then returns `Deliverable` via its usual check) and report if the run is
+/// now decided. `Some(ScenarioDone)` means the caller must stop.
+fn park_scenario_fired(
+    fired: Fired,
+    now: u64,
+    lapic: &mut Lapic,
+    ioapic: &Ioapic,
+    com2: &mut control::ControlChannel,
+    engine: &mut Option<&mut scenario::ScenarioEngine>,
+) -> Option<ParkOutcome> {
+    if fired.scenario {
+        if let Some(e) = engine.as_deref_mut() {
+            let _ = e.on_due(now, com2);
+            com2.pump(lapic, ioapic);
+            if e.is_finished() {
+                return Some(ParkOutcome::ScenarioDone);
+            }
+        }
+    }
+    None
 }
 
 /// FF OFF: the 3b real-wait park — sleep in `ppoll` on a `timerfd` + stdin until
@@ -1633,11 +1986,18 @@ fn real_wait_until_deliverable(
     parker: &mut park::Parker,
     clock: &VirtualClock,
     horizon: Option<u64>,
+    com2: &mut control::ControlChannel,
+    mut engine: Option<&mut scenario::ScenarioEngine>,
 ) -> Result<ParkOutcome, Box<dyn std::error::Error>> {
     loop {
         let now = clock.vtsc_now();
-        if service_timers(lapic, events, horizon, now) {
+        let scn_deadline = engine.as_deref().and_then(|e| e.next_deadline());
+        let fired = service_timers(lapic, events, horizon, scn_deadline, now);
+        if fired.horizon {
             return Ok(ParkOutcome::Horizon);
+        }
+        if let Some(o) = park_scenario_fired(fired, now, lapic, ioapic, com2, &mut engine) {
+            return Ok(o);
         }
         if lapic.deliverable_vector().is_some() {
             return Ok(ParkOutcome::Deliverable);
@@ -1676,6 +2036,8 @@ fn fast_forward_until_deliverable(
     vcpu: &VcpuFd,
     horizon: Option<u64>,
     ff: &mut FfState,
+    com2: &mut control::ControlChannel,
+    mut engine: Option<&mut scenario::ScenarioEngine>,
 ) -> Result<ParkOutcome, Box<dyn std::error::Error>> {
     loop {
         // stdin precedence: service any pending console input up-front, without
@@ -1684,11 +2046,18 @@ fn fast_forward_until_deliverable(
             service_console_input(parker, serial, serial_drain, lapic, ioapic);
         }
 
-        // Fire any due timers + the horizon, reconcile the queue to the LAPIC's
-        // armed deadline (and the horizon StopRun entry).
+        // Fire any due timers + the horizon + the scenario deadline, reconcile the
+        // queue to the LAPIC's armed deadline. A scenario deadline that fires here
+        // may deliver a command (raising IRQ3), which the deliverable check below
+        // then catches — so a jumped-to `at:` wakes the agent exactly on time.
         let now = clock.vtsc_now();
-        if service_timers(lapic, events, horizon, now) {
+        let scn_deadline = engine.as_deref().and_then(|e| e.next_deadline());
+        let fired = service_timers(lapic, events, horizon, scn_deadline, now);
+        if fired.horizon {
             return Ok(ParkOutcome::Horizon);
+        }
+        if let Some(o) = park_scenario_fired(fired, now, lapic, ioapic, com2, &mut engine) {
+            return Ok(o);
         }
         if lapic.deliverable_vector().is_some() {
             return Ok(ParkOutcome::Deliverable); // unchanged 3b wake path.
@@ -1787,8 +2156,9 @@ fn service_console_input(
 }
 
 /// Post an ISA IRQ line edge into the LAPIC via the IOAPIC RTE (masked/level
-/// entries deliver nothing). Runs on the vCPU thread, at a loop boundary.
-fn raise_irq(lapic: &mut Lapic, ioapic: &Ioapic, irq: u32) {
+/// entries deliver nothing). Runs on the vCPU thread, at a loop boundary. Used by
+/// the COM1 serial path here and the COM2 control channel (`control.rs`).
+pub(crate) fn raise_irq(lapic: &mut Lapic, ioapic: &Ioapic, irq: u32) {
     let pin = isa_irq_to_ioapic_pin(irq as u8) as usize;
     if let Some(vector) = ioapic.edge_vector(pin) {
         lapic.raise(vector);
@@ -2101,10 +2471,22 @@ mod tests {
         let mut lapic = Lapic::new(clock, 160, 2);
         let mut events: events::EventQueue<TimerKind> = events::EventQueue::new();
         let horizon = Some(10_000u64);
-        assert!(!service_timers(&mut lapic, &mut events, horizon, 9_999));
-        assert!(service_timers(&mut lapic, &mut events, horizon, 10_000)); // == fires
-        assert!(service_timers(&mut lapic, &mut events, horizon, 10_001)); // past fires
+        assert!(!service_timers(&mut lapic, &mut events, horizon, None, 9_999).horizon);
+        assert!(service_timers(&mut lapic, &mut events, horizon, None, 10_000).horizon); // == fires
+        assert!(service_timers(&mut lapic, &mut events, horizon, None, 10_001).horizon); // past
         // No horizon set -> never a horizon stop.
-        assert!(!service_timers(&mut lapic, &mut events, None, u64::MAX));
+        assert!(!service_timers(&mut lapic, &mut events, None, None, u64::MAX).horizon);
+    }
+
+    #[test]
+    fn service_timers_fires_scenario_step_as_a_queue_event() {
+        // TEST-1a: a scenario deadline fires through the SAME queue as the horizon.
+        let clock = VirtualClock::new(0, vtsc::TscFrequency::from_hz(1_000_000_000));
+        let mut lapic = Lapic::new(clock, 160, 2);
+        let mut events: events::EventQueue<TimerKind> = events::EventQueue::new();
+        let scn = Some(5_000u64);
+        assert!(!service_timers(&mut lapic, &mut events, None, scn, 4_999).scenario);
+        let f = service_timers(&mut lapic, &mut events, None, scn, 5_000);
+        assert!(f.scenario && !f.horizon);
     }
 }

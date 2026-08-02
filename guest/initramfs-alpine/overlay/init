@@ -44,6 +44,7 @@ if [ ! -f /.on-tmpfs-root ]; then
   $BB mknod "$NEW/dev/console" c 5 1  2>/dev/null
   $BB mknod "$NEW/dev/null"    c 1 3  2>/dev/null
   $BB mknod "$NEW/dev/ttyS0"   c 4 64 2>/dev/null
+  $BB mknod "$NEW/dev/ttyS1"   c 4 65 2>/dev/null
   : > "$NEW/.on-tmpfs-root"
 
   $BB umount /proc 2>/dev/null
@@ -102,6 +103,20 @@ echo
 echo "DVMM_ALPINE_BOOT_OK reached userspace"
 echo "kernel: $(uname -sr)   date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 echo
+
+# TEST-1a control-channel agent: a static Go binary that BLOCKS reading /dev/ttyS1
+# (COM2). A blocked read arms no timer -> no wakes -> fast-forward-transparent. It
+# runs OUTSIDE the containers and services `dvmm test` control commands (exec /
+# container census via podman). Started in the background so it survives the
+# `exec` into compose-up.sh below. Skipped with `dvmm.noagent=1` (the A/B knob for
+# the FF-transparency gate). podman need not be up yet; the agent reports
+# "no_container" and the host wait_for retries.
+if ! grep -q 'dvmm.noagent=1' /proc/cmdline 2>/dev/null; then
+  if [ -x /usr/local/bin/dvmm-agent ] && [ -c /dev/ttyS1 ]; then
+    echo "[init] starting dvmm-agent on /dev/ttyS1 (control channel)"
+    /usr/local/bin/dvmm-agent >/tmp/dvmm-agent.log 2>&1 &
+  fi
+fi
 
 # Stack mode (Phase 2a): launch the baked docker-compose stack via the generic
 # compose path (never powers off; the host acceptance test watches serial and

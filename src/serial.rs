@@ -75,6 +75,46 @@ pub fn new_serial() -> std::io::Result<(SharedSerial, EventFdTrigger)> {
     Ok((Arc::new(Mutex::new(serial)), drain_handle))
 }
 
+/// A `Write` sink that captures a UART's guest-TX bytes into a shared buffer
+/// instead of the host terminal. This is how the TEST-1a **control channel**
+/// (COM2 / ttyS1) reads the guest agent's line-delimited JSON replies: the guest
+/// writes them to ttyS1 (THR PIO), `vm-superio` calls this writer, and the
+/// scenario harness drains complete lines from the buffer. Single-threaded on the
+/// vCPU thread; the `Arc<Mutex<..>>` mirrors the COM1 handle shape and is cheap
+/// (tiny traffic).
+pub struct ControlSink {
+    buf: Arc<Mutex<Vec<u8>>>,
+}
+impl ControlSink {
+    pub fn new(buf: Arc<Mutex<Vec<u8>>>) -> Self {
+        Self { buf }
+    }
+}
+impl Write for ControlSink {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        self.buf.lock().unwrap().extend_from_slice(data);
+        Ok(data.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The COM2 UART type: a `vm-superio` 16550 whose TX is captured (not printed).
+pub type ControlSerial = Serial<EventFdTrigger, NoEvents, ControlSink>;
+
+/// Build the control-channel UART (COM2 / ttyS1). Returns the UART, a clone of
+/// its interrupt eventfd (drained on the vCPU thread to convert into IRQ3), and
+/// the shared TX-capture buffer the harness reads replies from.
+pub fn new_control_serial(
+) -> std::io::Result<(ControlSerial, EventFdTrigger, Arc<Mutex<Vec<u8>>>)> {
+    let trigger = EventFdTrigger::new()?;
+    let drain = trigger.try_clone()?;
+    let buf = Arc::new(Mutex::new(Vec::new()));
+    let serial = Serial::new(trigger, ControlSink::new(buf.clone()));
+    Ok((serial, drain, buf))
+}
+
 /// Restores terminal settings on drop; puts the tty in raw mode so guest
 /// keystrokes pass through unmodified (no host echo/canonical processing).
 pub struct RawTerminal {

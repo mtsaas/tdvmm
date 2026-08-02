@@ -42,7 +42,7 @@ plain docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b
 
 # >>> GENERATED PROVENANCE (rewritten by prebake_images.sh on each bake) >>>
 # podman-version: 5.8.3
-# baked-at: 2026-08-02T05:14:07Z  (informational only; NOT a repro anchor -- see NOTES)
+# baked-at: 2026-08-02T08:47:29Z  (informational only; NOT a repro anchor -- see NOTES)
 #
 # busybox   policy=plain   squashed=no   guest-ref=docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616
 #   upstream=docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616  (content identity = upstream digest)

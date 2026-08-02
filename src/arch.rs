@@ -41,9 +41,21 @@ pub const KVM_TSS_ADDRESS: u64 = 0xfffb_d000;
 /// fits entirely below this, so guest memory is a single contiguous region.
 pub const MMIO_MEM_START: u64 = 0xc000_0000;
 
-/// Legacy 16550 UART base port and its ISA IRQ line.
+/// Legacy 16550 UART base port and its ISA IRQ line (COM1 / ttyS0 — the console).
 pub const SERIAL_PORT_BASE: u16 = 0x3f8;
 pub const SERIAL_IRQ: u32 = 4;
+
+/// The second 16550 UART (COM2 / ttyS1) — the TEST-1a modeled control channel.
+/// Standard PC wiring: base port 0x2f8, ISA IRQ3. The guest `dvmm-agent` blocks
+/// reading ttyS1 (a blocked read = no wakes = fast-forward-transparent); the VMM
+/// delivers control commands here as scheduled queue events and reads the agent's
+/// line-delimited JSON replies. IRQ3 is already identity-routed to IO-APIC pin 3
+/// by the MP table (see `mptable::isa_irq_to_ioapic_pin`), so no routing change is
+/// needed. The guest kernel must expose ttyS1: the pinned kernel gains
+/// `CONFIG_SERIAL_8250_NR_UARTS=2` / `RUNTIME_UARTS=2` (see
+/// `guest/kernel/test1a-com2.config`).
+pub const SERIAL2_PORT_BASE: u16 = 0x2f8;
+pub const SERIAL2_IRQ: u32 = 3;
 
 /// POST diagnostic port (checkpoint codes). We silently swallow writes here so
 /// early-boot BIOS-style probing does not fault out.
