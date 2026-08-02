@@ -1,0 +1,8 @@
+# x86_64-unknown-linux-musl ONLY (Move 1: single static binary distribution —
+# Fable-approved). Links via rust-lld with self-contained CRT objects instead of
+# the default `cc` driver, so producing the static `dvmm` release binary needs no
+# host C toolchain — the same linker strategy the pinned-container `dvmm-agent`
+# build already uses (see `build_agent()` in src/build.rs). Scoped to this one
+# target triple only: the default (gnu) `cargo build --release` is unaffected.
+[target.x86_64-unknown-linux-musl]
+rustflags = ["-C", "linker=rust-lld", "-C", "link-self-contained=yes"]
