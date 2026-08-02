@@ -57,6 +57,7 @@ mod regs;
 mod scenario;
 mod serial;
 mod telemetry;
+mod ui;
 mod util;
 mod vtsc;
 
@@ -221,6 +222,7 @@ fn main() {
 /// Parse the CLI and dispatch to a subcommand handler.
 fn dispatch() -> Result<i32, Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+    let no_progress = cli.no_progress;
     match cli.cmd {
         Cmd::Build(args) => build::cmd_build(build::BuildArgs {
             compose: args.compose,
@@ -232,6 +234,7 @@ fn dispatch() -> Result<i32, Box<dyn std::error::Error>> {
             validate_only: args.validate_only,
             no_cache: args.no_cache,
             cache_dir: args.cache_dir,
+            no_progress,
         }),
         Cmd::BuildAgent(args) => build::cmd_build_agent(&args.out),
         Cmd::BuildKernel(args) => build::cmd_build_kernel(build::BuildKernelArgs {

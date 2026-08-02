@@ -46,3 +46,50 @@ pub fn unshare(conf: &Path) -> Command {
     c.env("CONTAINERS_CONF", conf).arg("unshare");
     c
 }
+
+/// How a child's stdout/stderr are handled (Fable CLI-UX ruling). `Inherit`
+/// streams live — today's behavior everywhere, and the ONLY mode ever used
+/// outside `dvmm build`'s orchestrator. `CaptureOnFailure` buffers both
+/// streams and discards them on success; on failure the full captured bytes
+/// are folded into the returned error message (never swallowed). The BUILD
+/// ORCHESTRATOR picks the mode (from whether its progress bar is active) —
+/// this module stays UI-free: it never touches a progress bar, and it never
+/// decides which mode to use.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum OutputMode {
+    Inherit,
+    CaptureOnFailure,
+}
+
+/// Run a command for its side effect, per `mode`. Every run-time path
+/// (`run`/`test`/`boot`/…) never calls this with anything but `Inherit` — in
+/// fact it never calls this at all; it is exclusively a `dvmm build` helper.
+pub fn run(cmd: &mut Command, mode: OutputMode) -> Result<(), String> {
+    match mode {
+        OutputMode::Inherit => {
+            let status = cmd
+                .status()
+                .map_err(|e| format!("spawn {:?}: {e}", cmd.get_program()))?;
+            if !status.success() {
+                return Err(format!("command {:?} failed ({status})", cmd.get_program()));
+            }
+            Ok(())
+        }
+        OutputMode::CaptureOnFailure => {
+            let out = cmd
+                .output()
+                .map_err(|e| format!("spawn {:?}: {e}", cmd.get_program()))?;
+            if !out.status.success() {
+                let mut msg = format!(
+                    "command {:?} failed ({}); captured output:\n",
+                    cmd.get_program(),
+                    out.status
+                );
+                msg.push_str(&String::from_utf8_lossy(&out.stdout));
+                msg.push_str(&String::from_utf8_lossy(&out.stderr));
+                return Err(msg);
+            }
+            Ok(())
+        }
+    }
+}

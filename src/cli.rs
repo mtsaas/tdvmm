@@ -25,16 +25,26 @@ use crate::{DEFAULT_CMDLINE, DEFAULT_MAX_JUMP_SECS, DEFAULT_MEM_MIB};
                   the low-level raw kernel+initramfs verb for VMM development.\n\n\
                   Durations (--max-virtual-time): a bare number is seconds, or use a \
                   suffix (ms, s, m, h), e.g. 500ms, 30s, 5m, 2h.",
+    after_help = "Examples:\n  \
+                  dvmm build guest/stacks/dogfood/compose.yml\n  \
+                  dvmm run guest/stacks/dogfood/dogfood.dvmm\n  \
+                  dvmm test dogfood.dvmm --scenario guest/stacks/dogfood/dogfood.yml",
     version
 )]
 pub(crate) struct Cli {
     #[command(subcommand)]
     pub(crate) cmd: Cmd,
+    /// Disable the `dvmm build` progress spinner; emit plain `== step ==`
+    /// lines (also forced by a non-terminal stderr, `CI`, or `TERM=dumb`). No
+    /// effect on any other subcommand.
+    #[arg(long, global = true)]
+    pub(crate) no_progress: bool,
 }
 
 #[derive(Subcommand)]
 pub(crate) enum Cmd {
     /// Bake a compose stack into a self-contained .dvmm (host tool: podman + network).
+    #[command(after_help = "Example:\n  dvmm build guest/stacks/dogfood/compose.yml -o dogfood.dvmm")]
     Build(BuildCliArgs),
     /// Build the reproducible static-musl dvmm-agent standalone (pinned builder
     /// container). Prints `<sha256>  <path>`. Used by the size / double-build gates.
@@ -48,8 +58,19 @@ pub(crate) enum Cmd {
     /// Boot a raw kernel + initramfs (the low-level VMM-dev / smoke verb).
     Boot(BootArgs),
     /// Run a .dvmm stack artifact: apply its baked run-defaults, then boot (offline).
+    #[command(after_help = "Example:\n  dvmm run dogfood.dvmm --ff on")]
     Run(RunArgs),
     /// Test a .dvmm stack against a scenario: drive virtual time, assert, verdict.
+    #[command(
+        long_about = "Test a .dvmm stack against a scenario: drive virtual time, assert, \
+                      verdict.\n\nExit codes (the shared dvmm 0-3 contract; `test` itself only \
+                      ever produces 0/1/2 — 3 is `build`/`boot`/`run`'s REJECTED/horizon code):\n  \
+                      0  PASS — every assertion held\n  \
+                      1  FAIL — a scenario assertion failed\n  \
+                      2  ERROR — test infrastructure fault: bad/rejected scenario (including \
+                      static validation before boot), agent unreachable, wall-clock timeout, ...",
+        after_help = "Example:\n  dvmm test dogfood.dvmm --scenario guest/stacks/dogfood/dogfood.yml"
+    )]
     Test(TestArgs),
     /// Print a .dvmm artifact's manifest.json (reads ONLY the manifest member).
     Inspect(ArtifactArg),
@@ -139,6 +160,7 @@ pub(crate) struct BuildKernelArgs {
 /// binary defaults; on `run` a `None` means "use the artifact's baked default"
 /// and `Some` means the flag overrides it (baked < flag, Fable-locked).
 #[derive(Args, Clone)]
+#[command(next_help_heading = "run options")]
 pub(crate) struct CommonRunFlags {
     /// Guest RAM in MiB.
     #[arg(long, value_name = "MiB")]
@@ -150,7 +172,7 @@ pub(crate) struct CommonRunFlags {
     #[arg(long, value_parser = parse_onoff, value_name = "on|off")]
     ff: Option<bool>,
     /// Single-jump sanity bound (seconds); a larger jump aborts the run.
-    #[arg(long, value_name = "N")]
+    #[arg(long, value_name = "SECS")]
     max_jump_secs: Option<f64>,
     /// Virtual-time horizon (duration); stop with exit 3 when reached.
     #[arg(long, value_name = "DUR")]
