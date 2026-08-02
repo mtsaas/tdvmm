@@ -1,0 +1,67 @@
+# deterministic-vmm Phase-2b CORPUS stack #1: WEBSTACK
+#
+# A realistic "web/api + cache + relational db" shape that exercises SEVERAL
+# supported-subset features TOGETHER:
+#   - THREE services on a private compose network (netavark + aardvark DNS);
+#   - TWO independent `depends_on: {condition: service_healthy}` gates: the api
+#     starts ONLY after BOTH postgres AND redis report healthy. Container
+#     healthchecks are resolved by the guest-side healthcheck ticker (no systemd);
+#   - a build: context (the api is built HOST-SIDE at bake time from a
+#     digest-pinned Alpine base; nothing is built in the guest);
+#   - service-name DNS to TWO backends (the api reaches `postgres` and `redis`
+#     by name over the compose network);
+#   - closed world: every image is digest-pinned / built host-side and baked; the
+#     guest runs --pull=never with no runtime egress.
+#
+# Knobs (INTERVAL_SECONDS / MAX_ROWS) use ${VAR:-default} interpolation so the
+# committed lockfile stays deterministic while the corpus runner overrides cadence
+# + cap via the kernel cmdline (dvmm.interval= / dvmm.maxrows=).
+
+services:
+  postgres:
+    # Pinned by digest (= postgres 16.14-alpine); the SAME digest the dogfood /
+    # go-ab stacks use, so it is already a proven closed-world pin.
+    image: docker.io/library/postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+    environment:
+      POSTGRES_HOST_AUTH_METHOD: trust
+      POSTGRES_DB: appdb
+    shm_size: 256m
+    volumes:
+      - ./schema.sql:/docker-entrypoint-initdb.d/10-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d appdb"]
+      interval: 2s
+      timeout: 3s
+      retries: 5
+      start_period: 60s
+
+  redis:
+    # Pinned by digest (= redis 7-alpine). A real cache service; the redis image
+    # ships redis-cli, so its healthcheck is the canonical `redis-cli ping`.
+    image: docker.io/library/redis@sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  api:
+    # A build: context (built host-side at bake time). image: names the built
+    # result that bake-stack pins by digest into compose.lock.yml.
+    build:
+      context: ./api
+      dockerfile: Containerfile
+    image: localhost/dvmm-webstack-api:corpus
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      INTERVAL_SECONDS: "${DVMM_INTERVAL:-3600}"
+      MAX_ROWS: "${DVMM_MAXROWS:-1000}"
+      PGHOST: postgres
+      PGUSER: postgres
+      PGDATABASE: appdb
+      REDIS_HOST: redis

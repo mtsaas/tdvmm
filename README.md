@@ -206,6 +206,57 @@ guest/bake-stack.sh guest/stacks/rwbind/compose.yml        # rw bind + named vol
 scripts/smoke_test_binds.sh                                # writes land; runs under FF
 ```
 
+## Phase 2b (corpus) — real-world-shaped stacks that exercise features together
+
+The earlier 2b stacks each prove ONE feature in isolation. The **corpus** proves the
+supported subset holds up on **realistic, multi-feature compose files** — the kind a
+real project would write. Three stacks (`guest/stacks/`), each closed-world (images
+digest-pinned or built host-side and baked) and fast-forwardable, run through a single
+runner: **`scripts/corpus_test.sh`** (bakes each if needed, boots it under FF with a
+virtual-time horizon + `--metrics-out`, then asserts functional correctness + health
+gating order + the per-hop ≤500 µs mean gate).
+
+- **`webstack`** — a web/api + **redis** + **postgres** shape. The `api` (a `build:`
+  context) starts only after **BOTH** `postgres` and `redis` report healthy (two
+  `depends_on: {condition: service_healthy}` gates, resolved by the guest healthcheck
+  ticker), then reaches both backends **by name** (inserts to postgres, bumps a redis
+  counter). Exercises: multi-service, dual health gates, a build context, service-name
+  DNS to two backends.
+- **`configpipeline`** — a `build:` context worker + a busybox sidecar. Exercises a
+  relative **read-write** config bind (`./config` materialized + written back), a
+  **named volume SHARED across both services** (the worker publishes, the sidecar reads
+  it back), and a service-started `depends_on`.
+- **`svcchain`** — a 3-tier **health-gated chain** `db → backend → frontend`. The
+  `backend` (postgres image, entrypoint overridden via a relative **read-only** bind)
+  waits for `db` healthy, connects, then flips its **own** healthcheck healthy, which
+  unblocks the `frontend`. Proves gated ordering propagates across **two hops**.
+
+```sh
+scripts/corpus_test.sh                 # bake (if needed) + run all three under FF
+BAKE=1 scripts/corpus_test.sh webstack # force a re-bake of one stack
+```
+
+All three fast-forward at hundreds of × with a per-hop mean well under the 500 µs gate
+(the same VMM property the dogfood/go-ab comparison measures); the numbers are a stack
+property, the ≤500 µs mean is the hard VMM gate.
+
+## Interactive-console polish
+
+Two cosmetic fixes make an interactive `run.sh` session read cleanly, **without**
+touching the guest byte stream or any time behavior (both keyed only off the existing
+isatty signal, never off wall-clock):
+
+- **Log lines align to column 0.** At an interactive console the tty is in raw mode
+  (the guest owns the byte stream, so the terminal's `\n`→CRLF translation is off). dvmm
+  now terminates its **own** log lines (startup, telemetry, WARN, horizon diagnostic)
+  with `\r\n` and a leading `\r` when raw mode is active, so they no longer staircase.
+  In non-tty/harness runs nothing changes (plain `\n`).
+- **Quiet interactive telemetry.** The periodic HLT-rate / fast-forward rollup (a
+  perf metric) is suppressed in an interactive session (tty + no `--metrics-out` and no
+  `--max-virtual-time`), so it stops interrupting the prompt every ~15 s. It is still
+  emitted for every harness path (non-tty, `--metrics-out`, or a horizon set) and the
+  on-stop summary + metrics file are unaffected.
+
 ## What it does
 
 - 1 vCPU, 64-bit long mode, direct kernel boot (loads an ELF `vmlinux`).

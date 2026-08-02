@@ -1,0 +1,213 @@
+#!/usr/bin/env bash
+# deterministic-vmm Phase-2b CORPUS runner (PERMANENT tooling).
+#
+# Proves the supported compose subset on a set of realistic, real-world-shaped
+# stacks -- each exercising SEVERAL features together (multi-service, health
+# gating, build: contexts, ro/rw binds, named volumes, service-name DNS), all
+# closed-world and fast-forwardable. For every corpus stack it:
+#
+#   1. BAKES it (bake-stack.sh) if the initramfs is missing or BAKE=1;
+#   2. BOOTS it under fast-forward with a virtual-time horizon + --metrics-out
+#      (the VMM stops ITSELF at the horizon, flushing metrics -- never a SIGTERM);
+#   3. asserts FUNCTIONAL CORRECTNESS from the serial markers (services come up;
+#      where present, health gating orders correctly -- the dependent starts only
+#      AFTER its gate is healthy, checked against compose's own ordered stream);
+#   4. asserts the VMM per-hop <=500us MEAN gate from the metrics file.
+#
+# Exits 0 only if every stack passes every gate.
+#
+# Usage: scripts/corpus_test.sh [stack ...]      (default: webstack configpipeline svcchain)
+# Env:   BAKE=1 (force re-bake)  INTERVAL(60) MAX_ROWS(1000) MEM(3072)
+#        TARGET_ROWS(4)  HC_TICK(2)  GATE_HOP_US(500)  WALL_TIMEOUT(300)
+#
+# NOTE on the virtual-time window: the guest-side healthcheck ticker runs
+# `podman healthcheck run` every HC_TICK VIRTUAL seconds, and fast-forward
+# collapses those sleeps, so its REAL cost scales with (horizon / HC_TICK) x
+# (#healthcheck containers). We therefore keep the corpus window SMALL (a short
+# INTERVAL + a horizon a few intervals out) -- enough to resolve the health gates
+# and produce several inserts, without a multi-hour ticker flood. Cadence/speedup
+# at a realistic 3600s interval is already gated by ff_demo / compare_stacks; the
+# corpus gates functional correctness + gating order + the per-hop VMM property.
+set -uo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$HERE/.." && pwd)"
+BIN="$ROOT/target/release/dvmm"
+KERNEL="$ROOT/guest/kernel/vmlinux-6.1.128"
+ALPINE="$ROOT/guest/initramfs-alpine"
+STACKS_DIR="$ROOT/guest/stacks"
+
+STACKS=("$@"); [ "${#STACKS[@]}" -eq 0 ] && STACKS=(webstack configpipeline svcchain)
+BAKE="${BAKE:-0}"
+INTERVAL="${INTERVAL:-60}"
+MAX_ROWS="${MAX_ROWS:-1000}"
+MEM="${MEM:-3072}"
+TARGET_ROWS="${TARGET_ROWS:-4}"
+HC_TICK="${HC_TICK:-2}"
+GATE_HOP_US="${GATE_HOP_US:-500}"
+WALL_TIMEOUT="${WALL_TIMEOUT:-300}"
+# The VMM stops itself at this virtual-time horizon (exit 3), running the stop
+# site that flushes --metrics-out. A couple intervals past the target rows -- kept
+# small so the healthcheck ticker's real cost stays bounded (see the NOTE above).
+# The health gates resolve within the first few virtual seconds, so a small
+# horizon still clears them comfortably.
+MAX_VIRTUAL_TIME="${MAX_VIRTUAL_TIME:-$(( (TARGET_ROWS + 2) * INTERVAL ))s}"
+
+[ -x "$BIN" ] || { echo "[corpus] building dvmm..."; ( cd "$ROOT" && cargo build --release ) || exit 3; }
+[ -f "$KERNEL" ] || { echo "[corpus] kernel missing: $KERNEL"; exit 3; }
+[ -f "$ALPINE/initramfs-alpine.cpio.gz" ] || { echo "[corpus] base guest missing -- run build_rootfs.sh"; exit 3; }
+
+TMP="$(mktemp -d)"; trap 'rm -f "$TMP"/*.log "$TMP"/*.metrics 2>/dev/null; rmdir "$TMP" 2>/dev/null' EXIT
+
+# m <log-basename> <key> : read a value from a metrics file.
+m() { awk -v k="$2" '$1==k{print $2}' "$TMP/$1.metrics" 2>/dev/null; }
+
+# order_ok <log> <label> <first-regex> <second-regex> : true iff the first match
+# line precedes the second (compose's own ordered [stack][up] lifecycle stream).
+order_ok() {
+  local log="$1" label="$2" a b
+  a=$(grep -nE "$3" "$log" | head -1 | cut -d: -f1)
+  b=$(grep -nE "$4" "$log" | head -1 | cut -d: -f1)
+  if [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]; then
+    echo "    ORDER OK: $label (line $a < $b)"; return 0
+  fi
+  echo "    ORDER FAIL: $label (first=$a second=$b)"; return 1
+}
+
+# rows_ok <log> : DVMM_ROWCOUNT present, started low, non-decreasing, capped.
+rows_ok() {
+  local log="$1" prev=-1 mx=0 low=0 over=0 nondec=1 v
+  while read -r v; do
+    [ -z "$v" ] && continue
+    [ "$prev" -eq -1 ] && [ "$v" -le 2 ] && low=1
+    [ "$v" -lt "$prev" ] && nondec=0
+    [ "$v" -gt "$mx" ] && mx="$v"
+    [ "$v" -gt "$MAX_ROWS" ] && over=1
+    prev="$v"
+  done < <(grep -oE 'DVMM_ROWCOUNT=[0-9]+' "$log" | cut -d= -f2)
+  echo "    rows: started_low=$low non_decreasing=$nondec max=$mx cap=$MAX_ROWS over_cap=$over"
+  [ "$low" -eq 1 ] && [ "$nondec" -eq 1 ] && [ "$over" -eq 0 ] && [ "$mx" -ge 1 ]
+}
+
+# have <log> <regex> <human> : assert a marker is present.
+have() {
+  if grep -qE "$2" "$1"; then echo "    OK: $3"; return 0; fi
+  echo "    MISSING: $3 (/$2/)"; return 1
+}
+
+# ---- per-stack functional gates -------------------------------------------
+gate_webstack() {
+  local log="$1" p=1
+  local P=dvmm_webstack-postgres-1 R=dvmm_webstack-redis-1 A=dvmm_webstack-api-1
+  have "$log" 'DVMM_STACK_UP' 'compose brought the stack up' || p=0
+  have "$log" "DVMM_HC_HEALTHY container=$P" 'postgres reached healthy (ticker)' || p=0
+  have "$log" "DVMM_HC_HEALTHY container=$R" 'redis reached healthy (ticker)' || p=0
+  have "$log" 'DVMM_API_UP' 'api started (=> both service_healthy gates resolved)' || p=0
+  have "$log" 'DVMM_API_REDIS_PING=PONG' 'api reached redis by name (PONG)' || p=0
+  have "$log" 'DVMM_API_PG_OK' 'api reached postgres by name' || p=0
+  # ordering: both backends Healthy before the api Started (compose stream).
+  order_ok "$log" "postgres Healthy < api Started" \
+    "\[stack\]\[up\].*Container $P Healthy" "\[stack\]\[up\].*Container $A Started" || p=0
+  order_ok "$log" "redis Healthy < api Started" \
+    "\[stack\]\[up\].*Container $R Healthy" "\[stack\]\[up\].*Container $A Started" || p=0
+  rows_ok "$log" || p=0
+  return $((1 - p))
+}
+
+gate_configpipeline() {
+  local log="$1" p=1
+  have "$log" 'DVMM_STACK_UP' 'compose brought the stack up' || p=0
+  have "$log" 'DVMM_CONFIG_SEED=configpipeline-seed-v1' 'RW bind materialized (baked seed visible)' || p=0
+  have "$log" 'DVMM_CONFIG_WRITE_OK=generated-by-worker' 'RW bind writable (write + read back)' || p=0
+  have "$log" 'DVMM_STATE_WRITE_OK' 'named volume writable (worker published)' || p=0
+  # cross-service: the sidecar read what the worker wrote via the SHARED volume.
+  have "$log" 'DVMM_SIDECAR_SHARED_OK latest=worker-iter-[0-9]+' 'named volume SHARED (sidecar read worker data)' || p=0
+  return $((1 - p))
+}
+
+gate_svcchain() {
+  local log="$1" p=1
+  local D=dvmm_svcchain-db-1 B=dvmm_svcchain-backend-1 F=dvmm_svcchain-frontend-1
+  have "$log" 'DVMM_STACK_UP' 'compose brought the stack up' || p=0
+  have "$log" "DVMM_HC_HEALTHY container=$D" 'db reached healthy (ticker)' || p=0
+  have "$log" 'DVMM_BACKEND_READY' 'backend connected to db + signalled readiness' || p=0
+  have "$log" "DVMM_HC_HEALTHY container=$B" 'backend reached healthy (ticker)' || p=0
+  have "$log" 'DVMM_FRONTEND_UP' 'frontend started (=> backend service_healthy resolved)' || p=0
+  # 2-hop chain ordering (compose stream): db healthy -> backend started;
+  # backend healthy -> frontend started.
+  order_ok "$log" "db Healthy < backend Started" \
+    "\[stack\]\[up\].*Container $D Healthy" "\[stack\]\[up\].*Container $B Started" || p=0
+  order_ok "$log" "backend Healthy < frontend Started" \
+    "\[stack\]\[up\].*Container $B Healthy" "\[stack\]\[up\].*Container $F Started" || p=0
+  rows_ok "$log" || p=0
+  return $((1 - p))
+}
+
+overall=0
+declare -A RESULT
+
+for stack in "${STACKS[@]}"; do
+  echo "==================================================================="
+  echo " CORPUS STACK: $stack"
+  echo "==================================================================="
+  compose="$STACKS_DIR/$stack/compose.yml"
+  initrd="$ALPINE/initramfs-alpine-${stack}.cpio.gz"
+  if [ ! -f "$compose" ]; then echo "  FAIL: no compose.yml at $compose"; RESULT[$stack]="fail:no-compose"; overall=1; continue; fi
+
+  if [ "$BAKE" = "1" ] || [ ! -f "$initrd" ]; then
+    echo "[corpus] baking $stack ..."
+    if ! "$ROOT/guest/bake-stack.sh" "$compose" >"$TMP/$stack.bake.log" 2>&1; then
+      echo "  FAIL: bake error (tail):"; tail -20 "$TMP/$stack.bake.log" | sed 's/^/    /'
+      RESULT[$stack]="fail:bake"; overall=1; continue
+    fi
+    echo "  baked OK: $(grep -E 'sha256:' "$TMP/$stack.bake.log" | tail -1 | sed 's/^ *//')"
+  else
+    echo "[corpus] using existing initramfs ($(basename "$initrd")); set BAKE=1 to re-bake"
+  fi
+  [ -f "$initrd" ] || { echo "  FAIL: initramfs missing after bake"; RESULT[$stack]="fail:no-initrd"; overall=1; continue; }
+
+  log="$TMP/$stack.log"; metrics="$TMP/$stack.metrics"
+  cmdline="console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable dvmm.stack=1 dvmm.hc_tick=$HC_TICK dvmm.interval=$INTERVAL dvmm.maxrows=$MAX_ROWS"
+  echo "[corpus] boot: mem=${MEM}MiB ff=ON horizon=${MAX_VIRTUAL_TIME} hc_tick=${HC_TICK}s wall_timeout=${WALL_TIMEOUT}s"
+  start=$(date +%s.%N)
+  timeout "$WALL_TIMEOUT" "$BIN" --kernel "$KERNEL" --initrd "$initrd" --mem "$MEM" --ff on \
+    --max-virtual-time "$MAX_VIRTUAL_TIME" --metrics-out "$metrics" --cmdline "$cmdline" \
+    </dev/null >"$log" 2>&1
+  rc=$?
+  wall=$(awk "BEGIN{printf \"%.1f\", $(date +%s.%N)-$start}")
+  echo "[corpus] vmm exit=$rc (3=horizon, expected) wall=${wall}s"
+
+  # ---- functional gates -----------------------------------------------------
+  echo "  [functional correctness under FF]"
+  ok=1
+  "gate_$stack" "$log" || ok=0
+
+  # ---- FF summary + per-hop <=500us mean ------------------------------------
+  echo "  [fast-forward + per-hop <=${GATE_HOP_US}us mean]"
+  grep -E 'FAST-FORWARD SUMMARY' "$log" | tail -1 | sed 's/^/    /'
+  hm="$(m "$stack" hop_ns_mean)"; [ -z "$hm" ] && hm=0
+  sp="$(m "$stack" speedup)"
+  us=$(awk "BEGIN{printf \"%.3f\", $hm/1000}")
+  if [ -f "$metrics" ] && awk "BEGIN{exit !($hm>0 && $hm/1000 <= $GATE_HOP_US)}"; then
+    echo "    OK: per-hop mean ${us}us <= ${GATE_HOP_US}us ; speedup ${sp}x (metrics flushed)"
+  else
+    echo "    GATE FAIL: per-hop mean ${us}us (metrics $( [ -f "$metrics" ] && echo present || echo MISSING))"; ok=0
+  fi
+
+  if [ "$ok" -eq 1 ]; then echo "  => $stack PASS"; RESULT[$stack]="pass";
+  else echo "  => $stack FAIL"; RESULT[$stack]="fail:gates"; overall=1
+    echo "  ---- last serial output ----"; tail -20 "$log" | sed 's/^/    /'
+  fi
+  echo
+done
+
+echo "==================================================================="
+echo " CORPUS SUMMARY"
+echo "==================================================================="
+for stack in "${STACKS[@]}"; do printf '  %-16s %s\n' "$stack" "${RESULT[$stack]:-?}"; done
+if [ "$overall" -eq 0 ]; then
+  echo "CORPUS PASS: every stack baked + booted + ran correctly under FF (functional + health-gating); per-hop mean within ${GATE_HOP_US}us."
+  exit 0
+fi
+echo "CORPUS FAIL: see stacks above."
+exit 1
