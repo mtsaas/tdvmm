@@ -1,5 +1,5 @@
 #!/bin/sh
-# deterministic-vmm Phase-2a dogfood service (compose path).
+# deterministic-vmm insert-trim service (compose path).
 #
 # Bind-mounted READ-ONLY into the pinned Postgres image and run as that
 # container's entrypoint (2a is image-based; no separate service image is built).

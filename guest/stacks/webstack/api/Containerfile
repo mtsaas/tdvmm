@@ -5,10 +5,10 @@
 # through the SAME squash / seed-store / compose.lock pipeline as any image:.
 #
 # The base image is DIGEST-PINNED (bake-stack rejects a non-digest-pinned FROM),
-# the same Alpine 3.22 base the go-ab service uses. Build-time apk installs the
-# clients the api needs to reach BOTH backends by name: the Postgres 16 client
-# (pinned, matches go-ab) and redis (for redis-cli). apk runs at BUILD time only;
-# the guest is closed-world at runtime.
+# the same pinned Alpine 3.22 base the other build: stacks use. Build-time apk
+# installs the clients the api needs to reach BOTH backends by name: the Postgres
+# 16 client (version-pinned) and redis (for redis-cli). apk runs at BUILD time
+# only; the guest is closed-world at runtime.
 FROM docker.io/library/alpine@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
 RUN apk add --no-cache postgresql16-client=16.14-r0 redis
 COPY api-loop.sh /usr/local/bin/api-loop.sh

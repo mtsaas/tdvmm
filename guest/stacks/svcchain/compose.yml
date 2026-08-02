@@ -33,7 +33,7 @@ services:
   backend:
     # Reuse the pinned Postgres image (ships /bin/sh + psql + pg_isready) with its
     # entrypoint overridden to a bind-mounted loop -- so every image is one real
-    # upstream digest (same technique as the dogfood service).
+    # upstream digest (same technique as the insert-trim service).
     image: docker.io/library/postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
     depends_on:
       db:

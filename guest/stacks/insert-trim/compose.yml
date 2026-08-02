@@ -1,6 +1,6 @@
-# deterministic-vmm Phase-2a DOGFOOD stack.
+# deterministic-vmm INSERT-TRIM stack (the minimal fast fast-forward acceptance).
 #
-# This is the exact Phase-1 workload (Postgres + an insert-a-row / trim-to-cap
+# The smallest real workload (Postgres + an insert-a-row / trim-to-cap
 # service) re-expressed as a docker-compose stack, so it can be driven through
 # the GENERIC 2a pipeline: bake-stack -> compose.lock.yml -> guest -> compose up.
 # It replaces the hand-rolled workload.sh with the supported-subset compose path.

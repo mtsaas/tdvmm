@@ -36,8 +36,8 @@
 # resolved + squashed + baked by guest/bake-stack.sh, which owns the single-layer
 # squash policy + config-equivalence gate (vfs stores every layer as a full copy,
 # so heavy images -- e.g. postgres, ~1.8 GiB as-pulled -- are repackaged to one
-# ~290 MiB layer). The dogfood stack's postgres pin lives in
-# guest/stacks/dogfood/compose.yml; its bake ledger is guest/stacks/dogfood/stack.lock.
+# ~290 MiB layer). The insert-trim stack's postgres pin lives in
+# guest/stacks/insert-trim/compose.yml; its bake ledger is guest/stacks/insert-trim/stack.lock.
 plain docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616
 
 # >>> GENERATED PROVENANCE (rewritten by prebake_images.sh on each bake) >>>

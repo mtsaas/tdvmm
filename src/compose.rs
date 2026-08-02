@@ -1294,8 +1294,8 @@ mod emitter_tests {
     #[test]
     fn round_trips_committed_locks_byte_for_byte() {
         let stacks = [
-            "dogfood", "svcchain", "webstack", "configpipeline", "faultlab",
-            "health-gate", "rwbind", "go-ab",
+            "insert-trim", "svcchain", "webstack", "configpipeline", "faultlab",
+            "demo",
         ];
         for stack in stacks {
             let path = format!("guest/stacks/{stack}/compose.lock.yml");
@@ -1333,7 +1333,7 @@ mod emitter_tests {
             "docker.io/library/postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777";
         const PG_PIN: &str =
             "localhost/dvmm-postgres-57c72fd2a128@sha256:cbf217007d0742829dc120c3ea9cd2621e90eb3adfeaf6684e87ce268a2ca368";
-        for stack in ["dogfood", "faultlab", "svcchain", "configpipeline"] {
+        for stack in ["faultlab", "svcchain", "configpipeline"] {
             let compose_path = format!("guest/stacks/{stack}/compose.yml");
             let raw = std::fs::read_to_string(&compose_path).unwrap();
             let doc: Value = serde_yaml::from_str(&raw).unwrap();

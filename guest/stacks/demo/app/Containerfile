@@ -1,0 +1,32 @@
+# deterministic-vmm demo — the shared application image (a build: context).
+#
+# ONE image, three entrypoints (server.py / client.py / worker.py). The three
+# Python services (api, client, worker) all run from this image, selected by each
+# compose service's `command:`. Sharing one image is a common monorepo pattern and
+# keeps the baked guest small: the vfs store holds a single copy instead of three.
+#
+# Built HOST-SIDE at bake time (podman build --squash-all --timestamp <epoch>),
+# never inside the guest. The base is DIGEST-PINNED and every apk is version-pinned
+# so two --no-cache bakes are byte-identical. grpcio + protobuf give a real gRPC
+# server/client; psycopg2 + redis talk to the backends over their real wire
+# protocols. apk runs at BUILD time only — the guest is closed-world at runtime.
+FROM docker.io/library/alpine@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
+RUN apk add --no-cache \
+      python3=3.12.13-r0 \
+      py3-grpcio=1.72.0-r0 \
+      py3-protobuf=5.29.4-r0 \
+      py3-psycopg2=2.9.10-r0 \
+      py3-redis=6.1.0-r0
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+WORKDIR /app
+COPY orders_pb2.py orders_pb2_grpc.py server.py client.py worker.py check.py /app/
+# Byte-reproducible .pyc: Alpine's apk python trigger compiles .pyc with the
+# source mtime embedded (timestamp invalidation), so the bytes vary by the
+# wall-clock SECOND of the build — which breaks bit-reproducibility (and the
+# intra-bake image dedup). Delete those and recompile with HASH-based (unchecked)
+# invalidation, which depends only on source content -> two --no-cache bakes,
+# and the three build passes for api/worker/client, produce identical images.
+RUN find / -name '*.pyc' -delete 2>/dev/null; \
+    python3 -m compileall -q -f --invalidation-mode unchecked-hash /usr/lib/python3.12 /app 2>/dev/null; \
+    true
+ENTRYPOINT ["python3"]

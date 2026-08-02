@@ -1,0 +1,152 @@
+# deterministic-vmm DEMO scenario — the flagship capability reference as a test.
+#
+#   dvmm test demo.dvmm --scenario demo.yml --logs-dir /tmp/demo-logs  ->  PASS, exit 0
+#
+# Drives a full virtual DAY of the gRPC order stack under fast-forward, then injects
+# a Postgres fault mid-day and proves the services retry + recover (they never die)
+# and the data resumes — all in a few minutes of wall clock. The per-service logs
+# (--logs-dir) are the narrative: hourly gRPC traffic, a fault gap, and recovery.
+#
+# Timeline (virtual hours; the workload runs once per virtual hour, gated on
+# postgres+redis healthy so it begins at ~1h):
+#   0h      wait for postgres + redis ready and the workload up
+#   6h,12h  assert the worker's summaries table is accruing (~1 per hour)
+#   13h     KILL postgres  (api/worker/client log retries; they do NOT exit)
+#   13.85h  START postgres (heal — same container, data intact)
+#   14h     wait for postgres ready again
+#   17h     assert summaries RESUMED growing after the gap
+#   24h     final: summaries ~a day's worth; postgres order count == redis total
+#           (the api kept the two stores consistent across the fault); all up.
+#
+# postgres is deliberately SIGKILLed, so it is declared in expect_death: a killed
+# Postgres exits 137, which must not count as an unexpected death (same policy as
+# faultlab/kill-recover.yml).
+
+name: demo-gRPC-day-with-fault
+
+expect_death: [postgres]
+
+run:
+  # 1 virtual-hour cadence; coarse healthcheck tick keeps the ticker's real cost
+  # negligible across a 24h horizon (the ticker runs `podman healthcheck run` every
+  # tick — see corpus_test.sh). console on ttyS0; ttyS1 is the agent control channel.
+  cmdline: "console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable dvmm.stack=1 dvmm.interval=3600 dvmm.hc_tick=3600"
+
+steps:
+  # 1. Readiness: postgres accepts connections (checked inside the pg container).
+  - name: wait-postgres-ready
+    at: 0s
+    wait_for:
+      probe:
+        exec:
+          container: postgres
+          cmd: "pg_isready -U postgres -d appdb"
+      until: exit_zero
+      every: 10s
+      timeout: 5m
+
+  # 2. Readiness: redis answers PING (checked inside the redis container).
+  - name: wait-redis-ready
+    at: 0s
+    wait_for:
+      probe:
+        exec:
+          container: redis
+          cmd: "redis-cli ping"
+      until: exit_zero
+      every: 10s
+      timeout: 5m
+
+  # 3. The gated workload is up: the worker container is running (=> postgres was
+  #    healthy and the depends_on gate resolved). Fast-forward collapses the wait.
+  - name: wait-workload-up
+    at: 0s
+    wait_for:
+      probe:
+        exec:
+          container: worker
+          cmd: "true"
+      until: exit_zero
+      every: 2m
+      timeout: 90m
+
+  # 4. Accrual: by 6 virtual hours the worker has written several hourly summaries.
+  - name: summaries-accruing
+    at: 6h
+    exec:
+      container: postgres
+      cmd: "psql -U postgres -d appdb -tAc 'select count(*) from summaries;'"
+    expect:
+      exit: 0
+      output_matches: '^[2-9]$'
+
+  # 5. Grown further by 12 virtual hours.
+  - name: summaries-grown
+    at: 12h
+    exec:
+      container: postgres
+      cmd: "psql -U postgres -d appdb -tAc 'select count(*) from summaries;'"
+    expect:
+      exit: 0
+      output_matches: '^([5-9]|1[0-6])$'
+
+  # 6. FAULT: SIGKILL postgres. The hour-13 client submit + worker rollup now fail;
+  #    they log retries and keep running (proven by all_running at 24h).
+  - name: kill-postgres
+    at: 13h
+    kill: postgres
+
+  # 7. HEAL: restart the SAME postgres container (writable layer intact -> data
+  #    survives), a bit after the hour-13 workload has failed against it.
+  - name: start-postgres
+    at: 13.85h
+    start: postgres
+
+  # 8. RECOVERY: postgres accepts connections again.
+  - name: wait-postgres-recovered
+    at: 14h
+    wait_for:
+      probe:
+        exec:
+          container: postgres
+          cmd: "pg_isready -U postgres -d appdb"
+      until: exit_zero
+      every: 10s
+      timeout: 5m
+
+  # 9. Summaries RESUMED growing after the gap (strictly more than the 12h value).
+  - name: summaries-resumed
+    at: 17h
+    exec:
+      container: postgres
+      cmd: "psql -U postgres -d appdb -tAc 'select count(*) from summaries;'"
+    expect:
+      exit: 0
+      output_matches: '^(1[0-9]|2[0-6])$'
+
+  # 10. End of day: ~a full day of hourly summaries.
+  - name: summaries-full-day
+    at: 24h
+    exec:
+      container: postgres
+      cmd: "psql -U postgres -d appdb -tAc 'select count(*) from summaries;'"
+    expect:
+      exit: 0
+      output_matches: '^(1[6-9]|2[0-9])$'
+
+  # 11. Cross-store consistency held across the fault: Postgres order count ==
+  #     Redis orders:total (the api bumps Redis only after the pg write commits).
+  #     Checked from inside the api container (it has psycopg2 + redis + both hosts).
+  - name: pg-redis-consistent
+    at: 24h
+    exec:
+      container: api
+      cmd: "python3 /app/check.py"
+    expect:
+      exit: 0
+      output_matches: 'consistent=True'
+
+  # 12. Every service survived the fault (nothing crashed): all containers running.
+  - name: all-services-running
+    at: 24h
+    containers: all_running

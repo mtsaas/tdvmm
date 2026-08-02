@@ -67,18 +67,18 @@ inside; `dvmm verify` checks it hasn't changed.
 
 ```sh
 # Bake a stack into one file (needs podman):
-dvmm build guest/stacks/dogfood/compose.yml     # -> guest/initramfs-alpine/dogfood.dvmm
+dvmm build guest/stacks/insert-trim/compose.yml   # -> guest/initramfs-alpine/insert-trim.dvmm
 
 # Run it (offline, only needs /dev/kvm). Idle time fast-forwards automatically:
-dvmm run guest/initramfs-alpine/dogfood.dvmm --max-virtual-time 24h
+dvmm run guest/initramfs-alpine/insert-trim.dvmm --max-virtual-time 24h
 
 # Test it against a scenario (assertions + fault injection):
-dvmm test guest/initramfs-alpine/dogfood.dvmm \
-  --scenario guest/stacks/dogfood/dogfood.yml
+dvmm test guest/initramfs-alpine/insert-trim.dvmm \
+  --scenario guest/stacks/insert-trim/insert-trim.yml
 
 # Look at an artifact:
-dvmm inspect dogfood.dvmm    # its manifest
-dvmm verify  dogfood.dvmm    # check every piece matches, and print its sha256
+dvmm inspect insert-trim.dvmm    # its manifest
+dvmm verify  insert-trim.dvmm    # check every piece matches, and print its sha256
 ```
 
 Fast-forward is on by default; pass `--ff off` for real time (e.g. an interactive
@@ -92,10 +92,59 @@ failure). That split lets CI tell "your stack is wrong" from "the tool broke."
 
 ## Example stacks
 
-`guest/stacks/` has worked examples, each a normal `compose.yml` plus a scenario:
-`dogfood` (Postgres + a service that inserts a row and trims the table),
-`faultlab` (kill / network-partition fault tests), `webstack`, `svcchain`, and
-more.
+`guest/stacks/` has worked examples, each a real `compose.yml` (most with a
+scenario for `dvmm test`). Start with **`demo`** — the capability reference.
+
+### `demo` — a real gRPC microservice stack
+
+Five services, closed-world, exercising the whole supported subset at once:
+
+- **postgres** and **redis** — real, digest-pinned, health-checked backends.
+- **api** — a real Python **gRPC** server (the `OrderService` in
+  `proto/orders.proto`), backed by both stores over their real wire protocols
+  (`psycopg2` → Postgres, `redis-py` → Redis).
+- **client** — a real Python gRPC client that submits a batch of orders and reads
+  the stats back, once per virtual hour.
+- **worker** — rolls each hour's orders up into a `summaries` row.
+
+api, client and worker are one small `build:` image with three entrypoints. The
+api starts only after Postgres **and** Redis are `service_healthy`.
+
+Fast-forward a whole day and watch it stream by in a couple of minutes:
+
+```
+$ dvmm run guest/initramfs-alpine/demo.dvmm --ff on --max-virtual-time 24h \
+    --cmdline "console=ttyS0 dvmm.stack=1 dvmm.interval=3600 dvmm.hc_tick=3600"
+
+hour 1: submitted 9 orders via gRPC -> 9 total orders (cache=9)
+hour 2: submitted 10 orders via gRPC -> 19 total orders (cache=19)
+hour 3: submitted 11 orders via gRPC -> 30 total orders (cache=30)
+...
+hour 12: submitted 13 orders via gRPC -> 132 total orders (cache=132)
+hour 13: submitted 14 orders via gRPC -> 146 total orders (cache=146)
+...
+hour 22: submitted 9 orders via gRPC -> 240 total orders (cache=240)
+[dvmm] FAST-FORWARD SUMMARY: 21.8M jumps; virtual 86400s in real 365s = 237x speedup
+```
+
+That's 24 hours of a live Postgres + Redis + gRPC stack in about six minutes of
+wall clock — ~235x faster than real time. (Long horizons want a coarse
+`dvmm.hc_tick`: the healthcheck ticker is real work under fast-forward.)
+
+`dvmm test demo.dvmm --scenario demo.yml --logs-dir /tmp/demo-logs` runs the same
+day, then SIGKILLs Postgres mid-day: the api, client and worker log retries,
+recover when it comes back (its data survives — same container), and Postgres and
+Redis stay consistent — verdict **PASS**. The `--logs-dir` output gives you a
+clean per-service log of the whole day, fault gap and all.
+
+### The others
+
+- **`insert-trim`** — the minimal case: Postgres + a service that inserts a row
+  each hour and trims to a cap. The fastest fast-forward acceptance.
+- **`webstack`** — web/api + Postgres + Redis behind two health gates.
+- **`svcchain`** — a 3-tier `db → backend → frontend` health-gated chain.
+- **`configpipeline`** — a worker + sidecar sharing a named volume and an rw bind.
+- **`faultlab`** — kill / network-partition fault scenarios.
 
 ## What's supported
 

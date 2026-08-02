@@ -1,0 +1,115 @@
+# deterministic-vmm — DEMO stack: the flagship capability reference.
+#
+# A small but REAL, end-to-end microservice stack, closed-world and
+# fast-forwardable, that exercises the whole supported compose subset at once:
+#
+#   postgres + redis   real backends, each digest-pinned, each with a healthcheck;
+#   api                a REAL Python gRPC server. It serves the OrderService
+#                      contract (proto/orders.proto) and talks to BOTH backends by
+#                      name over their real wire protocols (psycopg2 -> postgres,
+#                      redis-py -> redis). Gated on postgres AND redis being
+#                      service_healthy;
+#   client             a REAL Python gRPC client. Once per virtual hour it submits
+#                      a batch of orders and reads the stats back — genuine
+#                      service-to-service RPC over the compose network. Sleeps a
+#                      full virtual hour between cycles, which dvmm fast-forwards;
+#   worker             rolls up each hour's orders into a summaries row (psycopg2
+#                      -> postgres). Gated on postgres service_healthy.
+#
+# api, client and worker all run from ONE build: image (./app), selected by their
+# `command:` — a monorepo pattern that keeps the baked guest small (the vfs store
+# holds a single copy of the shared image, not three).
+#
+# Nothing is built or pulled in the guest: images are digest-pinned and the build:
+# context is built host-side at bake time, then baked in. No ports, no host binds,
+# no external networks — a true closed world with no runtime egress.
+#
+# INTERVAL_SECONDS uses ${VAR:-default} interpolation so the committed lockfile
+# stays deterministic while a run can retune cadence via the kernel cmdline.
+
+services:
+  postgres:
+    image: docker.io/library/postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+    environment:
+      POSTGRES_HOST_AUTH_METHOD: trust
+      POSTGRES_DB: appdb
+    shm_size: 256m
+    volumes:
+      - ./schema.sql:/docker-entrypoint-initdb.d/10-schema.sql:ro
+    # Quiet Postgres' idle background timers so an idle guest parks (HLT) instead
+    # of waking ~10x/s — that is what lets fast-forward collapse the hourly gaps.
+    # Fine for an ephemeral, single-writer test database.
+    command:
+      - postgres
+      - -c
+      - bgwriter_delay=10000
+      - -c
+      - wal_writer_delay=10000
+      - -c
+      - checkpoint_timeout=3600
+      - -c
+      - autovacuum=off
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d appdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 60s
+
+  redis:
+    image: docker.io/library/redis@sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf
+    # --hz 1 drops the serverCron tick from 10x/s to 1x/s and --save "" removes the
+    # background-save timer, so an idle Redis parks — again to keep fast-forward
+    # effective. Fine for an ephemeral cache.
+    command: ["redis-server", "--hz", "1", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  api:
+    build:
+      context: ./app
+      dockerfile: Containerfile
+    image: localhost/dvmm-demo-app:demo
+    command: ["/app/server.py"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: postgres
+      PGDATABASE: appdb
+      REDIS_HOST: redis
+
+  worker:
+    build:
+      context: ./app
+      dockerfile: Containerfile
+    image: localhost/dvmm-demo-app:demo
+    command: ["/app/worker.py"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      INTERVAL_SECONDS: "${DVMM_INTERVAL:-3600}"
+      PGHOST: postgres
+      PGUSER: postgres
+      PGDATABASE: appdb
+
+  client:
+    build:
+      context: ./app
+      dockerfile: Containerfile
+    image: localhost/dvmm-demo-app:demo
+    command: ["/app/client.py"]
+    depends_on:
+      api:
+        condition: service_started
+    environment:
+      INTERVAL_SECONDS: "${DVMM_INTERVAL:-3600}"
+      API_ADDR: api:50051

@@ -1,6 +1,6 @@
-# deterministic-vmm TEST-1a — the dogfood stack expressed as a test scenario.
+# deterministic-vmm TEST-1a — the insert-trim stack expressed as a test scenario.
 #
-#   dvmm test dogfood.dvmm --scenario dogfood.yml   ->   PASS, exit 0
+#   dvmm test insert-trim.dvmm --scenario insert-trim.yml   ->   PASS, exit 0
 #
 # The platform testing itself: wait for Postgres to be ready, fast-forward through
 # virtual hours, and assert (via psql, over the bridge, by name) that the events
@@ -14,7 +14,7 @@
 #   * by 6.5h  ~7 inserts have happened, trimmed to 5  ->  exactly 5 (the cap)
 # Fast-forward collapses the 6.5 virtual hours into seconds of wall time.
 
-name: dogfood-accrual-and-cap
+name: insert-trim-accrual-and-cap
 
 run:
   # Override the baked cmdline: 1-hour interval, cap of 5 (so the cap shows fast).

@@ -20,7 +20,7 @@
 #
 # Exits 0 only if every gate passes.
 #
-# Usage: scripts/artifact_test.sh [stack ...]     (default: dogfood svcchain)
+# Usage: scripts/artifact_test.sh [stack ...]     (default: insert-trim svcchain)
 # Env:   MEM(3072)  INTERVAL(3)  MAX_ROWS(5)  HORIZON(24s)  WALL_TIMEOUT(120)
 #        GATE_HOP_US(500)
 set -uo pipefail
@@ -31,7 +31,7 @@ BIN="$ROOT/target/release/dvmm"
 KERNEL="$ROOT/guest/kernel/vmlinux-6.1.128"
 ALPINE="$ROOT/guest/initramfs-alpine"
 
-STACKS=("$@"); [ "${#STACKS[@]}" -eq 0 ] && STACKS=(dogfood svcchain)
+STACKS=("$@"); [ "${#STACKS[@]}" -eq 0 ] && STACKS=(insert-trim svcchain)
 MEM="${MEM:-3072}"
 INTERVAL="${INTERVAL:-3}"
 MAX_ROWS="${MAX_ROWS:-5}"

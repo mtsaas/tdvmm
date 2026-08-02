@@ -29,7 +29,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 BIN="$ROOT/target/release/dvmm"
 KERNEL="$ROOT/guest/kernel/vmlinux-6.1.128"
-INITRD="${INITRD:-$ROOT/guest/initramfs-alpine/initramfs-alpine-dogfood.cpio.gz}"
+INITRD="${INITRD:-$ROOT/guest/initramfs-alpine/initramfs-alpine-insert-trim.cpio.gz}"
 
 TARGET_HOURS="${1:-24}"
 WALL_TIMEOUT="${2:-300}"

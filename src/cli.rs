@@ -17,9 +17,9 @@ use crate::{DEFAULT_CMDLINE, DEFAULT_MAX_JUMP_SECS, DEFAULT_MEM_MIB};
                   Durations (--max-virtual-time): a bare number is seconds, or use a \
                   suffix (ms, s, m, h), e.g. 500ms, 30s, 5m, 2h.",
     after_help = "Examples:\n  \
-                  dvmm build guest/stacks/dogfood/compose.yml\n  \
-                  dvmm run guest/stacks/dogfood/dogfood.dvmm\n  \
-                  dvmm test dogfood.dvmm --scenario guest/stacks/dogfood/dogfood.yml",
+                  dvmm build guest/stacks/insert-trim/compose.yml\n  \
+                  dvmm run guest/stacks/insert-trim/insert-trim.dvmm\n  \
+                  dvmm test insert-trim.dvmm --scenario guest/stacks/insert-trim/insert-trim.yml",
     version
 )]
 pub(crate) struct Cli {
@@ -35,7 +35,7 @@ pub(crate) struct Cli {
 #[derive(Subcommand)]
 pub(crate) enum Cmd {
     /// Bake a compose stack into a self-contained .dvmm (host tool: podman + network).
-    #[command(after_help = "Example:\n  dvmm build guest/stacks/dogfood/compose.yml -o dogfood.dvmm")]
+    #[command(after_help = "Example:\n  dvmm build guest/stacks/insert-trim/compose.yml -o insert-trim.dvmm")]
     Build(BuildCliArgs),
     /// Build the reproducible static-musl dvmm-agent standalone (pinned builder
     /// container). Prints `<sha256>  <path>`. Used by the size / double-build gates.
@@ -49,7 +49,7 @@ pub(crate) enum Cmd {
     /// Boot a raw kernel + initramfs (the low-level VMM-dev / smoke verb).
     Boot(BootArgs),
     /// Run a .dvmm stack artifact: apply its baked run-defaults, then boot (offline).
-    #[command(after_help = "Example:\n  dvmm run dogfood.dvmm --ff on")]
+    #[command(after_help = "Example:\n  dvmm run insert-trim.dvmm --ff on")]
     Run(RunArgs),
     /// Test a .dvmm stack against a scenario: drive virtual time, assert, verdict.
     #[command(
@@ -60,7 +60,7 @@ pub(crate) enum Cmd {
                       1  FAIL — a scenario assertion failed\n  \
                       2  ERROR — test infrastructure fault: bad/rejected scenario (including \
                       static validation before boot), agent unreachable, wall-clock timeout, ...",
-        after_help = "Example:\n  dvmm test dogfood.dvmm --scenario guest/stacks/dogfood/dogfood.yml"
+        after_help = "Example:\n  dvmm test insert-trim.dvmm --scenario guest/stacks/insert-trim/insert-trim.yml"
     )]
     Test(TestArgs),
     /// Print a .dvmm artifact's manifest.json (reads ONLY the manifest member).

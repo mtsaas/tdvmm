@@ -34,3 +34,5 @@
 /.dvmm-cache
 /.dvmm-tmp
 /.dvmm-test-results
+*.dvmm.jsonl
+*.dvmm.report.json

@@ -11,11 +11,11 @@
 # Squashed images are pinned via --timestamp, so their digests are stable; plain
 # images pin to their immutable upstream digest. Hence the lock + digests repeat.
 #
-# Usage: scripts/bake_repeat_test.sh [compose.yml]   (default: dogfood)
+# Usage: scripts/bake_repeat_test.sh [compose.yml]   (default: insert-trim)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-COMPOSE="${1:-$ROOT/guest/stacks/dogfood/compose.yml}"
+COMPOSE="${1:-$ROOT/guest/stacks/insert-trim/compose.yml}"
 NAME="$(basename "$(dirname "$COMPOSE")")"
 LOCK="$ROOT/guest/stacks/$NAME/compose.lock.yml"
 MAN="$ROOT/guest/stacks/$NAME/stack.lock"

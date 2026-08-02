@@ -1,0 +1,34 @@
+// deterministic-vmm demo stack — the gRPC contract between the load client and
+// the api service. A real .proto compiled to Python stubs (committed alongside,
+// generated with grpcio-tools matching the pinned py3-grpcio/py3-protobuf apk).
+//
+// Regenerate the stubs (only if you edit this file) with the SAME versions the
+// guest runs (grpcio 1.72.x / protobuf 5.29.x), e.g.:
+//   python -m grpc_tools.protoc -I proto --python_out=api --grpc_python_out=api \
+//          --python_out=client --grpc_python_out=client proto/orders.proto
+syntax = "proto3";
+package demo;
+
+// The order-ingest + stats service the client drives once per virtual hour.
+service OrderService {
+  // Ingest a batch of orders for a given virtual hour: writes them to Postgres
+  // and bumps the Redis "orders ever received" counter, atomically-ish.
+  rpc SubmitOrders(OrderBatch) returns (SubmitAck);
+  // Read-side: current order count (Postgres) + cached total (Redis).
+  rpc GetStats(StatsRequest) returns (StatsReply);
+}
+
+message OrderBatch {
+  int32 hour  = 1;  // virtual-hour label (client's cycle number)
+  int32 count = 2;  // how many orders in this batch
+}
+message SubmitAck {
+  int32 received     = 1;  // orders actually inserted
+  int64 redis_total  = 2;  // Redis orders:total after INCRBY
+}
+message StatsRequest {}
+message StatsReply {
+  int64 order_count   = 1;  // SELECT count(*) FROM orders
+  int64 cache_total   = 2;  // GET orders:total (Redis)
+  int64 total_amount  = 3;  // SELECT sum(amount) FROM orders
+}

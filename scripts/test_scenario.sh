@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # deterministic-vmm TEST-1a acceptance + negative gates for `dvmm test`.
 #
-# Runs the dogfood-as-scenario acceptance and the exit-code contract:
-#   - dogfood.dvmm + dogfood.yml            -> PASS, exit 0 (JSONL + report produced)
+# Runs the insert-trim-as-scenario acceptance and the exit-code contract:
+#   - insert-trim.dvmm + insert-trim.yml    -> PASS, exit 0 (JSONL + report produced)
 #   - a deliberately WRONG assertion         -> exit 1 (assertion failure)
 #   - static validation (unknown service /   -> exit 2, sub-second, BEFORE boot
 #     unknown key / bad duration)
@@ -14,15 +14,15 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 BIN="$ROOT/target/release/dvmm"
-DVMM="${DVMM_ARTIFACT:-$ROOT/dogfood.dvmm}"
-SCN="$ROOT/guest/stacks/dogfood/dogfood.yml"
+DVMM="${DVMM_ARTIFACT:-$ROOT/insert-trim.dvmm}"
+SCN="$ROOT/guest/stacks/insert-trim/insert-trim.yml"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 [ -x "$BIN" ] || { echo "building dvmm..."; ( cd "$ROOT" && cargo build --release ) || exit 3; }
 if [ ! -f "$DVMM" ]; then
-  echo "== dogfood.dvmm missing — baking it (dvmm build) =="
-  "$BIN" build "$ROOT/guest/stacks/dogfood/compose.yml" -o "$DVMM" || {
+  echo "== insert-trim.dvmm missing — baking it (dvmm build) =="
+  "$BIN" build "$ROOT/guest/stacks/insert-trim/compose.yml" -o "$DVMM" || {
     echo "FATAL: bake failed" >&2; exit 3; }
 fi
 
@@ -30,9 +30,9 @@ PASS=0; FAIL=0
 ok()   { echo "  PASS: $*"; PASS=$((PASS+1)); }
 bad()  { echo "  FAIL: $*"; FAIL=$((FAIL+1)); }
 
-# ---- Gate 1: dogfood acceptance -> PASS, exit 0 ----------------------------
-echo "== Gate 1: dogfood-as-scenario (expect PASS, exit 0) =="
-JSONL="$TMP/dogfood.jsonl"; REPORT="$TMP/dogfood.report.json"
+# ---- Gate 1: insert-trim acceptance -> PASS, exit 0 ------------------------
+echo "== Gate 1: insert-trim-as-scenario (expect PASS, exit 0) =="
+JSONL="$TMP/insert-trim.jsonl"; REPORT="$TMP/insert-trim.report.json"
 "$BIN" test "$DVMM" --scenario "$SCN" --jsonl "$JSONL" --report "$REPORT" \
   --wall-timeout 300 >"$TMP/g1.out" 2>&1
 code=$?

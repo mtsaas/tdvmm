@@ -93,16 +93,16 @@ name = "ff-demo-short"
 tier = "T2"
 tags = ["perf-exclusive", "needs-bake"]
 timeout = 200
-requires = "guest/initramfs-alpine/initramfs-alpine-dogfood.cpio.gz guest/kernel/vmlinux-6.1.128"
+requires = "guest/initramfs-alpine/initramfs-alpine-insert-trim.cpio.gz guest/kernel/vmlinux-6.1.128"
 cmd = "scripts/ff_demo.sh 6 150"
-desc = "FLOOR(FF cadence + per-hop): dogfood FF workload, short horizon (6 vhours)"
+desc = "FLOOR(FF cadence + per-hop): insert-trim FF workload, short horizon (6 vhours)"
 
 [[test]]
 name = "ff-repeat"
 tier = "T2"
 tags = ["perf-exclusive", "needs-bake"]
 timeout = 360
-requires = "guest/initramfs-alpine/initramfs-alpine-dogfood.cpio.gz guest/kernel/vmlinux-6.1.128"
+requires = "guest/initramfs-alpine/initramfs-alpine-insert-trim.cpio.gz guest/kernel/vmlinux-6.1.128"
 cmd = "scripts/ff_repeat.sh 6 150"
 desc = "FLOOR(repeatability): ff_demo twice -> identical guest row sequence"
 
@@ -115,23 +115,19 @@ requires = "guest/initramfs-alpine/initramfs-alpine-webstack.cpio.gz guest/kerne
 cmd = "scripts/corpus_test.sh webstack"
 desc = "representative corpus stack (chattiest: web+redis+postgres, dual health gates)"
 
-[[test]]
-name = "healthgate"
-tier = "T2"
-tags = ["perf-exclusive", "needs-bake"]
-timeout = 200
-requires = "guest/initramfs-alpine/initramfs-alpine-health-gate.cpio.gz guest/kernel/vmlinux-6.1.128"
-cmd = "scripts/smoke_test_healthgate.sh 150"
-desc = "healthcheck ticker resolves depends_on: service_healthy under FF"
+# NOTE: the standalone `healthgate` (health-gate stack) and `binds` (rwbind stack)
+# tests were retired with those stacks. Their coverage is preserved by the corpus:
+# depends_on service_healthy gating is exercised by corpus-webstack / corpus-demo /
+# svcchain; relative rw binds + named volumes by corpus-full (configpipeline).
 
 [[test]]
-name = "binds"
+name = "corpus-demo"
 tier = "T2"
 tags = ["perf-exclusive", "needs-bake"]
-timeout = 200
-requires = "guest/initramfs-alpine/initramfs-alpine-rwbind.cpio.gz guest/kernel/vmlinux-6.1.128"
-cmd = "scripts/smoke_test_binds.sh 150"
-desc = "relative rw bind + named volume materialized/writable under FF"
+timeout = 400
+requires = "guest/initramfs-alpine/initramfs-alpine-demo.cpio.gz guest/kernel/vmlinux-6.1.128"
+cmd = "MAX_VIRTUAL_TIME=600s scripts/corpus_test.sh demo"
+desc = "flagship capability-reference stack (gRPC api + client + worker over postgres+redis, dual health gates, build: context)"
 
 # ============================ T3 — nightly =================================
 
@@ -160,25 +156,25 @@ tags = ["perf-exclusive", "needs-bake"]
 timeout = 600
 requires = "guest/initramfs-alpine/initramfs-alpine-configpipeline.cpio.gz guest/initramfs-alpine/initramfs-alpine-svcchain.cpio.gz"
 cmd = "scripts/corpus_test.sh configpipeline svcchain"
-desc = "remaining corpus (configpipeline + svcchain); with T2's webstack = full corpus"
+desc = "remaining corpus (configpipeline + svcchain); with T2's webstack + corpus-demo = full corpus"
 
 [[test]]
-name = "bake-repeat-dogfood"
+name = "bake-repeat-insert-trim"
 tier = "T3"
 tags = ["needs-bake"]
 timeout = 400
 requires = ""
-cmd = "scripts/bake_repeat_test.sh guest/stacks/dogfood/compose.yml"
-desc = "FLOOR(artifact repro): re-bake (--no-cache) -> identical lock + digests (dogfood)"
+cmd = "scripts/bake_repeat_test.sh guest/stacks/insert-trim/compose.yml"
+desc = "FLOOR(artifact repro): re-bake (--no-cache) -> identical lock + digests (insert-trim)"
 
 [[test]]
-name = "bake-repeat-go-ab"
+name = "bake-repeat-demo"
 tier = "T3"
 tags = ["needs-bake"]
 timeout = 500
 requires = ""
-cmd = "scripts/bake_repeat_test.sh guest/stacks/go-ab/compose.yml"
-desc = "FLOOR(artifact repro): re-bake (--no-cache) -> identical content-id (go build)"
+cmd = "scripts/bake_repeat_test.sh guest/stacks/demo/compose.yml"
+desc = "FLOOR(artifact repro): re-bake (--no-cache) -> identical lock + content-ids (demo build: contexts)"
 
 [[test]]
 name = "artifact-test"
@@ -186,7 +182,7 @@ tier = "T3"
 tags = ["perf-exclusive", "needs-bake"]
 timeout = 900
 requires = ""
-cmd = "scripts/artifact_test.sh dogfood svcchain"
+cmd = "scripts/artifact_test.sh insert-trim svcchain"
 desc = "FLOOR(artifact repro): .dvmm bit-identical, inspect/verify, run offline, run==boot"
 
 [[test]]
@@ -194,16 +190,16 @@ name = "compare-stacks"
 tier = "T3"
 tags = ["perf-exclusive", "needs-bake"]
 timeout = 600
-requires = "guest/initramfs-alpine/initramfs-alpine-dogfood.cpio.gz guest/initramfs-alpine/initramfs-alpine-go-ab.cpio.gz"
-cmd = "scripts/compare_stacks.sh dogfood go-ab 6"
-desc = "FLOOR(per-hop budget): per-hop perf gate + shell-vs-Go side-by-side"
+requires = "guest/initramfs-alpine/initramfs-alpine-insert-trim.cpio.gz guest/initramfs-alpine/initramfs-alpine-svcchain.cpio.gz"
+cmd = "scripts/compare_stacks.sh insert-trim svcchain 6"
+desc = "FLOOR(per-hop budget): per-hop perf gate + side-by-side (insert-trim vs svcchain)"
 
 [[test]]
 name = "ff-demo-long"
 tier = "T3"
 tags = ["perf-exclusive", "needs-bake"]
 timeout = 400
-requires = "guest/initramfs-alpine/initramfs-alpine-dogfood.cpio.gz guest/kernel/vmlinux-6.1.128"
+requires = "guest/initramfs-alpine/initramfs-alpine-insert-trim.cpio.gz guest/kernel/vmlinux-6.1.128"
 cmd = "scripts/ff_demo.sh 24 300"
 desc = "long-horizon FF (24 vhours): cadence + per-hop + speedup"
 
@@ -215,6 +211,15 @@ timeout = 500
 requires = ""
 cmd = "scripts/test_scenario.sh"
 desc = "TEST-1a: dvmm test verdict/exit-code contract (pass / wrong->1 / infra->2)"
+
+[[test]]
+name = "demo-scenario"
+tier = "T3"
+tags = ["needs-bake"]
+timeout = 900
+requires = "guest/initramfs-alpine/demo.dvmm guest/kernel/vmlinux-6.1.128"
+cmd = "target/release/dvmm test guest/initramfs-alpine/demo.dvmm --scenario guest/stacks/demo/demo.yml --wall-timeout 800 --logs-dir /tmp/demo-logs"
+desc = "flagship demo: full virtual day of the gRPC stack + fault/recovery -> PASS, per-service logs"
 
 [[test]]
 name = "test-faults"
@@ -230,6 +235,6 @@ name = "workload-realtime"
 tier = "T3"
 tags = ["perf-exclusive", "needs-bake"]
 timeout = 300
-requires = "guest/initramfs-alpine/initramfs-alpine-dogfood.cpio.gz guest/kernel/vmlinux-6.1.128"
+requires = "guest/initramfs-alpine/initramfs-alpine-insert-trim.cpio.gz guest/kernel/vmlinux-6.1.128"
 cmd = "scripts/smoke_test_workload.sh 240"
 desc = "FF-OFF real-time park path (the A/B counterpart; intentionally real-sleeps)"

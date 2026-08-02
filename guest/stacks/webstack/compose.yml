@@ -19,8 +19,8 @@
 
 services:
   postgres:
-    # Pinned by digest (= postgres 16.14-alpine); the SAME digest the dogfood /
-    # go-ab stacks use, so it is already a proven closed-world pin.
+    # Pinned by digest (= postgres 16.14-alpine); the SAME digest the insert-trim /
+    # demo stacks use, so it is already a proven closed-world pin.
     image: docker.io/library/postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
     environment:
       POSTGRES_HOST_AUTH_METHOD: trust

@@ -27,7 +27,7 @@ ROOT="$(cd "$HERE/.." && pwd)"
 
 TIMEOUT="${1:-240}"
 KERNEL="${2:-$ROOT/guest/kernel/vmlinux-6.1.128}"
-INITRD="${3:-$ROOT/guest/initramfs-alpine/initramfs-alpine-dogfood.cpio.gz}"
+INITRD="${3:-$ROOT/guest/initramfs-alpine/initramfs-alpine-insert-trim.cpio.gz}"
 
 INTERVAL_SECONDS="${INTERVAL_SECONDS:-2}"
 MAX_ROWS="${MAX_ROWS:-5}"

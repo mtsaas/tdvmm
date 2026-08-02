@@ -9,19 +9,20 @@
 # (a SOURCE_DATE_EPOCH-normalized, reproducible filesystem hash) + the pinned
 # build_base digests + the Go toolchain. Same source -> same content_id.
 #
-stack     health-gate
-project   dvmm_health-gate
+stack     insert-trim
+project   dvmm_insert-trim
 mem_mib   3072
-ram_estimate_mib  1044
-compose_lock_sha256  bf6f2a56e9b5c32684e711e1717294499e0e8cef3ab17ac09d148706f1beeff7
-initramfs_sha256     0e8825aa346923271d3845745245f9ce44a22ff33447173a7f33aac4caf20bf5  initramfs-alpine-health-gate.cpio.gz
+ram_estimate_mib  1742
+compose_lock_sha256  e5b12e1986fb9f4fb57ad65f04501584535a9da000315f34a0718fb460952958
+initramfs_sha256     5c61d2afaa607ce3db6f58e7dbf0b7ec0824908e1b834e1921bb918fd36577e3  initramfs-alpine-insert-trim.cpio.gz
 agent_sha256         c349a12a5a6df417aca96b3989d07419b2c7c9d1e184f8becae81187b0f50ad0  dvmm-agent
 builder_image        docker.io/library/alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
 builder_image        docker.io/library/debian:bookworm-slim@sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e
 builder_image        docker.io/library/rust:1.97-alpine3.22@sha256:b348cb409ac0a73de15065997a360063cf87465574a15e3e4469862cb8996f02
   image  policy=plain   upstream=docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616  diffid=sha256:0958e0fef2d6a31e1325b8bfecd99dead933363682d69850a7606599023751bc  size_mib=4
-  image  policy=plain   upstream=docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616  diffid=sha256:0958e0fef2d6a31e1325b8bfecd99dead933363682d69850a7606599023751bc  size_mib=4
+  image  policy=squash  upstream=docker.io/library/postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777  seed_tag=localhost/dvmm-postgres-57c72fd2a128:baked  src_diffid=sha256:af5b54b4903175790ece7037a66fd16496658d7030a59e2e2360f66038d74c8c  size_mib=283  GATE=ok
+  pin    upstream=docker.io/library/postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777  pinned=localhost/dvmm-postgres-57c72fd2a128@sha256:cbf217007d0742829dc120c3ea9cd2621e90eb3adfeaf6684e87ce268a2ca368
 # --- informational (NOT compared for repeatability) ---
 # host-probed values (podman version, baked-at) are written to the
 # cache dir's diagnostics/ side file, NEVER here (Fable guardrail §3).
-dvmm_sha256          986d12c2c2b8a169a2a15ae59fbf9d50c1304f1fcbbf7c6305d796440ab14894  health-gate.dvmm
+dvmm_sha256          59bdadcb8bc4214996aa51ce4bc4c2a8ce6d2a0379ca2a1df591c9cf83e60ae5  insert-trim.dvmm

@@ -2,9 +2,9 @@
 # deterministic-vmm Phase-2b comparison harness (PERMANENT tooling).
 #
 # Runs ANY TWO baked stacks under fast-forward and emits a STABLE, side-by-side
-# report of how each behaves. Built to compare the shell insert/trim service
-# (CONTROL) against the Go insert/trim service (TREATMENT) — same workload, the
-# runtime is the only variable — but it is generic: pass any two stack names.
+# report of how each behaves. Generic: pass any two stack names that emit the
+# DVMM_ROWCOUNT marker (e.g. insert-trim vs svcchain). It isolates the per-hop
+# VMM property and the busy-wait tripwire across two different workloads.
 #
 # It consumes the VMM's EXISTING per-run fast-forward metrics (dvmm --metrics-out:
 # the jump/speedup accounting + the Δvtsc histogram + the real-vs-virtual
@@ -22,7 +22,7 @@
 # interval, cap holds) and the per-hop <=500us mean gate (the VMM property).
 #
 # Usage: scripts/compare_stacks.sh [stackA] [stackB] [target_virtual_hours]
-#   stackA/stackB: stack names (default: dogfood go-ab) -> initramfs-alpine-<name>.cpio.gz
+#   stackA/stackB: stack names (default: insert-trim svcchain) -> initramfs-alpine-<name>.cpio.gz
 # Env: INTERVAL (3600) MAX_ROWS (1000) MEM (3072) MAX_JUMP_SECS (300)
 #      WALL_TIMEOUT (400)  GATE_HOP_US (500)
 set -uo pipefail
@@ -33,8 +33,8 @@ BIN="$ROOT/target/release/dvmm"
 KERNEL="$ROOT/guest/kernel/vmlinux-6.1.128"
 ALPINE="$ROOT/guest/initramfs-alpine"
 
-STACK_A="${1:-dogfood}"
-STACK_B="${2:-go-ab}"
+STACK_A="${1:-insert-trim}"
+STACK_B="${2:-svcchain}"
 TARGET_HOURS="${3:-6}"
 INTERVAL="${INTERVAL:-3600}"
 MAX_ROWS="${MAX_ROWS:-1000}"
@@ -109,7 +109,7 @@ run_stack() {
 # m <label> <key> : read a value from a stack's metrics file (empty if absent).
 m() { awk -v k="$2" '$1==k{print $2}' "$TMP/$1.metrics" 2>/dev/null; }
 
-# functional gates over a stack's row sequence (same properties as the dogfood
+# functional gates over a stack's row sequence (same properties as the insert-trim
 # ff_demo): started low, non-decreasing, capped at MAX_ROWS, cadence ~INTERVAL.
 functional_gate() {
   local label="$1"; local ok=1 mx=0 prev=-1 nondec=1 low=0 over=0 v

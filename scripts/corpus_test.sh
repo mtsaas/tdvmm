@@ -16,7 +16,7 @@
 #
 # Exits 0 only if every stack passes every gate.
 #
-# Usage: scripts/corpus_test.sh [stack ...]      (default: webstack configpipeline svcchain)
+# Usage: scripts/corpus_test.sh [stack ...]      (default: demo webstack configpipeline svcchain)
 # Env:   BAKE=1 (force re-bake)  INTERVAL(60) MAX_ROWS(1000) MEM(3072)
 #        TARGET_ROWS(4)  HC_TICK(2)  GATE_HOP_US(500)  WALL_TIMEOUT(300)
 #
@@ -37,7 +37,7 @@ KERNEL="$ROOT/guest/kernel/vmlinux-6.1.128"
 ALPINE="$ROOT/guest/initramfs-alpine"
 STACKS_DIR="$ROOT/guest/stacks"
 
-STACKS=("$@"); [ "${#STACKS[@]}" -eq 0 ] && STACKS=(webstack configpipeline svcchain)
+STACKS=("$@"); [ "${#STACKS[@]}" -eq 0 ] && STACKS=(demo webstack configpipeline svcchain)
 BAKE="${BAKE:-0}"
 INTERVAL="${INTERVAL:-60}"
 MAX_ROWS="${MAX_ROWS:-1000}"
@@ -140,6 +140,24 @@ gate_svcchain() {
   order_ok "$log" "backend Healthy < frontend Started" \
     "\[stack\]\[up\].*Container $B Healthy" "\[stack\]\[up\].*Container $F Started" || p=0
   rows_ok "$log" || p=0
+  return $((1 - p))
+}
+
+gate_demo() {
+  local log="$1" p=1
+  local P=dvmm_demo-postgres-1 R=dvmm_demo-redis-1 A=dvmm_demo-api-1
+  have "$log" 'DVMM_STACK_UP' 'compose brought the stack up' || p=0
+  have "$log" "DVMM_HC_HEALTHY container=$P" 'postgres reached healthy (ticker)' || p=0
+  have "$log" "DVMM_HC_HEALTHY container=$R" 'redis reached healthy (ticker)' || p=0
+  have "$log" 'api gRPC OrderService listening' 'api started (=> both service_healthy gates resolved)' || p=0
+  have "$log" 'hour [0-9]+: received [0-9]+ orders' 'client->api->postgres+redis gRPC roundtrip worked' || p=0
+  have "$log" 'GET /stats  pg\+redis OK' 'api served the read-side gRPC (pg+redis)' || p=0
+  have "$log" 'rollup h[0-9]+: [0-9]+ orders -> summary' 'worker rolled up orders into a summary' || p=0
+  # ordering: both backends Healthy before the api Started (compose stream).
+  order_ok "$log" "postgres Healthy < api Started" \
+    "\[stack\]\[up\].*Container $P Healthy" "\[stack\]\[up\].*Container $A Started" || p=0
+  order_ok "$log" "redis Healthy < api Started" \
+    "\[stack\]\[up\].*Container $R Healthy" "\[stack\]\[up\].*Container $A Started" || p=0
   return $((1 - p))
 }
 

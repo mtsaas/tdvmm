@@ -113,7 +113,7 @@ wrong even if it compiles and the tests pass.
 cargo build --release
 cargo test --release          # unit + protocol golden tests
 
-scripts/test_scenario.sh      # end-to-end: bake dogfood, boot it, run a scenario
+scripts/test_scenario.sh      # end-to-end: bake insert-trim, boot it, run a scenario
 scripts/test.sh --fast        # the fast tier of the suite
 ```
 

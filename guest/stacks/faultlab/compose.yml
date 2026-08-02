@@ -9,7 +9,7 @@
 #              can observe both the fault EFFECT and the RECOVERY.
 #
 # Both services reuse the ONE pinned Postgres digest (image-based, closed world),
-# exactly like the dogfood stack — client's entrypoint is overridden to a keepalive
+# exactly like the insert-trim stack — client's entrypoint is overridden to a keepalive
 # loop. Nothing here writes rows; the point is connectivity, not a workload, so the
 # scenarios can kill/stop/start `db` and partition/heal `client`<->`db` cleanly.
 #
