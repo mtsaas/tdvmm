@@ -26,6 +26,9 @@ long-term goal, not a property it has today (see `ARCHITECTURE.md`). What the
 closed world plus fast-forward give you now is testing against a fixed, pinned
 stack with no outside flakiness — not instruction-for-instruction repeatability.
 
+**New here?** `GETTING_STARTED.md` is a practical, step-by-step walkthrough —
+build a stack, run it, read its logs, and write tests with fault injection.
+
 ## Requirements
 
 - Linux on x86_64 with hardware virtualization and `/dev/kvm` (read + write).
@@ -155,6 +158,8 @@ always-pull) are rejected at build time with a clear message.
 
 ## Learn more
 
+- **`GETTING_STARTED.md`** — a step-by-step walkthrough: build a stack, run it,
+  read its logs, and write tests with fault injection.
 - **`CONTRIBUTING.md`** — how the code is laid out and where to look to add a
   feature or fix a bug.
 - **`ARCHITECTURE.md`** — the full design, from first principles.
