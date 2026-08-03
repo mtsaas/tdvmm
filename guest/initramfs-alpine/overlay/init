@@ -86,12 +86,19 @@ fi
 ip link set lo up 2>/dev/null || true
 hostname dvmm-guest 2>/dev/null || true
 
-# container storage: size-capped tmpfs seeded from the baked image store.
-# 3072m headroom for compose stacks: under the vfs graph driver each running
-# container's rootfs is a full copy of its image, so (for the dogfood) two
-# postgres-image containers + the store image + the seed coexist here. Cap, not
-# reservation -- RAM used tracks actual content, bounded by the 3 GiB guest.
-mount -t tmpfs -o size=2560m,mode=0700 tmpfs /var/lib/containers
+# container storage: size-capped tmpfs seeded from the baked image store. Holds
+# each container's overlay upper (its writable layer, including any data files a
+# service writes there) plus the seeded image store. This is a CAP, not a
+# reservation -- RAM used tracks actual content -- so we scale it with guest RAM
+# (60% of MemTotal), floored at the historical 2560 MiB so small guests are
+# unchanged. Scaling matters for multi-replica stacks like the TigerBeetle
+# cluster: each replica preallocates a ~1.06 GiB data file on its writable layer,
+# so three need ~3.2 GiB here -- past the old fixed 2560 MiB cap, which did not
+# grow with --mem (it predates the high-memory split).
+STORE_MIB=$(awk '/^MemTotal:/{print int($2/1024*60/100)}' /proc/meminfo 2>/dev/null)
+if [ -z "$STORE_MIB" ] || [ "$STORE_MIB" -lt 2560 ]; then STORE_MIB=2560; fi
+log "container-storage tmpfs cap: ${STORE_MIB}m (60% of guest RAM, floor 2560m)"
+mount -t tmpfs -o size="${STORE_MIB}m",mode=0700 tmpfs /var/lib/containers
 if [ -d /var/lib/containers-seed ]; then
   cp -a /var/lib/containers-seed/. /var/lib/containers/ 2>/dev/null || true
   # reclaim the seed's second copy from the root tmpfs now that it is in place.
