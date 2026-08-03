@@ -33,9 +33,10 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 BIN="$ROOT/target/release/dvmm"
-KERNEL="$ROOT/guest/kernel/vmlinux-6.1.128"
-ALPINE="$ROOT/guest/initramfs-alpine"
 STACKS_DIR="$ROOT/guest/stacks"
+# Self-contained: bake each stack into a gitignored test dir, then `dvmm run` it
+# (kernel + initramfs come from the .dvmm; no repo / ~/.dvmm/artifacts dependency).
+OUTDIR="${DVMM_OUT_DIR:-$ROOT/.dvmm-test-results}"; mkdir -p "$OUTDIR"
 
 STACKS=("$@"); [ "${#STACKS[@]}" -eq 0 ] && STACKS=(demo webstack configpipeline svcchain)
 BAKE="${BAKE:-0}"
@@ -54,8 +55,6 @@ WALL_TIMEOUT="${WALL_TIMEOUT:-300}"
 MAX_VIRTUAL_TIME="${MAX_VIRTUAL_TIME:-$(( (TARGET_ROWS + 2) * INTERVAL ))s}"
 
 [ -x "$BIN" ] || { echo "[corpus] building dvmm..."; ( cd "$ROOT" && cargo build --release ) || exit 3; }
-[ -f "$KERNEL" ] || { echo "[corpus] kernel missing: $KERNEL"; exit 3; }
-[ -f "$ALPINE/initramfs-alpine.cpio.gz" ] || { echo "[corpus] base guest missing -- run build_rootfs.sh"; exit 3; }
 
 TMP="$(mktemp -d)"; trap 'rm -f "$TMP"/*.log "$TMP"/*.metrics 2>/dev/null; rmdir "$TMP" 2>/dev/null' EXIT
 
@@ -169,26 +168,26 @@ for stack in "${STACKS[@]}"; do
   echo " CORPUS STACK: $stack"
   echo "==================================================================="
   compose="$STACKS_DIR/$stack/compose.yml"
-  initrd="$ALPINE/initramfs-alpine-${stack}.cpio.gz"
+  dvmm="$OUTDIR/${stack}.dvmm"
   if [ ! -f "$compose" ]; then echo "  FAIL: no compose.yml at $compose"; RESULT[$stack]="fail:no-compose"; overall=1; continue; fi
 
-  if [ "$BAKE" = "1" ] || [ ! -f "$initrd" ]; then
-    echo "[corpus] baking $stack ..."
-    if ! "$BIN" build "$compose" >"$TMP/$stack.bake.log" 2>&1; then
+  if [ "$BAKE" = "1" ] || [ ! -f "$dvmm" ]; then
+    echo "[corpus] baking $stack -> $dvmm ..."
+    if ! "$BIN" build "$compose" -o "$dvmm" >"$TMP/$stack.bake.log" 2>&1; then
       echo "  FAIL: bake error (tail):"; tail -20 "$TMP/$stack.bake.log" | sed 's/^/    /'
       RESULT[$stack]="fail:bake"; overall=1; continue
     fi
     echo "  baked OK: $(grep -E 'sha256:' "$TMP/$stack.bake.log" | tail -1 | sed 's/^ *//')"
   else
-    echo "[corpus] using existing initramfs ($(basename "$initrd")); set BAKE=1 to re-bake"
+    echo "[corpus] using existing artifact ($(basename "$dvmm")); set BAKE=1 to re-bake"
   fi
-  [ -f "$initrd" ] || { echo "  FAIL: initramfs missing after bake"; RESULT[$stack]="fail:no-initrd"; overall=1; continue; }
+  [ -f "$dvmm" ] || { echo "  FAIL: artifact missing after bake"; RESULT[$stack]="fail:no-dvmm"; overall=1; continue; }
 
   log="$TMP/$stack.log"; metrics="$TMP/$stack.metrics"
   cmdline="console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable dvmm.stack=1 dvmm.hc_tick=$HC_TICK dvmm.interval=$INTERVAL dvmm.maxrows=$MAX_ROWS"
   echo "[corpus] boot: mem=${MEM}MiB ff=ON horizon=${MAX_VIRTUAL_TIME} hc_tick=${HC_TICK}s wall_timeout=${WALL_TIMEOUT}s"
   start=$(date +%s.%N)
-  timeout "$WALL_TIMEOUT" "$BIN" boot --kernel "$KERNEL" --initrd "$initrd" --mem "$MEM" --ff on \
+  timeout "$WALL_TIMEOUT" "$BIN" run "$dvmm" --mem "$MEM" --ff on \
     --max-virtual-time "$MAX_VIRTUAL_TIME" --metrics-out "$metrics" --cmdline "$cmdline" \
     </dev/null >"$log" 2>&1
   rc=$?

@@ -22,7 +22,7 @@
 # interval, cap holds) and the per-hop <=500us mean gate (the VMM property).
 #
 # Usage: scripts/compare_stacks.sh [stackA] [stackB] [target_virtual_hours]
-#   stackA/stackB: stack names (default: insert-trim svcchain) -> initramfs-alpine-<name>.cpio.gz
+#   stackA/stackB: stack names (default: insert-trim svcchain); each is baked to a .dvmm
 # Env: INTERVAL (3600) MAX_ROWS (1000) MEM (3072) MAX_JUMP_SECS (300)
 #      WALL_TIMEOUT (400)  GATE_HOP_US (500)
 set -uo pipefail
@@ -30,8 +30,10 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 BIN="$ROOT/target/release/dvmm"
-KERNEL="$ROOT/guest/kernel/vmlinux-6.1.128"
-ALPINE="$ROOT/guest/initramfs-alpine"
+STACKS_DIR="$ROOT/guest/stacks"
+# Self-contained: bake each stack into a gitignored test dir, then `dvmm run` it
+# (kernel + initramfs come from the .dvmm; no repo / ~/.dvmm/artifacts dependency).
+OUTDIR="${DVMM_OUT_DIR:-$ROOT/.dvmm-test-results}"; mkdir -p "$OUTDIR"
 
 STACK_A="${1:-insert-trim}"
 STACK_B="${2:-svcchain}"
@@ -50,7 +52,6 @@ GATE_HOP_US="${GATE_HOP_US:-500}"
 MAX_VIRTUAL_TIME="${MAX_VIRTUAL_TIME:-$(( (TARGET_HOURS + 2) * INTERVAL ))s}"
 
 [ -x "$BIN" ] || { echo "compare: building dvmm..."; ( cd "$ROOT" && cargo build --release ) || exit 3; }
-[ -f "$KERNEL" ] || { echo "compare: kernel missing: $KERNEL"; exit 3; }
 
 TMP="$(mktemp -d)"
 cleanup() { rm -rf "$TMP"; }
@@ -60,14 +61,18 @@ trap cleanup EXIT
 # $TMP/<label>.log ; echoes "pass"/"fail:<reason>" on stdout.
 run_stack() {
   local name="$1" label="$2"
-  local initrd="$ALPINE/initramfs-alpine-${name}.cpio.gz"
+  local dvmm="$OUTDIR/$name.dvmm"
   local log="$TMP/$label.log" metrics="$TMP/$label.metrics"
-  if [ ! -f "$initrd" ]; then echo "fail:no initramfs for '$name' ($initrd) -- bake it first"; return; fi
+  if [ ! -f "$dvmm" ]; then
+    if ! "$BIN" build "$STACKS_DIR/$name/compose.yml" -o "$dvmm" >"$TMP/$label.bake.log" 2>&1; then
+      echo "fail:bake '$name' (see $TMP/$label.bake.log)"; return
+    fi
+  fi
 
   local cmdline="console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable dvmm.stack=1 dvmm.interval=$INTERVAL dvmm.maxrows=$MAX_ROWS"
   local start_wall end_wall pid
   start_wall=$(date +%s.%N)
-  "$BIN" boot --kernel "$KERNEL" --initrd "$initrd" --mem "$MEM" --ff on \
+  "$BIN" run "$dvmm" --mem "$MEM" --ff on \
     --max-jump-secs "$MAX_JUMP_SECS" --max-virtual-time "$MAX_VIRTUAL_TIME" \
     --metrics-out "$metrics" --cmdline "$cmdline" </dev/null >"$log" 2>&1 &
   pid=$!

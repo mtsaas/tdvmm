@@ -373,11 +373,18 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     // Output destinations (needed early so a cache HIT can restore them). The `-o`
     // path is NOT part of the cache key: identical inputs bake identical bytes
     // regardless of where they land.
+    //
+    // DEFAULT outputs land under the resolved cache root's `artifacts/` dir (NOT
+    // the source tree): an installed `dvmm` must not write build outputs into the
+    // repo. `-o <path>` still fully overrides the `.dvmm` destination; the
+    // intermediate cpio always lands under `artifacts/`.
+    let artifacts_dir = cache_dir.join("artifacts");
+    std::fs::create_dir_all(&artifacts_dir)?;
     let out_dvmm = match &args.out {
         Some(o) => PathBuf::from(o),
-        None => alpine_dir.join(format!("{stack_name}.dvmm")),
+        None => artifacts_dir.join(format!("{stack_name}.dvmm")),
     };
-    let out_initramfs = alpine_dir.join(format!("initramfs-alpine-{stack_name}.cpio.gz"));
+    let out_initramfs = artifacts_dir.join(format!("initramfs-alpine-{stack_name}.cpio.gz"));
     let committed_lock = here.join("stacks").join(&stack_name).join("compose.lock.yml");
     let stack_lock_path = here.join("stacks").join(&stack_name).join("stack.lock");
 

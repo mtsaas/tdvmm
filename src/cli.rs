@@ -89,7 +89,8 @@ pub(crate) struct BuildCliArgs {
     /// Path to the compose.yml to bake.
     #[arg(value_name = "compose.yml")]
     pub(crate) compose: String,
-    /// Output .dvmm path (default guest/initramfs-alpine/<stack>.dvmm).
+    /// Output .dvmm path (default <cache-dir>/artifacts/<stack>.dvmm, where
+    /// <cache-dir> is --cache-dir > $DVMM_CACHE_DIR > $HOME/.dvmm).
     #[arg(short, long, value_name = "PATH")]
     pub(crate) out: Option<String>,
     /// Stack name (default: the compose file's parent directory name).

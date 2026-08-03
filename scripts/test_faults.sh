@@ -17,14 +17,16 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 BIN="$ROOT/target/release/dvmm"
-DVMM="${DVMM_FAULT_ARTIFACT:-$ROOT/faultlab.dvmm}"
+# Self-contained: bake into a gitignored test dir (NOT the repo / ~/.dvmm/artifacts).
+OUTDIR="${DVMM_OUT_DIR:-$ROOT/.dvmm-test-results}"; mkdir -p "$OUTDIR"
+DVMM="${DVMM_FAULT_ARTIFACT:-$OUTDIR/faultlab.dvmm}"
 SDIR="$ROOT/guest/stacks/faultlab"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 [ -x "$BIN" ] || { echo "building dvmm..."; ( cd "$ROOT" && cargo build --release ) || exit 3; }
 if [ ! -f "$DVMM" ]; then
-  echo "== faultlab.dvmm missing — baking it =="
+  echo "== faultlab.dvmm missing — baking it (dvmm build -> $DVMM) =="
   "$BIN" build "$SDIR/compose.yml" -o "$DVMM" || {
     echo "FATAL: bake failed" >&2; exit 3; }
 fi

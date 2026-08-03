@@ -28,8 +28,11 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 BIN="$ROOT/target/release/dvmm"
-KERNEL="$ROOT/guest/kernel/vmlinux-6.1.128"
-INITRD="${INITRD:-$ROOT/guest/initramfs-alpine/initramfs-alpine-insert-trim.cpio.gz}"
+STACK="${STACK:-insert-trim}"
+# Self-contained: bake the stack into a gitignored test dir, then `dvmm run` it
+# (kernel + initramfs come from the .dvmm; no repo / ~/.dvmm/artifacts dependency).
+OUTDIR="${DVMM_OUT_DIR:-$ROOT/.dvmm-test-results}"; mkdir -p "$OUTDIR"
+DVMM="${DVMM_ARTIFACT:-$OUTDIR/$STACK.dvmm}"
 
 TARGET_HOURS="${1:-24}"
 WALL_TIMEOUT="${2:-300}"
@@ -44,7 +47,11 @@ MAX_JUMP_SECS="${MAX_JUMP_SECS:-300}"
 MAX_VIRTUAL_TIME="${MAX_VIRTUAL_TIME:-$(( (TARGET_HOURS + 12) * 3600 ))s}"
 
 [ -x "$BIN" ] || { echo "ff_demo: building..."; ( cd "$ROOT" && cargo build --release ) || exit 3; }
-[ -f "$KERNEL" ] && [ -f "$INITRD" ] || { echo "ff_demo: missing artifacts"; exit 3; }
+if [ ! -f "$DVMM" ]; then
+  echo "[ff_demo] baking $STACK -> $DVMM"
+  "$BIN" build "$ROOT/guest/stacks/$STACK/compose.yml" -o "$DVMM" \
+    || { echo "ff_demo: bake failed"; exit 3; }
+fi
 
 LOG="$(mktemp)"; PID=""
 cleanup() { [ -n "$PID" ] && kill "$PID" 2>/dev/null; [ -n "$PID" ] && { sleep 1; kill -9 "$PID" 2>/dev/null; }; rm -f "$LOG"; }
@@ -53,7 +60,7 @@ trap cleanup EXIT
 CMDLINE="console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable dvmm.stack=1 dvmm.interval=$INTERVAL dvmm.maxrows=$MAX_ROWS"
 echo "[ff_demo] boot: interval=${INTERVAL}s max_rows=$MAX_ROWS target=${TARGET_HOURS} virtual-hours mem=${MEM}MiB ff=ON max-virtual-time=${MAX_VIRTUAL_TIME}"
 START_WALL=$(date +%s.%N)
-"$BIN" boot --kernel "$KERNEL" --initrd "$INITRD" --mem "$MEM" --ff on --max-jump-secs "$MAX_JUMP_SECS" \
+"$BIN" run "$DVMM" --mem "$MEM" --ff on --max-jump-secs "$MAX_JUMP_SECS" \
   --max-virtual-time "$MAX_VIRTUAL_TIME" \
   --cmdline "$CMDLINE" </dev/null >"$LOG" 2>&1 &
 PID=$!

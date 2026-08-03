@@ -29,7 +29,10 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 BIN="$ROOT/target/release/dvmm"
 KERNEL="$ROOT/guest/kernel/vmlinux-6.1.128"
-ALPINE="$ROOT/guest/initramfs-alpine"
+# Self-contained bake outputs: a gitignored, persistent test cache dir (NOT the
+# repo, NOT ~/.dvmm). The per-stack initramfs (needed by gate 8's raw boot) lands
+# in $CACHE/artifacts/; keeping the dir warm across runs makes re-bakes fast.
+CACHE="${DVMM_TEST_CACHE:-$ROOT/.dvmm-tmp/dvmm-cache}"; mkdir -p "$CACHE"
 
 STACKS=("$@"); [ "${#STACKS[@]}" -eq 0 ] && STACKS=(insert-trim svcchain)
 MEM="${MEM:-3072}"
@@ -67,15 +70,19 @@ for stack in "${STACKS[@]}"; do
   if [ ! -f "$compose" ]; then
     echo "  SKIP: $stack has no compose.yml at $compose"; continue
   fi
-  # `dvmm build` writes the per-stack initramfs here (used by gate 8's raw boot).
-  initrd="$ALPINE/initramfs-alpine-${stack}.cpio.gz"
+  # `dvmm build --cache-dir "$CACHE"` writes the per-stack initramfs here (gate 8's raw boot).
+  initrd="$CACHE/artifacts/initramfs-alpine-${stack}.cpio.gz"
   A="$TMP/$stack-A.dvmm"; B="$TMP/$stack-B.dvmm"
   ok=1
 
   # (1) bit-reproducible: `dvmm build` the SAME compose twice -> byte-identical .dvmm
   #     (OP-1b folds the whole bake into the binary; the initramfs IS now bit-repro).
-  "$BIN" build "$compose" -o "$A" >/dev/null 2>"$TMP/packA.err" || { echo "  FAIL: build A"; tail -5 "$TMP/packA.err"; overall=1; continue; }
-  "$BIN" build "$compose" -o "$B" >/dev/null 2>"$TMP/packB.err" || { echo "  FAIL: build B"; tail -5 "$TMP/packB.err"; overall=1; continue; }
+  #     Bake to the canonical <stack>.dvmm basename (so the committed stack.lock's
+  #     recorded artifact filename is unchanged), then copy each result aside to compare.
+  "$BIN" build "$compose" -o "$TMP/$stack.dvmm" --cache-dir "$CACHE" >/dev/null 2>"$TMP/packA.err" || { echo "  FAIL: build A"; tail -5 "$TMP/packA.err"; overall=1; continue; }
+  cp "$TMP/$stack.dvmm" "$A"
+  "$BIN" build "$compose" -o "$TMP/$stack.dvmm" --cache-dir "$CACHE" >/dev/null 2>"$TMP/packB.err" || { echo "  FAIL: build B"; tail -5 "$TMP/packB.err"; overall=1; continue; }
+  cp "$TMP/$stack.dvmm" "$B"
   shA="$(sha256sum "$A" | awk '{print $1}')"; shB="$(sha256sum "$B" | awk '{print $1}')"
   if [ "$shA" = "$shB" ]; then echo "  (1) BIT-REPRODUCIBLE OK: two builds -> identical .dvmm ($shA)"; else echo "  (1) FAIL: .dvmm differs ($shA != $shB)"; ok=0; fi
 
