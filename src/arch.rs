@@ -37,9 +37,15 @@ pub const SYSTEM_MEM_SIZE: u64 = RSDP_ADDR - SYSTEM_MEM_START;
 /// TSS address required by KVM on Intel (KVM_SET_TSS_ADDR) before KVM_RUN.
 pub const KVM_TSS_ADDRESS: u64 = 0xfffb_d000;
 
-/// Start of the 32-bit MMIO gap (3 GiB). Step 1 only supports guests whose RAM
-/// fits entirely below this, so guest memory is a single contiguous region.
+/// Start of the 32-bit MMIO gap (3 GiB). Guest RAM never backs `[3 GiB, 4 GiB)`
+/// (the LAPIC / IO-APIC / KVM-TSS live there). RAM up to this address is the low
+/// region; anything above spills into a second region based at 4 GiB
+/// ([`FIRST_ADDR_PAST_32BITS`]), leaving the gap unbacked.
 pub const MMIO_MEM_START: u64 = 0xc000_0000;
+
+/// First guest-physical address past the 32-bit range (4 GiB). The high RAM
+/// region is based here, so nothing overlaps the 32-bit MMIO gap below it.
+pub const FIRST_ADDR_PAST_32BITS: u64 = 0x1_0000_0000;
 
 /// Legacy 16550 UART base port and its ISA IRQ line (COM1 / ttyS0 — the console).
 pub const SERIAL_PORT_BASE: u16 = 0x3f8;

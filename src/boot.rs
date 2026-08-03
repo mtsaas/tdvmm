@@ -72,13 +72,16 @@ pub fn load_initrd(
 ) -> Result<InitrdConfig, BootError> {
     let size = data.len();
 
-    // Highest low-RAM region determines placement.
+    // Placement is against the LOW region only: `ramdisk_image` in the boot
+    // header is a u32, so the initramfs must stay below 4 GiB. On a split guest
+    // `find_region(0)` is the 3 GiB low region; on a single-region guest it is
+    // all of RAM — the same value as before the high-memory split.
     let lowmem_end = mem
         .find_region(GuestAddress(0))
         .map(|r| r.len())
         .unwrap_or(mem_size);
     if size as u64 > lowmem_end {
-        return Err(BootError("initramfs larger than guest RAM".into()));
+        return Err(BootError("initramfs larger than low guest RAM".into()));
     }
     let address = (lowmem_end - size as u64) & !0xfffu64; // 4 KiB aligned
 
@@ -104,6 +107,41 @@ fn add_e820_entry(
     params.e820_table[idx].size = size;
     params.e820_table[idx].r#type = mem_type;
     params.e820_entries += 1;
+    Ok(())
+}
+
+/// Build the E820 memory map for `mem_size` bytes of guest RAM.
+///
+/// Low RAM runs from 0 up to the top of guest RAM, but never past the 32-bit
+/// MMIO gap ([`arch::MMIO_MEM_START`], 3 GiB) — the reserved system-data region
+/// (holding the MPTable) is punched out of it. Any RAM beyond 3 GiB becomes a
+/// SEPARATE high-RAM entry based at exactly 4 GiB ([`arch::FIRST_ADDR_PAST_32BITS`]);
+/// the `[3 GiB, 4 GiB)` gap is simply absent from the map. A guest whose RAM
+/// fits below the gap gets EXACTLY the three entries it did before the split
+/// (no high entry, no zero-length entry).
+fn build_e820_map(params: &mut boot_params, mem_size: u64) -> Result<(), BootError> {
+    let low_ram_end = mem_size.min(arch::MMIO_MEM_START);
+    add_e820_entry(params, 0, arch::SYSTEM_MEM_START, E820_RAM)?;
+    add_e820_entry(
+        params,
+        arch::SYSTEM_MEM_START,
+        arch::SYSTEM_MEM_SIZE,
+        E820_RESERVED,
+    )?;
+    add_e820_entry(
+        params,
+        arch::HIMEM_START,
+        low_ram_end - arch::HIMEM_START,
+        E820_RAM,
+    )?;
+    if mem_size > arch::MMIO_MEM_START {
+        add_e820_entry(
+            params,
+            arch::FIRST_ADDR_PAST_32BITS,
+            mem_size - arch::MMIO_MEM_START,
+            E820_RAM,
+        )?;
+    }
     Ok(())
 }
 
@@ -152,21 +190,7 @@ pub fn configure_system(
         ..Default::default()
     };
 
-    // E820: low RAM, reserved system-data region (holds the MPTable), then
-    // high RAM from 1 MiB to the top of guest memory.
-    add_e820_entry(&mut params, 0, arch::SYSTEM_MEM_START, E820_RAM)?;
-    add_e820_entry(
-        &mut params,
-        arch::SYSTEM_MEM_START,
-        arch::SYSTEM_MEM_SIZE,
-        E820_RESERVED,
-    )?;
-    add_e820_entry(
-        &mut params,
-        arch::HIMEM_START,
-        mem_size - arch::HIMEM_START,
-        E820_RAM,
-    )?;
+    build_e820_map(&mut params, mem_size)?;
 
     LinuxBootConfigurator::write_bootparams(
         &BootParams::new(&params, GuestAddress(arch::ZERO_PAGE_START)),
@@ -175,4 +199,69 @@ pub fn configure_system(
     .map_err(be("writing zero page"))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const GIB: u64 = 1 << 30;
+
+    /// (addr, size, type) for each populated E820 entry, in order.
+    fn e820(mem_size: u64) -> Vec<(u64, u64, u32)> {
+        let mut params = boot_params::default();
+        build_e820_map(&mut params, mem_size).unwrap();
+        params.e820_table[..params.e820_entries as usize]
+            .iter()
+            .map(|e| (e.addr, e.size, e.r#type))
+            .collect()
+    }
+
+    #[test]
+    fn e820_below_gap_is_unchanged() {
+        // A 2 GiB guest: exactly the three entries present before the split,
+        // no high entry, no zero-length entry.
+        let map = e820(2 * GIB);
+        assert_eq!(
+            map,
+            vec![
+                (0, arch::SYSTEM_MEM_START, E820_RAM),
+                (arch::SYSTEM_MEM_START, arch::SYSTEM_MEM_SIZE, E820_RESERVED),
+                (arch::HIMEM_START, 2 * GIB - arch::HIMEM_START, E820_RAM),
+            ]
+        );
+    }
+
+    #[test]
+    fn e820_exactly_3gib_has_no_high_entry() {
+        let map = e820(3 * GIB);
+        assert_eq!(map.len(), 3);
+        // Low RAM ends exactly at the gap; nothing above.
+        assert_eq!(map[2], (arch::HIMEM_START, arch::MMIO_MEM_START - arch::HIMEM_START, E820_RAM));
+    }
+
+    #[test]
+    fn e820_above_gap_splits_low_and_high() {
+        // A 6 GiB guest: low RAM clamped at 3 GiB, high RAM [4 GiB, 4+3 GiB).
+        let map = e820(6 * GIB);
+        assert_eq!(
+            map,
+            vec![
+                (0, arch::SYSTEM_MEM_START, E820_RAM),
+                (arch::SYSTEM_MEM_START, arch::SYSTEM_MEM_SIZE, E820_RESERVED),
+                (arch::HIMEM_START, arch::MMIO_MEM_START - arch::HIMEM_START, E820_RAM),
+                (arch::FIRST_ADDR_PAST_32BITS, 6 * GIB - arch::MMIO_MEM_START, E820_RAM),
+            ]
+        );
+        // The [3 GiB, 4 GiB) gap is never described as RAM.
+        for (addr, size, ty) in &map {
+            if *ty == E820_RAM {
+                let end = addr + size;
+                assert!(
+                    *addr >= arch::FIRST_ADDR_PAST_32BITS || end <= arch::MMIO_MEM_START,
+                    "RAM entry [{addr:#x}, {end:#x}) overlaps the 32-bit MMIO gap"
+                );
+            }
+        }
+    }
 }

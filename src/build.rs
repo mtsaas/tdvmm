@@ -39,7 +39,12 @@ use crate::ui;
 
 const BUILD_EPOCH: &str = "1785542400";
 const BUSYBOX_REF: &str = "docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616";
-const VMM_MAX_MEM_MIB: u64 = 3072;
+/// Static sanity ceiling for `--mem`, in MiB (1 TiB). Matches the VMM's own
+/// guest-memory cap ([`crate::memory`]): guest RAM now splits across the 32-bit
+/// MMIO gap, so a bake asking for >3 GiB is fine and must NOT warn — only an
+/// obviously bogus size (e.g. bytes passed as MiB) trips this. Nothing
+/// host-probed feeds it.
+const VMM_MAX_MEM_MIB: u64 = 1024 * 1024;
 const DEFAULT_MEM_MIB: u64 = 3072;
 const DEFAULT_WORKING_SET_MIB: u64 = 512;
 const DEFAULT_SQUASH_THRESHOLD_MIB: u64 = 100;
@@ -592,7 +597,7 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
         ux.progress.detail(format!("   configured {mem_mib} MiB >= estimate {est_mib} MiB (OK)"));
     }
     if mem_mib > VMM_MAX_MEM_MIB {
-        ux.progress.println(format!("{}: {mem_mib} MiB exceeds the current VMM cap {VMM_MAX_MEM_MIB} MiB (32-bit MMIO gap);", compose::WARN));
+        ux.progress.println(format!("{}: {mem_mib} MiB exceeds the {VMM_MAX_MEM_MIB} MiB (1 TiB) sanity cap — did you pass bytes instead of MiB?", compose::WARN));
     }
 
     // --- 6. assemble the per-stack initramfs (build_rootfs, stack mode) ---
