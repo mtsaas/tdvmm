@@ -1,0 +1,20 @@
+# deterministic-vmm -- REGRESSION guard for the tick doorbell.
+#
+# `spinner` pins the single vCPU with a pure shell busy-loop: `while :; do :; done`
+# makes NO syscalls, so the guest runs EXIT-FREE (no MMIO/PIO, no HLT). Without the
+# tick doorbell (src/doorbell.rs), the LAPIC timer deadline can never be serviced
+# during that burst, jiffies freeze, and on one vCPU the scheduler can never
+# preempt — so `worker`, podman, and the dvmm agent all starve and the guest
+# wedges. This is exactly the container-start wedge class, distilled to one line.
+#
+# With the doorbell, the armed tick preempts the spinner and the guest stays
+# responsive. The `spinner.yml` scenario asserts that: if it ever fails/wedges,
+# the "armed timers must preempt an exit-free vCPU" invariant has regressed.
+services:
+  spinner:
+    image: docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616
+    entrypoint: ["/bin/sh", "-c", "echo SPINNER_UP; while :; do :; done"]
+
+  worker:
+    image: docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616
+    entrypoint: ["/bin/sh", "-c", "echo WORKER_UP; i=0; while :; do i=$((i+1)); echo WORKER_TICK_$i; sleep 1; done"]

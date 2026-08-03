@@ -154,16 +154,7 @@ impl Parker {
     }
 
     fn arm(&self, ns: u64) {
-        let spec = libc::itimerspec {
-            it_interval: libc::timespec {
-                tv_sec: 0,
-                tv_nsec: 0,
-            },
-            it_value: libc::timespec {
-                tv_sec: (ns / 1_000_000_000) as libc::time_t,
-                tv_nsec: (ns % 1_000_000_000) as libc::c_long,
-            },
-        };
+        let spec = crate::util::one_shot_itimerspec(ns);
         // SAFETY: valid fd, relative one-shot arming, no old-value out pointer.
         unsafe {
             libc::timerfd_settime(self.timer_fd, 0, &spec, std::ptr::null_mut());

@@ -41,6 +41,8 @@ mod compose;
 mod control;
 mod cpio;
 mod cpuid;
+mod diag;
+mod doorbell;
 mod engine;
 mod events;
 mod exit;
@@ -810,7 +812,28 @@ fn run_user_backend(
         e.start(vtsc_start);
     }
 
+    // Wedge observability (opt-in: DVMM_WEDGE_SECS): a watchdog that dumps the
+    // vCPU's exit histogram + guest RIP/interrupt state when the guest makes no
+    // console/HLT progress — the tool for a guest that hard-spins with no output.
+    let diag = diag::Diag::from_env();
+    diag.note_tid();
+    std::sync::Arc::clone(&diag).spawn_watchdog();
+
+    // Tick doorbell: lets an armed virtual-time deadline preempt an exit-free
+    // KVM_RUN — Fable's fix for the container-start wedge (armed timers must be
+    // able to interrupt a guest that runs a full tick with no exit). ON by
+    // default; DVMM_NO_DOORBELL=1 disables it for A/B.
+    let mut doorbell = doorbell::Doorbell::new(&mut vcpu);
+
     loop {
+        // Doorbell hygiene: clear immediate_exit BEFORE service_timers, so any
+        // fire from here on re-sets it and the coming KVM_RUN bails (no lost
+        // wakeup). Also service a watchdog dump requested without an EINTR — the
+        // livelock case, where the SIGUSR1 kick is consumed in userspace and the
+        // EINTR arm below never runs (diag guardrail).
+        doorbell.clear(&mut vcpu);
+        maybe_dump_wedge(&diag, &mut vcpu, &clock, &events, &lapic, &ioapic);
+
         // (1) Fire any due guest timer + the horizon + the scenario deadline, then
         //     reconcile the queue to the LAPIC's current armed deadline. A fired
         //     StopRun stops the run; a fired ScenarioStep drives the engine (which
@@ -887,22 +910,40 @@ fn run_user_backend(
             r.cr8 = u64::from(lapic.tpr() >> 4);
         }
 
-        // (4) Run.
+        // (4) Run. Arm the doorbell to the earliest pending deadline first, so an
+        // exit-free guest is broken out in time to service it (else its tick never
+        // fires, jiffies freeze, and the single vCPU can never be preempted). Fold
+        // in the LAPIC's live deadline (see min_deadline): a tick that fired in
+        // service_timers this boundary re-armed the LAPIC but is not in the queue
+        // until the next boundary, so peek_deadline() alone would briefly disarm.
+        doorbell.arm(min_deadline(events.peek_deadline(), lapic.timer_deadline()), &clock);
         let exit = match vcpu.run() {
             Ok(exit) => exit,
             Err(err) => {
                 let e = err.errno();
-                if e == libc::EINTR || e == libc::EAGAIN {
+                if e == libc::EINTR {
+                    // A signal broke KVM_RUN — a doorbell tick or a watchdog kick.
+                    // Count it; service a requested state dump here on the vCPU
+                    // thread (KVM reads stay single-writer).
+                    diag.note_eintr();
+                    maybe_dump_wedge(&diag, &mut vcpu, &clock, &events, &lapic, &ioapic);
+                    continue;
+                }
+                if e == libc::EAGAIN {
                     continue;
                 }
                 return Err(format!("KVM_RUN failed: {err}").into());
             }
         };
 
+        // Wedge observability: bucket every exit (a no-op unless DVMM_WEDGE_SECS).
+        diag.record(&exit);
+
         // (5) Handle the exit.
         match exit {
             VcpuExit::IoOut(port, data) => {
                 if serial::is_serial(port) {
+                    diag.note_console_out(data.len() as u64);
                     let mut s = serial.lock().unwrap();
                     for &b in data {
                         let _ = s.write((port - arch::SERIAL_PORT_BASE) as u8, b);
@@ -1092,6 +1133,12 @@ fn run_user_backend(
         }
     }
 
+    // The vCPU loop has ended; silence the wedge watchdog so post-run log capture
+    // (idle by design) isn't misread as a stall. The doorbell stays LIVE: capture
+    // drives the still-running guest through KVM_RUN and needs the same tick
+    // preemption (see drive_until_reply). It is torn down on Doorbell::drop.
+    diag.stop();
+
     let secs = start.elapsed().as_secs_f64();
     dlog!(
         "[dvmm] userspace backend stopped: {hlt_count} HLT exits over {secs:.1}s \
@@ -1185,6 +1232,7 @@ fn run_user_backend(
         if matches!(stop_reason, StopReason::Scenario | StopReason::Horizon) {
             capture_logs(
                 &mut vcpu,
+                &mut doorbell,
                 &serial,
                 &serial_drain,
                 &clock,
@@ -1271,6 +1319,40 @@ fn report_horizon(ff: Option<&FfState>, start: std::time::Instant) {
 struct Fired {
     horizon: bool,
     scenario: bool,
+}
+
+/// The earlier of the event queue's next deadline and the LAPIC's live timer
+/// deadline. Folding in the LAPIC deadline covers the one-boundary window right
+/// after a periodic tick fires: `fire_timer_if_due` re-arms the LAPIC immediately,
+/// but that new deadline is only mirrored into the queue at the NEXT boundary — so
+/// `peek_deadline()` alone would briefly disarm the doorbell (and make a wedge
+/// dump misreport "none armed"). Used for arming the doorbell and for the dumps.
+fn min_deadline(queue: Option<u64>, lapic: Option<u64>) -> Option<u64> {
+    match (queue, lapic) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+/// Service a watchdog-requested wedge dump (a no-op unless one is pending). Reads
+/// the guest state ON the vCPU thread, so the KVM ioctls stay single-writer.
+fn maybe_dump_wedge(
+    diag: &diag::Diag,
+    vcpu: &mut VcpuFd,
+    clock: &VirtualClock,
+    events: &events::EventQueue<TimerKind>,
+    lapic: &Lapic,
+    ioapic: &Ioapic,
+) {
+    if diag.take_dump_request() {
+        diag.dump_guest(
+            vcpu,
+            clock.vtsc_now(),
+            min_deadline(events.peek_deadline(), lapic.timer_deadline()),
+            &lapic.diag_str(),
+            &ioapic.diag_str(),
+        );
+    }
 }
 
 fn service_timers(
@@ -1661,6 +1743,7 @@ const CAPTURE_VTSC_BUDGET_S: f64 = 120.0;
 #[allow(clippy::too_many_arguments)]
 fn capture_logs(
     vcpu: &mut VcpuFd,
+    doorbell: &mut doorbell::Doorbell,
     serial: &serial::SharedSerial,
     serial_drain: &serial::EventFdTrigger,
     clock: &VirtualClock,
@@ -1698,7 +1781,7 @@ fn capture_logs(
     let ping_id = ping.id;
     let framed = encode_line(&ping).unwrap();
     match drive_until_reply(
-        vcpu, serial, serial_drain, clock, lapic, ioapic, pit, pic, events, parker,
+        vcpu, doorbell, serial, serial_drain, clock, lapic, ioapic, pit, pic, events, parker,
         ff.as_deref_mut(), com2, &framed, ping_id, horizon, wall_deadline,
     ) {
         Ok(Some(rep)) => match rep.schema {
@@ -1745,7 +1828,7 @@ fn capture_logs(
             let id = req.id;
             let framed = encode_line(&req).unwrap();
             match drive_until_reply(
-                vcpu, serial, serial_drain, clock, lapic, ioapic, pit, pic, events, parker,
+                vcpu, doorbell, serial, serial_drain, clock, lapic, ioapic, pit, pic, events, parker,
                 ff.as_deref_mut(), com2, &framed, id, horizon, wall_deadline,
             ) {
                 Ok(Some(rep)) => {
@@ -1804,6 +1887,7 @@ fn capture_logs(
 #[allow(clippy::too_many_arguments)]
 fn drive_until_reply(
     vcpu: &mut VcpuFd,
+    doorbell: &mut doorbell::Doorbell,
     serial: &serial::SharedSerial,
     serial_drain: &serial::EventFdTrigger,
     clock: &VirtualClock,
@@ -1826,6 +1910,11 @@ fn drive_until_reply(
     com2.pump(lapic, ioapic);
 
     loop {
+        // Doorbell hygiene (mirrors the main loop): clear immediate_exit before
+        // service_timers so any fire from here on re-sets it and the coming
+        // KVM_RUN bails — capture must preempt an exit-free guest too (a container
+        // may still be busy-looping while we pull logs).
+        doorbell.clear(vcpu);
         if std::time::Instant::now() >= wall_deadline {
             return Ok(None);
         }
@@ -1869,6 +1958,11 @@ fn drive_until_reply(
             r.cr8 = u64::from(lapic.tpr() >> 4);
         }
 
+        // Arm the doorbell so an exit-free guest (e.g. a container still busy-
+        // looping while we pull its logs) is broken out in time — same as the main
+        // loop; fold in the LAPIC's live deadline (see min_deadline). `clock` is
+        // already a reference here (unlike the main loop's owned clock).
+        doorbell.arm(min_deadline(events.peek_deadline(), lapic.timer_deadline()), clock);
         let exit = match vcpu.run() {
             Ok(e) => e,
             Err(err) => {

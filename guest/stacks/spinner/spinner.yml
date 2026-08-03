@@ -1,0 +1,43 @@
+# deterministic-vmm -- tick-doorbell regression scenario.
+#
+#   dvmm test spinner.dvmm --scenario spinner.yml   ->  PASS (exit 0) with the doorbell
+#   DVMM_NO_DOORBELL=1 dvmm test ... --scenario spinner.yml -> wedges (exit 2) without it
+#
+# `spinner` busy-loops the single vCPU exit-free. The assertions prove the guest
+# stays responsive anyway: `worker` comes up and we can still exec into it well
+# after the spinner is pinning the CPU. Without the doorbell the guest wedges at
+# container start and `wait-worker-up` alone times out.
+name: tick-doorbell-regression
+
+run:
+  cmdline: "console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable dvmm.stack=1 dvmm.interval=30"
+
+steps:
+  # The worker container is up — which already requires the vCPU to have been
+  # preempted away from the spinner (podman + the agent had to run).
+  - name: wait-worker-up
+    at: 0s
+    wait_for:
+      probe:
+        exec:
+          container: worker
+          cmd: "true"
+      until: exit_zero
+      every: 2s
+      timeout: 90s
+
+  # Well after the spinner is pinning the CPU: the guest still services an exec.
+  # This is the decisive check — a starved vCPU cannot answer this.
+  - name: guest-responsive-under-spin
+    at: 20s
+    exec:
+      container: worker
+      cmd: "echo alive"
+    expect:
+      exit: 0
+      output_matches: 'alive'
+
+  # Both still running (spinner busy-looping, worker scheduled): nothing wedged.
+  - name: all-running
+    at: 30s
+    containers: all_running
