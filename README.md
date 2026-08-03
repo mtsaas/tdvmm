@@ -67,13 +67,13 @@ inside; `dvmm verify` checks it hasn't changed.
 
 ```sh
 # Bake a stack into one file (needs podman):
-dvmm build guest/stacks/insert-trim/compose.yml   # -> guest/initramfs-alpine/insert-trim.dvmm
+dvmm build guest/stacks/insert-trim/compose.yml   # -> ~/.dvmm/artifacts/insert-trim.dvmm
 
 # Run it (offline, only needs /dev/kvm). Idle time fast-forwards automatically:
-dvmm run guest/initramfs-alpine/insert-trim.dvmm --max-virtual-time 24h
+dvmm run ~/.dvmm/artifacts/insert-trim.dvmm --max-virtual-time 24h
 
 # Test it against a scenario (assertions + fault injection):
-dvmm test guest/initramfs-alpine/insert-trim.dvmm \
+dvmm test ~/.dvmm/artifacts/insert-trim.dvmm \
   --scenario guest/stacks/insert-trim/insert-trim.yml
 
 # Look at an artifact:
@@ -110,32 +110,31 @@ Five services, closed-world, exercising the whole supported subset at once:
 api, client and worker are one small `build:` image with three entrypoints. The
 api starts only after Postgres **and** Redis are `service_healthy`.
 
-Fast-forward a whole day and watch it stream by in a couple of minutes:
+Fast-forward the workload's hourly batch cycles and watch them stream by in seconds:
 
 ```
-$ dvmm run guest/initramfs-alpine/demo.dvmm --ff on --max-virtual-time 24h \
-    --cmdline "console=ttyS0 dvmm.stack=1 dvmm.interval=3600 dvmm.hc_tick=3600"
+$ dvmm run ~/.dvmm/artifacts/demo.dvmm --ff on --max-virtual-time 1h \
+    --cmdline "console=ttyS0 dvmm.stack=1 dvmm.interval=180 dvmm.hc_tick=30"
 
 hour 1: submitted 9 orders via gRPC -> 9 total orders (cache=9)
 hour 2: submitted 10 orders via gRPC -> 19 total orders (cache=19)
 hour 3: submitted 11 orders via gRPC -> 30 total orders (cache=30)
 ...
-hour 12: submitted 13 orders via gRPC -> 132 total orders (cache=132)
-hour 13: submitted 14 orders via gRPC -> 146 total orders (cache=146)
-...
-hour 22: submitted 9 orders via gRPC -> 240 total orders (cache=240)
-[dvmm] FAST-FORWARD SUMMARY: 21.8M jumps; virtual 86400s in real 365s = 237x speedup
+hour 18: submitted 13 orders via gRPC -> 200 total orders (cache=200)
+[dvmm] FAST-FORWARD SUMMARY: virtual 3600s in real ~33s = ~104x speedup
 ```
 
-That's 24 hours of a live Postgres + Redis + gRPC stack in about six minutes of
-wall clock — ~235x faster than real time. (Long horizons want a coarse
-`dvmm.hc_tick`: the healthcheck ticker is real work under fast-forward.)
+That's ~19 of the workload's hourly batch cycles — a live Postgres + Redis + gRPC
+stack — in about half a minute of wall clock. Each cycle sleeps a virtual
+`dvmm.interval` (180s here) that fast-forward collapses; raise it toward `3600`
+for genuine hour-apart spacing over a longer run. (`dvmm.hc_tick` sets how often
+the health ticker runs — real work under fast-forward.)
 
-`dvmm test demo.dvmm --scenario demo.yml --logs-dir /tmp/demo-logs` runs the same
-day, then SIGKILLs Postgres mid-day: the api, client and worker log retries,
-recover when it comes back (its data survives — same container), and Postgres and
-Redis stay consistent — verdict **PASS**. The `--logs-dir` output gives you a
-clean per-service log of the whole day, fault gap and all.
+`dvmm test ~/.dvmm/artifacts/demo.dvmm --scenario guest/stacks/demo/demo.yml --logs-dir /tmp/demo-logs`
+runs those cycles, then SIGKILLs Postgres mid-run: the api, client and worker log
+retries, recover when it comes back (its data survives — same container), and
+Postgres and Redis stay consistent — verdict **PASS**. The `--logs-dir` output
+gives you a clean per-service log of the whole run, fault gap and all.
 
 ### The others
 
