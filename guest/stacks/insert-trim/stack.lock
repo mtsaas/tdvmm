@@ -14,7 +14,7 @@ project   dvmm_insert-trim
 mem_mib   3072
 ram_estimate_mib  1742
 compose_lock_sha256  e5b12e1986fb9f4fb57ad65f04501584535a9da000315f34a0718fb460952958
-initramfs_sha256     5c61d2afaa607ce3db6f58e7dbf0b7ec0824908e1b834e1921bb918fd36577e3  initramfs-alpine-insert-trim.cpio.gz
+initramfs_sha256     cb275b645458403b6fbc73e8063a11b4b49881a080e91b565b8628cb96c1297a  initramfs-alpine-insert-trim.cpio.gz
 agent_sha256         c349a12a5a6df417aca96b3989d07419b2c7c9d1e184f8becae81187b0f50ad0  dvmm-agent
 builder_image        docker.io/library/alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
 builder_image        docker.io/library/debian:bookworm-slim@sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e
@@ -25,4 +25,4 @@ builder_image        docker.io/library/rust:1.97-alpine3.22@sha256:b348cb409ac0a
 # --- informational (NOT compared for repeatability) ---
 # host-probed values (podman version, baked-at) are written to the
 # cache dir's diagnostics/ side file, NEVER here (Fable guardrail §3).
-dvmm_sha256          59bdadcb8bc4214996aa51ce4bc4c2a8ce6d2a0379ca2a1df591c9cf83e60ae5  insert-trim.dvmm
+dvmm_sha256          1ff5596ad3d3e63cfcf02b35fd76426f72c515b0034646a2f6b9743380f97d83  insert-trim.dvmm

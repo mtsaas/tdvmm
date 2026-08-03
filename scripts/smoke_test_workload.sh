@@ -17,17 +17,20 @@
 # The workload loops forever (never powers off), so this test stops the VMM once
 # it has its proof.
 #
-# Usage: scripts/smoke_test_workload.sh [timeout_seconds] [kernel] [initrd]
+# Usage: scripts/smoke_test_workload.sh [timeout_seconds]
 # Env:   INTERVAL_SECONDS (default 2)  MAX_ROWS (default 5)  PAST_CAP (default 4)
-#        MEM (default 3072)
+#        MEM (default 3072)  STACK (default insert-trim)
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 
 TIMEOUT="${1:-240}"
-KERNEL="${2:-$ROOT/guest/kernel/vmlinux-6.1.128}"
-INITRD="${3:-$ROOT/guest/initramfs-alpine/initramfs-alpine-insert-trim.cpio.gz}"
+STACK="${STACK:-insert-trim}"
+# Self-contained: bake the stack into a gitignored test dir, then `dvmm run` it
+# (kernel + initramfs come from the .dvmm; no repo / ~/.dvmm/artifacts dependency).
+OUTDIR="${DVMM_OUT_DIR:-$ROOT/.dvmm-test-results}"; mkdir -p "$OUTDIR"
+DVMM="${DVMM_ARTIFACT:-$OUTDIR/$STACK.dvmm}"
 
 INTERVAL_SECONDS="${INTERVAL_SECONDS:-2}"
 MAX_ROWS="${MAX_ROWS:-5}"
@@ -42,11 +45,14 @@ FF="${FF:-off}"              # fast-forward on|off. Default OFF so this stays a
 MAX_VIRTUAL_TIME="${MAX_VIRTUAL_TIME:-$(( TIMEOUT + 300 ))s}"
 BIN="$ROOT/target/release/dvmm"
 
-[ -f "$KERNEL" ] || { echo "SMOKE FAIL: kernel not found: $KERNEL"; exit 3; }
-[ -f "$INITRD" ] || { echo "SMOKE FAIL: initrd not found: $INITRD"; exit 3; }
 if [ ! -x "$BIN" ]; then
   echo "building release binary..."
   ( cd "$ROOT" && cargo build --release ) || { echo "SMOKE FAIL: build error"; exit 3; }
+fi
+if [ ! -f "$DVMM" ]; then
+  echo "[smoke] baking $STACK -> $DVMM"
+  "$BIN" build "$ROOT/guest/stacks/$STACK/compose.yml" -o "$DVMM" \
+    || { echo "SMOKE FAIL: bake error"; exit 3; }
 fi
 
 LOG="$(mktemp)"
@@ -54,9 +60,12 @@ PID=""
 cleanup() { [ -n "$PID" ] && kill "$PID" 2>/dev/null; [ -n "$PID" ] && wait "$PID" 2>/dev/null; rm -f "$LOG"; }
 trap cleanup EXIT
 
-CMDLINE="console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable dvmm.stack=1 dvmm.interval=$INTERVAL_SECONDS dvmm.maxrows=$MAX_ROWS"
-echo "[smoke] boot: mem=${MEM}MiB interval=${INTERVAL_SECONDS}s max_rows=$MAX_ROWS past_cap=$PAST_CAP ff=$FF timeout=${TIMEOUT}s max-virtual-time=${MAX_VIRTUAL_TIME}"
-"$BIN" boot --kernel "$KERNEL" --initrd "$INITRD" --mem "$MEM" --ff "$FF" \
+# dvmm.memsample=1 opts into the guest RAM sampler (the DVMM_MEM console lines);
+# this test measures peak guest RAM, so it enables it (the sampler is OFF by
+# default so normal / fast-forward runs are not flooded).
+CMDLINE="console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable dvmm.stack=1 dvmm.interval=$INTERVAL_SECONDS dvmm.maxrows=$MAX_ROWS dvmm.memsample=1"
+echo "[smoke] run: mem=${MEM}MiB interval=${INTERVAL_SECONDS}s max_rows=$MAX_ROWS past_cap=$PAST_CAP ff=$FF timeout=${TIMEOUT}s max-virtual-time=${MAX_VIRTUAL_TIME}"
+"$BIN" run "$DVMM" --mem "$MEM" --ff "$FF" \
   --max-virtual-time "$MAX_VIRTUAL_TIME" --cmdline "$CMDLINE" \
   </dev/null >"$LOG" 2>&1 &
 PID=$!

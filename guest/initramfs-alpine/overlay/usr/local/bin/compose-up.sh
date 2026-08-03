@@ -27,10 +27,13 @@ PROJECT="$(cat /etc/dvmm-stack-project 2>/dev/null)"
 [ -n "$PROJECT" ] && export COMPOSE_PROJECT_NAME="$PROJECT"
 
 # cadence/cap knobs (kernel cmdline overrides the lockfile defaults)
+# dvmm.memsample=1 opts into the peak-RAM console sampler below (default OFF).
+DVMM_MEMSAMPLE=0
 for tok in $(cat /proc/cmdline 2>/dev/null); do
   case "$tok" in
-    dvmm.interval=*) export DVMM_INTERVAL="${tok#dvmm.interval=}" ;;
-    dvmm.maxrows=*)  export DVMM_MAXROWS="${tok#dvmm.maxrows=}" ;;
+    dvmm.interval=*)  export DVMM_INTERVAL="${tok#dvmm.interval=}" ;;
+    dvmm.maxrows=*)   export DVMM_MAXROWS="${tok#dvmm.maxrows=}" ;;
+    dvmm.memsample=*) DVMM_MEMSAMPLE="${tok#dvmm.memsample=}" ;;
   esac
 done
 
@@ -124,12 +127,17 @@ census() {
 }
 census &
 
-# RAM sampler: lets the host record actual peak guest RAM (MemTotal - min MemAvail).
-( while :; do
-    grep -E '^(MemTotal|MemFree|MemAvailable|Cached):' /proc/meminfo \
-      | awk '{printf "%s%s ", $1, $2} END{print ""}' | sed 's/^/DVMM_MEM /'
-    sleep 5
-  done ) &
+# RAM sampler (opt-in via dvmm.memsample=1): lets the host record actual peak
+# guest RAM (MemTotal - min MemAvail). OFF by default so a normal run -- and
+# especially a fast-forward run -- is never flooded with DVMM_MEM console lines;
+# scripts/smoke_test_workload.sh passes dvmm.memsample=1 to collect its samples.
+if [ "$DVMM_MEMSAMPLE" = "1" ]; then
+  ( while :; do
+      grep -E '^(MemTotal|MemFree|MemAvailable|Cached):' /proc/meminfo \
+        | awk '{printf "%s%s ", $1, $2} END{print ""}' | sed 's/^/DVMM_MEM /'
+      sleep 5
+    done ) &
+fi
 
 # 5. stream every container's logs to serial, forever (podman CLI reads the log
 #    files directly -- it does NOT revive the API engine).
