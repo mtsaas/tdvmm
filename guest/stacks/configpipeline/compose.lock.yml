@@ -21,6 +21,7 @@ services:
     image: docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616
     volumes:
     - state:/var/state:ro
+    - /run/dvmm/events:/run/dvmm/events:rw
   worker:
     environment:
       INTERVAL_SECONDS: ${DVMM_INTERVAL:-3600}
@@ -28,5 +29,6 @@ services:
     volumes:
     - /var/lib/dvmm-stack/binds/worker/config:/etc/app:rw
     - state:/var/state
+    - /run/dvmm/events:/run/dvmm/events:rw
 volumes:
   state: null

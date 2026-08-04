@@ -11,6 +11,7 @@ services:
     shm_size: 256m
     volumes:
     - /var/lib/dvmm-stack/binds/postgres/schema.sql:/docker-entrypoint-initdb.d/10-schema.sql:ro
+    - /run/dvmm/events:/run/dvmm/events:rw
   service:
     depends_on:
     - postgres
@@ -26,3 +27,4 @@ services:
     image: localhost/dvmm-postgres-57c72fd2a128@sha256:cbf217007d0742829dc120c3ea9cd2621e90eb3adfeaf6684e87ce268a2ca368
     volumes:
     - /var/lib/dvmm-stack/binds/service/service-loop.sh:/opt/dvmm/service-loop.sh:ro
+    - /run/dvmm/events:/run/dvmm/events:rw
