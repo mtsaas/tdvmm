@@ -68,7 +68,7 @@ use kvm_ioctls::{Kvm, VcpuExit, VcpuFd};
 use vmm_sys_util::ioctl::ioctl_with_ref;
 use vmm_sys_util::ioctl_iow_nr;
 
-use crate::cli::{BootArgs, Cli, Cmd, EffectiveConfig, RunArgs, TestArgs};
+use crate::cli::{BootArgs, Cli, Cmd, EffectiveConfig, LsArgs, RunArgs, TestArgs};
 use crate::exit::{RunOutcome, StopReason, EXIT_TEST_INFRA};
 use crate::ioapic::Ioapic;
 use crate::lapic::{apic_bus_hz_from_cpuid, apic_timer_tsc_ratio, in_lapic, Lapic, XAPIC_BASE};
@@ -273,6 +273,7 @@ fn dispatch() -> Result<i32, Box<dyn std::error::Error>> {
         Cmd::Test(args) => cmd_test(args),
         Cmd::Inspect(a) => cmd_inspect(&a.artifact),
         Cmd::Verify(a) => cmd_verify(&a.artifact),
+        Cmd::Ls(args) => cmd_ls(args),
         Cmd::DumpCpuid => {
             cpuid::dump_cpuid(&Kvm::new()?)?;
             Ok(0)
@@ -300,9 +301,15 @@ fn cmd_boot(args: BootArgs) -> Result<i32, Box<dyn std::error::Error>> {
 // ---- `dvmm run`: a .dvmm stack artifact (baked defaults + overrides) --------
 
 fn cmd_run(args: RunArgs) -> Result<i32, Box<dyn std::error::Error>> {
+    // Resolve a store NAME (e.g. `tigerbeetle`) or a path to a concrete file.
+    let artifact_path = artifact::resolve(&args.artifact)?;
+    let artifact_path = artifact_path
+        .to_str()
+        .ok_or("artifact path is not valid UTF-8")?;
+
     // Load the artifact's members into memory (NO temp-dir extraction): manifest
     // + kernel + initramfs + compose.lock (the last for the on-load verify).
-    let payload = artifact::read_for_run(&args.artifact)?;
+    let payload = artifact::read_for_run(artifact_path)?;
 
     // Member-hash verify on load is DEFAULT-ON (`--no-verify` to skip): recompute
     // each payload member's sha256 and compare to the manifest, so a corrupted or
@@ -310,11 +317,11 @@ fn cmd_run(args: RunArgs) -> Result<i32, Box<dyn std::error::Error>> {
     if args.no_verify {
         dlog!("[dvmm] run: member-hash verify SKIPPED (--no-verify)");
     } else {
-        verify_payload_or_bail(&args.artifact, &payload)?;
+        verify_payload_or_bail(artifact_path, &payload)?;
         dlog!(
             "[dvmm] run: {} member hashes verified against manifest (identity {})",
             payload.manifest.members.len(),
-            &artifact::file_sha256_hex(&args.artifact)?[..16],
+            &artifact::file_sha256_hex(artifact_path)?[..16],
         );
     }
 
@@ -354,8 +361,24 @@ fn cmd_run(args: RunArgs) -> Result<i32, Box<dyn std::error::Error>> {
 // ---- `dvmm test`: drive a .dvmm stack against a scenario (verdict) ----------
 
 fn cmd_test(args: TestArgs) -> Result<i32, Box<dyn std::error::Error>> {
+    // Resolve a store NAME or a path; a resolution miss is an infra error (exit 2),
+    // matching this verb's error style.
+    let artifact_path = match artifact::resolve(&args.artifact) {
+        Ok(p) => match p.to_str() {
+            Some(s) => s.to_string(),
+            None => {
+                dlog!("[dvmm][test] infrastructure error: artifact path is not valid UTF-8");
+                return Ok(EXIT_TEST_INFRA);
+            }
+        },
+        Err(e) => {
+            dlog!("[dvmm][test] infrastructure error: {e}");
+            return Ok(EXIT_TEST_INFRA);
+        }
+    };
+
     // Load the artifact (kernel + initramfs + compose.lock + manifest).
-    let payload = match artifact::read_for_run(&args.artifact) {
+    let payload = match artifact::read_for_run(&artifact_path) {
         Ok(p) => p,
         Err(e) => {
             dlog!("[dvmm][test] infrastructure error: {e}");
@@ -363,7 +386,7 @@ fn cmd_test(args: TestArgs) -> Result<i32, Box<dyn std::error::Error>> {
         }
     };
     if !args.no_verify {
-        if let Err(e) = verify_payload_or_bail(&args.artifact, &payload) {
+        if let Err(e) = verify_payload_or_bail(&artifact_path, &payload) {
             dlog!("[dvmm][test] infrastructure error: {e}");
             return Ok(EXIT_TEST_INFRA);
         }
@@ -400,15 +423,17 @@ fn cmd_test(args: TestArgs) -> Result<i32, Box<dyn std::error::Error>> {
         );
     }
 
-    let artifact_sha = artifact::file_sha256_hex(&args.artifact)?;
+    let artifact_sha = artifact::file_sha256_hex(&artifact_path)?;
+    // Default sidecars land in the CWD, keyed by stack name (NOT next to the
+    // artifact — that would pollute the store). Flags still override.
     let jsonl_path = args
         .jsonl
         .clone()
-        .unwrap_or_else(|| format!("{}.jsonl", args.artifact));
+        .unwrap_or_else(|| format!("{}.jsonl", payload.manifest.stack));
     let report_path = args
         .report
         .clone()
-        .unwrap_or_else(|| format!("{}.report.json", args.artifact));
+        .unwrap_or_else(|| format!("{}.report.json", payload.manifest.stack));
 
     dlog!(
         "[dvmm][test] stack={} scenario={} ({} steps) artifact-sha256={}",
@@ -509,6 +534,8 @@ fn verify_payload_or_bail(
 // ---- `dvmm inspect`: print manifest.json (manifest member only) -------------
 
 fn cmd_inspect(path: &str) -> Result<i32, Box<dyn std::error::Error>> {
+    let resolved = artifact::resolve(path)?;
+    let path = resolved.to_str().ok_or("artifact path is not valid UTF-8")?;
     // Reads ONLY the first member (manifest.json) — never the big kernel/initramfs.
     let manifest = artifact::read_manifest(path)?;
     let json = manifest.to_canonical_json()?;
@@ -521,6 +548,8 @@ fn cmd_inspect(path: &str) -> Result<i32, Box<dyn std::error::Error>> {
 // ---- `dvmm verify`: member hashes vs manifest + the file identity -----------
 
 fn cmd_verify(path: &str) -> Result<i32, Box<dyn std::error::Error>> {
+    let resolved = artifact::resolve(path)?;
+    let path = resolved.to_str().ok_or("artifact path is not valid UTF-8")?;
     let report = artifact::verify(path)?;
     // Identity first (always printed, even on failure — it names the file checked).
     println!("dvmm-artifact: {path}");
@@ -547,6 +576,75 @@ fn cmd_verify(path: &str) -> Result<i32, Box<dyn std::error::Error>> {
         println!("VERIFY FAIL: member-hash mismatch or missing member");
         Ok(1)
     }
+}
+
+// ---- `dvmm ls`: list the local artifact store -------------------------------
+
+fn cmd_ls(args: LsArgs) -> Result<i32, Box<dyn std::error::Error>> {
+    let entries = artifact::list_store()?;
+    if entries.is_empty() {
+        println!(
+            "no artifacts in {} (build one with `dvmm build <compose.yml>`)",
+            artifact::store_dir().display()
+        );
+        return Ok(0);
+    }
+    // Stat-only by default: hashing every artifact reads hundreds of MB each, so
+    // the sha256 identity is `--digest`-only.
+    let name_w = entries.iter().map(|e| e.name.len()).max().unwrap_or(4).max(4);
+    if args.digest {
+        println!("{:<name_w$}  {:>8}  {:<16}  {}", "NAME", "SIZE", "MODIFIED (UTC)", "SHA256");
+    } else {
+        println!("{:<name_w$}  {:>8}  {}", "NAME", "SIZE", "MODIFIED (UTC)");
+    }
+    for e in &entries {
+        let when = fmt_mtime(e.modified);
+        if args.digest {
+            let sha = artifact::file_sha256_hex(
+                e.path.to_str().ok_or("artifact path is not valid UTF-8")?,
+            )?;
+            println!(
+                "{:<name_w$}  {:>8}  {when:<16}  {}",
+                e.name,
+                human_size(e.size),
+                &sha[..12]
+            );
+        } else {
+            println!("{:<name_w$}  {:>8}  {when}", e.name, human_size(e.size));
+        }
+    }
+    Ok(0)
+}
+
+/// Compact human size (`362M`, `1.2G`) for the `ls` table.
+fn human_size(bytes: u64) -> String {
+    const MIB: f64 = 1024.0 * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+    let b = bytes as f64;
+    if b >= GIB {
+        format!("{:.1}G", b / GIB)
+    } else if b >= MIB {
+        format!("{:.0}M", b / MIB)
+    } else if b >= 1024.0 {
+        format!("{:.0}K", b / 1024.0)
+    } else {
+        format!("{bytes}B")
+    }
+}
+
+/// Format a mtime as compact UTC `YYYY-MM-DD HH:MM` (dependency-free; the project
+/// pulls in no date crate). Shares [`build::civil_from_days`] (Howard Hinnant's
+/// algorithm) so the civil-date math lives in exactly one place.
+fn fmt_mtime(t: std::time::SystemTime) -> String {
+    let secs = t
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0) as i64;
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (h, mi) = (rem / 3600, (rem % 3600) / 60);
+    let (y, m, d) = build::civil_from_days(days);
+    format!("{y:04}-{m:02}-{d:02} {h:02}:{mi:02}")
 }
 
 // ============================================================================

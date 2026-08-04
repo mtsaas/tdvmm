@@ -36,3 +36,8 @@
 /.dvmm-test-results
 *.dvmm.jsonl
 *.dvmm.report.json
+# `dvmm test` now defaults its jsonl/report to CWD as `<stack>.jsonl` /
+# `<stack>.report.json`; ignore those in the repo root only (root-anchored, so
+# the tracked goldens under dvmm-proto/goldens/ are untouched).
+/*.jsonl
+/*.report.json
