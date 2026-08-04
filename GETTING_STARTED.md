@@ -40,16 +40,42 @@ That resolves each image to a digest, pulls and packs it, bakes a kernel and an 
 root filesystem, and writes one file under `~/.dvmm/artifacts/`. Same inputs always
 produce the same bytes. (`-o path.dvmm` writes it wherever you want.)
 
+See everything you've built with `dvmm ls`:
+
+```sh
+dvmm ls            # name, size, and when each artifact was built (times are UTC)
+dvmm ls --digest   # also print each one's sha256 identity (reads the files)
+```
+
 If your compose file needs something the closed world can't do — host networking, an
 absolute bind mount, an unpinned `build:` base — the build stops and names the line. You
 find out now, not at runtime.
 
+### Building on macOS
+
+`dvmm build` runs only on Linux (it bakes the guest inside Linux containers). But if you
+develop on a Mac, `scripts/macos-build.sh` runs the bake for you inside the Linux VM that
+`podman machine` already provides, and drops the finished `.dvmm` straight into your Mac's
+`~/.dvmm/artifacts/`:
+
+```sh
+scripts/macos-build.sh guest/stacks/demo/compose.yml
+```
+
+The boundary: **macOS can bake, but only Linux with `/dev/kvm` can run.** Because the
+build is byte-reproducible, a Mac-baked artifact is identical to a Linux-baked one — run
+`dvmm verify` to confirm.
+
 ## 2. Run it and watch
 
 ```sh
-dvmm run ~/.dvmm/artifacts/demo.dvmm --max-virtual-time 1h \
+dvmm run demo --max-virtual-time 1h \
   --cmdline "console=ttyS0 dvmm.stack=1 dvmm.interval=180 dvmm.hc_tick=30"
 ```
+
+`demo` is the stack **name** — `dvmm run`/`test`/`inspect`/`verify` resolve a bare name
+from `~/.dvmm/artifacts/`. To run a `.dvmm` file on disk instead, give a path with a `/`
+(`./demo.dvmm` or an absolute path); a bare name is always a store name.
 
 It boots, brings the stack up, and streams every container's output to your terminal,
 prefixed by service name. Idle time fast-forwards, so an hour of the workload runs in
@@ -73,7 +99,7 @@ another terminal (`Ctrl-C` goes to the guest, not to dvmm).
 The terminal stream interleaves everything. For a clean per-service log, add `--logs-dir`:
 
 ```sh
-dvmm run ~/.dvmm/artifacts/demo.dvmm --max-virtual-time 1h --logs-dir ./logs \
+dvmm run demo --max-virtual-time 1h --logs-dir ./logs \
   --cmdline "console=ttyS0 dvmm.stack=1 dvmm.interval=180 dvmm.hc_tick=30"
 # -> ./logs/postgres.log, ./logs/redis.log, ./logs/api.log, ./logs/worker.log, ...
 ```
@@ -88,9 +114,12 @@ each virtual time, do something — wait for readiness, run a command and check 
 or inject a fault. Run one against the demo:
 
 ```sh
-dvmm test ~/.dvmm/artifacts/demo.dvmm \
+dvmm test demo \
   --scenario guest/stacks/demo/demo.yml --logs-dir ./logs
 ```
+
+Without `--jsonl`/`--report`, the run log and report default to `./demo.jsonl` and
+`./demo.report.json` in the current directory (named after the stack).
 
 The exit code is the verdict:
 
@@ -217,8 +246,8 @@ to crib from.
 ## Looking at an artifact
 
 ```sh
-dvmm inspect ~/.dvmm/artifacts/demo.dvmm   # what's inside: images, sizes, the manifest
-dvmm verify  ~/.dvmm/artifacts/demo.dvmm   # check nothing changed; print its sha256
+dvmm inspect demo   # what's inside: images, sizes, the manifest
+dvmm verify  demo   # check nothing changed; print its sha256
 ```
 
 ## Good to know

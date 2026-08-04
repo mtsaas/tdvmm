@@ -9,21 +9,19 @@
 # (a SOURCE_DATE_EPOCH-normalized, reproducible filesystem hash) + the pinned
 # build_base digests + the Go toolchain. Same source -> same content_id.
 #
-stack     svcchain
-project   dvmm_svcchain
+stack     tigerbeetle
+project   dvmm_tigerbeetle
 mem_mib   3072
-ram_estimate_mib  1752
-compose_lock_sha256  8f3d29b83d50a88092d55142e6a66f17db0fb98ea81960a6ddd2fedc4a2c58b3
-initramfs_sha256     a14c370ca9beb7c990b78ee601c860ccffab8110c4e0a71c90f23ce1a025ab0f  initramfs-alpine-svcchain.cpio.gz
-agent_sha256         ad82d580755cf6787ba7add6dbb7889ed45087031e7f09ed160a235dca76bea3  dvmm-agent
+ram_estimate_mib  1104
+compose_lock_sha256  1f2a00717f52359e087f8dba45f246f659cb7523ef55504756d05c6deb807ee5
+initramfs_sha256     21dab6f6d4602e361dd6074b2f1516aa47daac8baf8716e3b0432af8b17cb3f8  initramfs-alpine-tigerbeetle.cpio.gz
+agent_sha256         c349a12a5a6df417aca96b3989d07419b2c7c9d1e184f8becae81187b0f50ad0  dvmm-agent
 builder_image        docker.io/library/alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
 builder_image        docker.io/library/debian:bookworm-slim@sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e
 builder_image        docker.io/library/rust:1.97-alpine3.22@sha256:b348cb409ac0a73de15065997a360063cf87465574a15e3e4469862cb8996f02
   image  policy=plain   upstream=docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616  diffid=sha256:0958e0fef2d6a31e1325b8bfecd99dead933363682d69850a7606599023751bc  size_mib=4
-  image  policy=plain   upstream=docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616  diffid=sha256:0958e0fef2d6a31e1325b8bfecd99dead933363682d69850a7606599023751bc  size_mib=4
-  image  policy=squash  upstream=docker.io/library/postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777  seed_tag=localhost/dvmm-postgres-57c72fd2a128:baked  src_diffid=sha256:af5b54b4903175790ece7037a66fd16496658d7030a59e2e2360f66038d74c8c  size_mib=283  GATE=ok
-  pin    upstream=docker.io/library/postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777  pinned=localhost/dvmm-postgres-57c72fd2a128@sha256:cbf217007d0742829dc120c3ea9cd2621e90eb3adfeaf6684e87ce268a2ca368
+  image  policy=plain   upstream=ghcr.io/tigerbeetle/tigerbeetle@sha256:177d6fbd12a3dab1782212cdaf034b5f9cb1bf73804b66116980bfe1064cc3b6  diffid=sha256:bc5a3fe779ad9e705b6c5d7fb7a482d1bf8b633e4e3e72152ea3f8953460cda9sha256:93bb1811b71dbaaf723140abe2293f36e1822e9e881e3f191a12b40aa48d7181sha256:a45db8de3580946de982d2d817eb80d37e11a265e2ca9c27e84e20ecfb78af98  size_mib=28
 # --- informational (NOT compared for repeatability) ---
 # host-probed values (podman version, baked-at) are written to the
 # cache dir's diagnostics/ side file, NEVER here (Fable guardrail §3).
-dvmm_sha256          166f0fe7cd3a7194cc6430cfd32b6640a2cd3e15fd073abdc4c6d36635729530  svcchain.dvmm
+dvmm_sha256          292dbd8709f5c20da6dfaa00bc119a9d5dcb8af0febe692ae2315b05be5c254e  tigerbeetle.dvmm

@@ -27,6 +27,7 @@ services:
     image: localhost/dvmm-postgres-57c72fd2a128@sha256:cbf217007d0742829dc120c3ea9cd2621e90eb3adfeaf6684e87ce268a2ca368
     volumes:
     - /var/lib/dvmm-stack/binds/backend/backend-loop.sh:/opt/dvmm/backend-loop.sh:ro
+    - /run/dvmm/events:/run/dvmm/events:rw
   db:
     environment:
       POSTGRES_DB: appdb
@@ -43,6 +44,7 @@ services:
     shm_size: 256m
     volumes:
     - /var/lib/dvmm-stack/binds/db/schema.sql:/docker-entrypoint-initdb.d/10-schema.sql:ro
+    - /run/dvmm/events:/run/dvmm/events:rw
   frontend:
     command:
     - /bin/sh
@@ -56,3 +58,5 @@ services:
       backend:
         condition: service_healthy
     image: docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616
+    volumes:
+    - /run/dvmm/events:/run/dvmm/events:rw

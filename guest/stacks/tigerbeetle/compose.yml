@@ -1,0 +1,118 @@
+# deterministic-vmm -- TigerBeetle cluster stack (3 replicas + a demo client).
+#
+# ============================================================================
+#  STATUS: PASSING. The 3-replica cluster forms and runs.
+#
+#  Post-doorbell (commit b60dde8: tick doorbell + wedge observability), the
+#  cluster bakes, boots, and BRINGS UP all three replicas: they form a quorum,
+#  elect a primary, and synchronize clocks. The client opens two accounts and,
+#  each interval, moves money A->B and reads the balances back -- double-entry
+#  holds (debits == credits, e.g. 83500/83500). Replicas 0/1/2 stay in NORMAL
+#  status for a full virtual hour, then shut down cleanly at the
+#  --max-virtual-time horizon.
+#
+#  The one loud observable is a flood of `loop_run_for_ns too slow` warnings.
+#  These are NOT a wedge and NOT a fast-forward bug: the idle time-jump is exact
+#  (dvmm advances virtual time straight to the next armed deadline). The warnings
+#  are the guest truthfully measuring real single-vCPU contention -- four busy
+#  co-tenants (3 replicas + client) serialized on ONE vCPU, exactly as they
+#  would on real single-core hardware. Their magnitude is host-load-dependent.
+#  Making execution time (not just idle) deterministic is a Phase-3 item (see
+#  ARCHITECTURE.md section 12).
+# ============================================================================
+#
+# WHAT THIS IS
+#   A 3-replica TigerBeetle consensus cluster (replica0/1/2) doing double-entry
+#   accounting, plus a REPL-based client that opens two accounts and, each
+#   virtual interval, moves money A->B and reads the balances back. The scenario
+#   (tigerbeetle.yml) kills a replica, proves the client keeps transacting on the
+#   surviving quorum, then heals it -- the whole point of a consensus cluster.
+#
+# FINDINGS (measured on the host with this exact image, runc + netavark +
+# seccomp=unconfined, which mirrors the guest's podman/DNS/io_uring path):
+#
+#   1. ADDRESSING. TigerBeetle's --addresses accepts only IPv4/IPv6 LITERALS;
+#      service names are rejected ("--addresses: invalid IPv4 or IPv6 address").
+#      We stay closed-world by resolving the replica SERVICE NAMES to their
+#      netavark IPs at start via getent, in fixed replica order (see replica.sh
+#      / client.sh). The cluster forms, elects a primary, and synchronizes
+#      clocks. No host networking, no hard-coded IPs.
+#
+#   2. RAM. TigerBeetle statically commits ~1537 MiB of anonymous (private-dirty,
+#      unreclaimable) heap PER replica at init -- even with --development and
+#      --cache-grid=64MiB (the smallest knobs it exposes; the ~1.5 GiB floor is
+#      compile-time, no runtime flag lowers it). Three replicas need ~4.6 GiB
+#      before the base runtime, the client, or the (RAM-backed tmpfs) data files.
+#      The high-memory split (guest RAM across the 32-bit MMIO gap) lifted the old
+#      3072 MiB cap; this stack runs with `--mem 6144`+, so RAM no longer blocks.
+#
+#   3. FAST-FORWARD. Idle replicas do NOT busy-poll the CPU (~0.25% of one core;
+#      they HLT), which is good. BUT each replica wakes ~103 times/second even
+#      when idle -- TigerBeetle's ~100 Hz VSR consensus tick
+#      (ping/heartbeat/clock-sync), a compile-time constant with no CLI knob. A
+#      guest woken ~100x/s per replica fast-forwards poorly: speedup is
+#      cadence-bound, not idle-collapsed (the same reason the demo dropped Redis
+#      to --hz 1 and stretched Postgres timers).
+#
+# Image pinned by digest (closed world): resolve `ghcr.io/tigerbeetle/tigerbeetle`
+# tag 0.17.7 -> the index digest below (amd64, Alpine 3.24 + busybox base,
+# entrypoint `tini -- /tigerbeetle`, binary at /tigerbeetle, ~28 MiB).
+
+services:
+  replica0:
+    image: ghcr.io/tigerbeetle/tigerbeetle@sha256:177d6fbd12a3dab1782212cdaf034b5f9cb1bf73804b66116980bfe1064cc3b6
+    # io_uring is blocked by podman's DEFAULT seccomp profile (TigerBeetle then
+    # dies with "io_uring is not available ... SystemOutdated"); the closed-world
+    # guest kernel has CONFIG_IO_URING=y, so unconfine seccomp to let it through.
+    security_opt: ["seccomp=unconfined"]
+    entrypoint: ["/bin/sh", "/scripts/replica.sh", "0"]
+    # Static IP on the user-defined `tb` network: a container's static address is
+    # part of its stored network config, so netavark re-applies it on every
+    # `podman start` -- including after a `kill:` fault. Dynamic IPAM would hand a
+    # restarted replica a NEW ip, and since TigerBeetle fixes --addresses at start
+    # (IP literals only, resolved once via getent), its peers would keep dialing
+    # the dead old address and it could never rejoin the quorum. Stable addresses
+    # make restart/heal a first-class, reproducible fault (Fable ruling).
+    networks: { tb: { ipv4_address: 10.240.0.10 } }
+    volumes:
+      - ./replica.sh:/scripts/replica.sh:ro
+
+  replica1:
+    image: ghcr.io/tigerbeetle/tigerbeetle@sha256:177d6fbd12a3dab1782212cdaf034b5f9cb1bf73804b66116980bfe1064cc3b6
+    security_opt: ["seccomp=unconfined"]
+    entrypoint: ["/bin/sh", "/scripts/replica.sh", "1"]
+    networks: { tb: { ipv4_address: 10.240.0.11 } }
+    volumes:
+      - ./replica.sh:/scripts/replica.sh:ro
+
+  replica2:
+    image: ghcr.io/tigerbeetle/tigerbeetle@sha256:177d6fbd12a3dab1782212cdaf034b5f9cb1bf73804b66116980bfe1064cc3b6
+    security_opt: ["seccomp=unconfined"]
+    entrypoint: ["/bin/sh", "/scripts/replica.sh", "2"]
+    networks: { tb: { ipv4_address: 10.240.0.12 } }
+    volumes:
+      - ./replica.sh:/scripts/replica.sh:ro
+
+  client:
+    image: ghcr.io/tigerbeetle/tigerbeetle@sha256:177d6fbd12a3dab1782212cdaf034b5f9cb1bf73804b66116980bfe1064cc3b6
+    security_opt: ["seccomp=unconfined"]
+    entrypoint: ["/bin/sh", "/scripts/client.sh"]
+    networks: { tb: { ipv4_address: 10.240.0.20 } }
+    depends_on:
+      - replica0
+      - replica1
+      - replica2
+    environment:
+      INTERVAL_SECONDS: "${DVMM_INTERVAL:-3600}"
+    volumes:
+      - ./client.sh:/scripts/client.sh:ro
+
+# User-defined bridge network with a fixed subnet, so per-service ipv4_address is
+# honored and stable across container restarts (closed-world: this is an internal
+# subnet the guest owns, not a host address). Sole network in the guest; the
+# 10.240.0.0/24 range avoids podman's 10.88/10.89 defaults.
+networks:
+  tb:
+    ipam:
+      config:
+        - subnet: 10.240.0.0/24

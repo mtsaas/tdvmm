@@ -430,6 +430,12 @@ pub struct LockOutput {
     pub bind_manifest: Vec<(String, String)>,
 }
 
+/// The guest-side event-bridge FIFO bind path (schema 3): created on the /run
+/// tmpfs at boot and bind-mounted read-write into every service so workloads can
+/// write assertion events the agent forwards over ttyS1. Emitted verbatim (never
+/// rewritten like a relative bind); source of truth is [`dvmm_proto::EVENT_FIFO_PATH`].
+pub const EVENT_FIFO: &str = dvmm_proto::EVENT_FIFO_PATH;
+
 /// Transform the parsed compose `doc` into the deterministic lockfile. Port of
 /// `cmd_emit_lock`. `digests` maps an original image ref (pulls) or a build
 /// output tag (builds) to its pinned `repo@sha256`.
@@ -492,25 +498,30 @@ pub fn emit_lock(
         scfg.remove(Value::String("ports".into()));
         scfg.remove(Value::String("pull_policy".into()));
 
-        // rewrite relative binds (ro OR rw) to in-guest absolute paths.
-        if let Some(Value::Sequence(vols)) = scfg.get(Value::String("volumes".into())).cloned() {
-            let mut newvols: Vec<Value> = Vec::new();
-            for entry in &vols {
-                if let Some((src, target, mode)) = split_bind(entry) {
-                    if !(src.starts_with('/') || src.starts_with('~')) {
-                        if let Some(dest) = dest_of.get(&(sname.clone(), target.clone())) {
-                            let norm_mode = if mode.split(',').any(|x| x == "ro") { "ro" } else { "rw" };
-                            newvols.push(Value::String(format!("{dest}:{target}:{norm_mode}")));
-                            continue;
-                        }
+        // Rewrite relative binds (ro OR rw) to in-guest absolute paths, then inject
+        // the event-bridge FIFO bind (schema 3) so every workload can write assertion
+        // events that the agent forwards over ttyS1. The FIFO file is created on the
+        // guest /run tmpfs at boot; binding the FILE (not the dir) means no container
+        // can unlink or replace the shared inode. Absolute path ⇒ emitted verbatim.
+        let existing = match scfg.get(Value::String("volumes".into())).cloned() {
+            Some(Value::Sequence(vols)) => vols,
+            _ => Vec::new(),
+        };
+        let mut newvols: Vec<Value> = Vec::new();
+        for entry in &existing {
+            if let Some((src, target, mode)) = split_bind(entry) {
+                if !(src.starts_with('/') || src.starts_with('~')) {
+                    if let Some(dest) = dest_of.get(&(sname.clone(), target.clone())) {
+                        let norm_mode = if mode.split(',').any(|x| x == "ro") { "ro" } else { "rw" };
+                        newvols.push(Value::String(format!("{dest}:{target}:{norm_mode}")));
+                        continue;
                     }
                 }
-                newvols.push(entry.clone());
             }
-            if !newvols.is_empty() {
-                scfg.insert(Value::String("volumes".into()), Value::Sequence(newvols));
-            }
+            newvols.push(entry.clone());
         }
+        newvols.push(Value::String(format!("{EVENT_FIFO}:{EVENT_FIFO}:rw")));
+        scfg.insert(Value::String("volumes".into()), Value::Sequence(newvols));
     }
 
     let mut lock_yaml = LOCK_HEADER.as_bytes().to_vec();
@@ -1354,7 +1365,29 @@ mod emitter_tests {
             )
             .unwrap_or_else(|e| panic!("emit_lock {stack}: {}", e.message));
             let got = String::from_utf8_lossy(&out.lock_yaml).into_owned();
-            let want = std::fs::read_to_string(format!("guest/stacks/{stack}/compose.lock.yml")).unwrap();
+
+            // schema-3: every service carries the event-bridge FIFO bind.
+            let locked: Value = serde_yaml::from_str(&got).unwrap();
+            let services = locked.get("services").and_then(|v| v.as_mapping()).unwrap();
+            let want_fifo = format!("{EVENT_FIFO}:{EVENT_FIFO}:rw");
+            for (name, cfg) in services {
+                let present = cfg
+                    .get("volumes")
+                    .and_then(|v| v.as_sequence())
+                    .map(|vs| vs.iter().any(|e| e.as_str() == Some(&want_fifo)))
+                    .unwrap_or(false);
+                assert!(present, "{stack}: service {name:?} missing the event FIFO bind");
+            }
+
+            // The committed lock is a generated file; DVMM_REGEN_LOCKS=1 rewrites it
+            // (mirrors the proto-goldens regen). A full corpus re-bake — every lock +
+            // its .dvmm artifact — is the separate follow-up.
+            let lock_path = format!("guest/stacks/{stack}/compose.lock.yml");
+            if std::env::var("DVMM_REGEN_LOCKS").is_ok() {
+                std::fs::write(&lock_path, got.as_bytes()).unwrap();
+                continue;
+            }
+            let want = std::fs::read_to_string(&lock_path).unwrap();
             assert_eq!(got, want, "emit_lock mismatch for {stack}");
         }
     }

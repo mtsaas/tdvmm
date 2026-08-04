@@ -308,6 +308,45 @@ impl Lapic {
         }
     }
 
+    /// Compact interrupt-state snapshot for the wedge dump ([`crate::diag`]).
+    /// Read-only; shows enable/priority, the pending (IRR) and in-service (ISR)
+    /// vectors, what is deliverable, and the timer LVT — the signals for a guest
+    /// spinning on an interrupt that is stuck-blocked (IRR set but PPR/ISR gates
+    /// it) or one that is simply never raised (IRR empty).
+    pub fn diag_str(&self) -> String {
+        fn nonzero_words(w: &[u32; 8]) -> String {
+            let parts: Vec<String> = w
+                .iter()
+                .enumerate()
+                .filter(|(_, &x)| x != 0)
+                .map(|(i, &x)| format!("w{i}={x:#x}"))
+                .collect();
+            if parts.is_empty() {
+                "-".into()
+            } else {
+                parts.join(",")
+            }
+        }
+        format!(
+            "lapic: en={} tpr={:#04x} ppr={:#04x} svr={:#x} \
+             irr[hi={:?} {}] isr[hi={:?} {}] deliverable={:?} \
+             timer[armed={} masked={} lvt={:#x} deadline={:?}]",
+            self.enabled() as u8,
+            self.tpr,
+            self.ppr(),
+            self.svr,
+            self.irr.highest(),
+            nonzero_words(&self.irr.words),
+            self.isr.highest(),
+            nonzero_words(&self.isr.words),
+            self.deliverable_vector(),
+            self.timer_deadline.is_some(),
+            self.timer_masked(),
+            self.lvt_timer,
+            self.timer_deadline,
+        )
+    }
+
     /// Accept an injection of `vec` into service (IRR -> ISR). Called right after
     /// the vector is handed to KVM_INTERRUPT.
     pub fn ack_injected(&mut self, vec: u8) {

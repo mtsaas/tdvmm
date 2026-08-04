@@ -34,7 +34,9 @@ use serde::{Deserialize, Serialize};
 /// * 1 — the original op set (`ping`/`exec`/`containers`/`kill`/`stop`/`start`/
 ///   `partition`/`heal`).
 /// * 2 — adds the `logs` op (cursor-paged per-container k8s-file log fetch).
-pub const SCHEMA: u32 = 2;
+/// * 3 — adds guest→host assertion events: unsolicited, id-less [`Reply`]s
+///   carrying a [`GuestEvent`], which the agent bridges from a guest FIFO.
+pub const SCHEMA: u32 = 3;
 
 /// Hard cap on a single `logs` reply's `data` payload: 128 KiB of raw k8s-file
 /// bytes. JSON-escaping can ~double that on the wire, which still stays well
@@ -43,6 +45,11 @@ pub const SCHEMA: u32 = 2;
 /// larger requested `max_bytes`; the host loops via `next_cursor`/`eof` to read a
 /// log larger than one chunk.
 pub const MAX_LOGS_CHUNK_BYTES: u64 = 128 * 1024;
+
+/// The guest-side event-bridge FIFO path (schema 3). The single source of truth
+/// shared by the host (compose bind injection) and the agent (its read fd); the
+/// boot script's `mkfifo` literal must match this string.
+pub const EVENT_FIFO_PATH: &str = "/run/dvmm/events";
 
 // ============================================================================
 // Messages
@@ -96,6 +103,25 @@ pub struct ContainerInfo {
     pub health: String,
 }
 
+/// A guest→host assertion/telemetry event (schema 3+). The agent bridges these
+/// from a guest FIFO and forwards each as an unsolicited, id-less [`Reply`]
+/// (`event` set, no `id`) — distinct from a command reply and from the hello.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct GuestEvent {
+    /// `always` | `sometimes` | `fault` | `done` | `invalid`.
+    pub kind: String,
+    /// Assertion identity (the aggregation key). Empty for `done`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    /// The verdict bit for `always`/`sometimes`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ok: Option<bool>,
+    /// Bounded free-form payload: a `fault` request's op/service, or the
+    /// truncated raw line for `invalid`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
+}
+
 /// agent → host. Serves BOTH the proactive *hello* and every command reply.
 ///
 /// All discriminating fields are optional so one type covers the hello
@@ -145,6 +171,14 @@ pub struct Reply {
     /// stops paging). A short read (fewer bytes than the cap) implies EOF.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eof: Option<bool>,
+    /// A guest→host assertion event (schema 3+); set only on an unsolicited,
+    /// id-less line the agent bridges from the guest FIFO. See [`GuestEvent`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event: Option<GuestEvent>,
+    /// Agent-stamped monotone per-boot sequence for bridged events; a gap tells
+    /// the host an event line was dropped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
 }
 
 impl Reply {
@@ -161,6 +195,22 @@ impl Reply {
     /// True if this line is a hello (readiness announcement), not a command reply.
     pub fn is_hello(&self) -> bool {
         self.id.is_none() && self.agent.is_some()
+    }
+
+    /// Wrap a bridged guest event as an unsolicited, id-less reply line.
+    pub fn from_event(seq: u64, event: GuestEvent) -> Reply {
+        Reply {
+            seq: Some(seq),
+            event: Some(event),
+            ..Default::default()
+        }
+    }
+
+    /// True if this line is a bridged guest event (schema 3+), not a hello or a
+    /// command reply. A hello has `agent` set and no `event`, so the two never
+    /// overlap.
+    pub fn is_event(&self) -> bool {
+        self.id.is_none() && self.event.is_some()
     }
 }
 

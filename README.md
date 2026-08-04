@@ -55,16 +55,17 @@ in `.github/workflows/release.yml`, triggered by a version tag.)
   Alpine root filesystem (with podman and the real Docker Compose CLI inside), and
   writes one file. Anything the closed world can't support is rejected loudly at
   build time, not at run time.
-- **`dvmm run <stack.dvmm>`** boots that file in a VM: one virtual CPU, a serial
+- **`dvmm run <stack>`** boots that stack in a VM: one virtual CPU, a serial
   console, and a clock and interrupt controller that dvmm owns in userspace —
   which is what lets it fast-forward idle time. Fully offline.
-- **`dvmm test <stack.dvmm> --scenario s.yml`** drives a timeline against the
+- **`dvmm test <stack> --scenario s.yml`** drives a timeline against the
   stack: wait for a service to be ready, run a command and check its output,
   inject a fault (kill a container, partition the network), and print a pass/fail
   verdict with a clear exit code. This is the point of the tool.
 
-A `.dvmm` file's identity is just its sha256. `dvmm inspect` prints what's
-inside; `dvmm verify` checks it hasn't changed.
+`dvmm ls` lists what you've built; `dvmm inspect` prints what's inside a stack;
+`dvmm verify` checks it hasn't changed. A `.dvmm` file's identity is just its
+sha256.
 
 ## Usage
 
@@ -72,17 +73,26 @@ inside; `dvmm verify` checks it hasn't changed.
 # Bake a stack into one file (needs podman):
 dvmm build guest/stacks/insert-trim/compose.yml   # -> ~/.dvmm/artifacts/insert-trim.dvmm
 
-# Run it (offline, only needs /dev/kvm). Idle time fast-forwards automatically:
-dvmm run ~/.dvmm/artifacts/insert-trim.dvmm --max-virtual-time 24h
+# List what you've built:
+dvmm ls                # names, sizes, when built
+dvmm ls --digest       # also compute each artifact's sha256 identity
+
+# Run it by name (offline, only needs /dev/kvm). Idle time fast-forwards automatically:
+dvmm run insert-trim --max-virtual-time 24h
 
 # Test it against a scenario (assertions + fault injection):
-dvmm test ~/.dvmm/artifacts/insert-trim.dvmm \
-  --scenario guest/stacks/insert-trim/insert-trim.yml
+dvmm test insert-trim --scenario guest/stacks/insert-trim/insert-trim.yml
+#   -> writes ./insert-trim.jsonl and ./insert-trim.report.json in the current directory
 
 # Look at an artifact:
-dvmm inspect insert-trim.dvmm    # its manifest
-dvmm verify  insert-trim.dvmm    # check every piece matches, and print its sha256
+dvmm inspect insert-trim    # its manifest
+dvmm verify  insert-trim    # check every piece matches, and print its sha256
 ```
+
+`run`, `test`, `inspect`, and `verify` take a bare stack **name**, resolved from
+your `~/.dvmm/artifacts/` store the way `dvmm build` names it. To point at a `.dvmm`
+file on disk instead, give a path (anything with a `/` — `./foo.dvmm` or an absolute
+path); a bare name is always a store name, never a file in the current directory.
 
 Fast-forward is on by default; pass `--ff off` for real time (e.g. an interactive
 console). `--max-virtual-time <dur>` bounds a run in virtual time (`30s`, `5m`,
@@ -116,7 +126,7 @@ api starts only after Postgres **and** Redis are `service_healthy`.
 Fast-forward the workload's hourly batch cycles and watch them stream by in seconds:
 
 ```
-$ dvmm run ~/.dvmm/artifacts/demo.dvmm --ff on --max-virtual-time 1h \
+$ dvmm run demo --ff on --max-virtual-time 1h \
     --cmdline "console=ttyS0 dvmm.stack=1 dvmm.interval=180 dvmm.hc_tick=30"
 
 hour 1: submitted 9 orders via gRPC -> 9 total orders (cache=9)
@@ -133,7 +143,7 @@ stack — in about half a minute of wall clock. Each cycle sleeps a virtual
 for genuine hour-apart spacing over a longer run. (`dvmm.hc_tick` sets how often
 the health ticker runs — real work under fast-forward.)
 
-`dvmm test ~/.dvmm/artifacts/demo.dvmm --scenario guest/stacks/demo/demo.yml --logs-dir /tmp/demo-logs`
+`dvmm test demo --scenario guest/stacks/demo/demo.yml --logs-dir /tmp/demo-logs`
 runs those cycles, then SIGKILLs Postgres mid-run: the api, client and worker log
 retries, recover when it comes back (its data survives — same container), and
 Postgres and Redis stay consistent — verdict **PASS**. The `--logs-dir` output

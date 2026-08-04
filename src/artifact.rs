@@ -33,6 +33,8 @@
 //! them; the reader ignores any it does not recognize.
 
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -228,6 +230,115 @@ fn hex(bytes: &[u8]) -> String {
         s.push(char::from_digit((b & 0xf) as u32, 16).unwrap());
     }
     s
+}
+
+// ============================================================================
+// artifact store + name resolution
+// ============================================================================
+
+/// The artifact store directory: `<cache>/artifacts`, where `<cache>` is
+/// `$DVMM_CACHE_DIR` (if set and non-empty) else `$HOME/.dvmm`. This mirrors
+/// `dvmm build`'s cache resolution minus the `--cache-dir` flag (which the
+/// run/test/inspect/verify verbs do not expose), so `build` writes name-keyed
+/// artifacts exactly where `run <name>` looks for them.
+pub fn store_dir() -> PathBuf {
+    let cache = match std::env::var("DVMM_CACHE_DIR") {
+        Ok(d) if !d.is_empty() => PathBuf::from(d),
+        _ => {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            PathBuf::from(home).join(".dvmm")
+        }
+    };
+    cache.join("artifacts")
+}
+
+/// One `.dvmm` in the store: short name (filename minus `.dvmm`), path, size, mtime.
+pub struct StoreEntry {
+    pub name: String,
+    pub path: PathBuf,
+    pub size: u64,
+    pub modified: SystemTime,
+}
+
+/// Enumerate the `*.dvmm` artifacts in the store, sorted by name. A missing store
+/// directory is not an error — it just means nothing has been built yet.
+pub fn list_store() -> Result<Vec<StoreEntry>, ArtifactError> {
+    list_in(&store_dir())
+}
+
+fn list_in(store: &Path) -> Result<Vec<StoreEntry>, ArtifactError> {
+    let rd = match std::fs::read_dir(store) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(ioerr(&format!("reading store {}", store.display()), e)),
+    };
+    let mut out = Vec::new();
+    for de in rd {
+        let de = de.map_err(|e| ioerr("reading store entry", e))?;
+        let path = de.path();
+        let name = match path.file_name().and_then(|s| s.to_str()).and_then(|f| {
+            f.strip_suffix(".dvmm").map(str::to_string)
+        }) {
+            Some(n) => n,
+            None => continue,
+        };
+        let md = match de.metadata() {
+            Ok(m) if m.is_file() => m,
+            _ => continue,
+        };
+        out.push(StoreEntry {
+            name,
+            path,
+            size: md.len(),
+            modified: md.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+        });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
+}
+
+/// Resolve an artifact argument to a path. A bare argument is a store NAME; a
+/// filesystem path (anything containing `/`) is used as a path. See [`resolve_in`]
+/// for the exact rules.
+pub fn resolve(arg: &str) -> Result<PathBuf, ArtifactError> {
+    resolve_in(&store_dir(), arg)
+}
+
+/// Core of [`resolve`], parameterized on the store dir so it is testable without
+/// touching `$HOME` / `$DVMM_CACHE_DIR`. Name-first (Docker-like), in order:
+///   1. `arg` looks like a path (has a `/`)  → it is a path, never a name: use it
+///      if the file exists, else error `no such artifact file`. A bare name never
+///      shadows or is shadowed by a CWD file — to point at a file on disk, write a
+///      path (`./x.dvmm` or an absolute path).
+///   2. otherwise `arg` is a store name      → `<store>/<name>.dvmm` (a trailing
+///      `.dvmm` on the name is accepted), erroring with the list of available
+///      names on a miss.
+pub fn resolve_in(store: &Path, arg: &str) -> Result<PathBuf, ArtifactError> {
+    if arg.contains('/') {
+        if Path::new(arg).is_file() {
+            return Ok(PathBuf::from(arg));
+        }
+        return Err(ArtifactError(format!("no such artifact file: {arg}")));
+    }
+    let name = arg.strip_suffix(".dvmm").unwrap_or(arg);
+    let candidate = store.join(format!("{name}.dvmm"));
+    if candidate.is_file() {
+        return Ok(candidate);
+    }
+    let avail = list_in(store)?;
+    let names = if avail.is_empty() {
+        "  (store is empty)".to_string()
+    } else {
+        avail
+            .iter()
+            .map(|e| format!("  {}", e.name))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    Err(ArtifactError(format!(
+        "no artifact named {name:?} in {}\navailable:\n{names}",
+        store.display()
+    )))
 }
 
 // ============================================================================
@@ -756,5 +867,98 @@ mod tests {
         let data = read_content(&mut c, &e).unwrap();
         assert_eq!(&data, b"hello");
         assert!(read_header(&mut c).unwrap().is_none(), "trailer -> None");
+    }
+
+    #[test]
+    fn resolve_in_rules() {
+        let store = std::path::PathBuf::from("target/test-artifacts/resolve-test");
+        let _ = std::fs::remove_dir_all(&store);
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::write(store.join("alpha.dvmm"), b"x").unwrap();
+        std::fs::write(store.join("beta.dvmm"), b"x").unwrap();
+
+        // name hit — bare and with the `.dvmm` suffix both resolve to the store.
+        assert_eq!(resolve_in(&store, "alpha").unwrap(), store.join("alpha.dvmm"));
+        assert_eq!(resolve_in(&store, "alpha.dvmm").unwrap(), store.join("alpha.dvmm"));
+
+        // name miss lists the available names.
+        let e = resolve_in(&store, "nope").unwrap_err().to_string();
+        assert!(e.contains("alpha") && e.contains("beta"), "miss must list names: {e}");
+
+        // a path-like arg (contains `/`) that does not exist is a file error, not
+        // a name lookup.
+        let e = resolve_in(&store, "some/dir/x.dvmm").unwrap_err().to_string();
+        assert!(e.contains("no such artifact file"), "got: {e}");
+
+        // a path (contains `/`) that exists resolves as a file — this is the only
+        // way to point at a file on disk.
+        let loose = store.join("loose-file.dvmm");
+        std::fs::write(&loose, b"y").unwrap();
+        assert_eq!(resolve_in(&store, loose.to_str().unwrap()).unwrap(), loose);
+
+        // NAME-FIRST, no shadowing: a bare name maps strictly to `<store>/<name>.dvmm`
+        // and never to a same-named file. `gamma` (a plain file, no `.dvmm`) sitting in
+        // the store does NOT satisfy the bare name `gamma`; only `gamma.dvmm` would.
+        std::fs::write(store.join("gamma"), b"z").unwrap();
+        let e = resolve_in(&store, "gamma").unwrap_err().to_string();
+        assert!(e.contains("no artifact named"), "bare name must not pick up a same-named file: {e}");
+
+        // NAME-FIRST, no shadowing from the CURRENT DIRECTORY (regression guard): a
+        // `<name>.dvmm` in the CWD must NEVER be picked up — a bare arg resolves
+        // strictly against the store. This is the case that flips RED if a file-wins
+        // `if Path::new(arg).is_file()` branch is ever reintroduced ahead of the store
+        // lookup. Cargo runs tests from the crate root, so the file lands there; the
+        // guard removes it even if an assertion panics.
+        struct CwdFileGuard(std::path::PathBuf);
+        impl Drop for CwdFileGuard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let _guard = CwdFileGuard(std::path::PathBuf::from("resolve-shadow-guard.dvmm"));
+        std::fs::write("resolve-shadow-guard.dvmm", b"cwd").unwrap();
+
+        // store HAS the name -> resolves to the STORE copy, not the CWD file.
+        std::fs::write(store.join("resolve-shadow-guard.dvmm"), b"store").unwrap();
+        assert_eq!(
+            resolve_in(&store, "resolve-shadow-guard.dvmm").unwrap(),
+            store.join("resolve-shadow-guard.dvmm"),
+            "bare name must resolve to the store, never the CWD file"
+        );
+        assert_eq!(
+            resolve_in(&store, "resolve-shadow-guard").unwrap(),
+            store.join("resolve-shadow-guard.dvmm"),
+        );
+
+        // store LACKS the name -> miss ERROR, not the CWD file. THIS is the assertion
+        // a reintroduced file-wins branch would break.
+        let empty = std::path::PathBuf::from("target/test-artifacts/resolve-shadow-empty");
+        let _ = std::fs::remove_dir_all(&empty);
+        std::fs::create_dir_all(&empty).unwrap();
+        assert!(
+            resolve_in(&empty, "resolve-shadow-guard.dvmm").is_err(),
+            "a CWD file must not satisfy a bare-name store lookup"
+        );
+        assert!(resolve_in(&empty, "resolve-shadow-guard").is_err());
+    }
+
+    #[test]
+    fn list_in_filters_and_sorts() {
+        let store = std::path::PathBuf::from("target/test-artifacts/list-test");
+        let _ = std::fs::remove_dir_all(&store);
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::write(store.join("zeta.dvmm"), b"12345").unwrap();
+        std::fs::write(store.join("alpha.dvmm"), b"1").unwrap();
+        std::fs::write(store.join("notes.txt"), b"ignore me").unwrap();
+        let got = list_in(&store).unwrap();
+        let names: Vec<_> = got.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "zeta"]);
+        assert_eq!(got[1].size, 5);
+    }
+
+    #[test]
+    fn list_in_missing_dir_is_empty() {
+        let got = list_in(Path::new("target/test-artifacts/does-not-exist-xyz")).unwrap();
+        assert!(got.is_empty());
     }
 }

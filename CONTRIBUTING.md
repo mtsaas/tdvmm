@@ -39,7 +39,7 @@ src/                 the VMM (the `dvmm` binary)
   artifact.rs        the `.dvmm` file format (deterministic tar) + manifest
   cpio.rs            deterministic initramfs packing
   compose.rs         the supported Compose subset (parser + validator + lock emitter)
-  scenario.rs        `dvmm test`: the scenario timeline + verdict
+  scenario/          `dvmm test`: the scenario timeline + verdict (schema/engine/eval/ledger/log/report)
   vtsc.rs            the virtual clock (the TSC offset; the fast-forward jump)
   park.rs            what happens at an idle HLT: wait real time, or jump
   lapic.rs ioapic.rs pic.rs pit.rs   the userspace interrupt controller + timer
@@ -67,7 +67,7 @@ scripts/             the test suite (see "Building and testing")
 | Change how a stack is baked                 | `build.rs` (and `engine.rs` for any podman call) |
 | Support or reject a Compose feature         | `compose.rs` |
 | Change the `.dvmm` format                   | `artifact.rs` (+ `cpio.rs` for the initramfs) |
-| Add a scenario step or a fault              | `scenario.rs` + `dvmm-agent/` (and `dvmm-proto/` for the wire type) |
+| Add a scenario step or a fault              | `scenario/` + `dvmm-agent/` (and `dvmm-proto/` for the wire type) |
 | Touch the clock or fast-forward             | `vtsc.rs`, `park.rs`, `lapic.rs` |
 | Change CPU/timer features the guest sees    | `cpuid.rs` (+ `mptable.rs`) |
 | Add a CLI flag or command                   | `cli.rs` (+ `main.rs` dispatch) |

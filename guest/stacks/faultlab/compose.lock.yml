@@ -15,9 +15,13 @@ services:
       PGHOST: db
       PGUSER: postgres
     image: localhost/dvmm-postgres-57c72fd2a128@sha256:cbf217007d0742829dc120c3ea9cd2621e90eb3adfeaf6684e87ce268a2ca368
+    volumes:
+    - /run/dvmm/events:/run/dvmm/events:rw
   db:
     environment:
       POSTGRES_DB: appdb
       POSTGRES_HOST_AUTH_METHOD: trust
     image: localhost/dvmm-postgres-57c72fd2a128@sha256:cbf217007d0742829dc120c3ea9cd2621e90eb3adfeaf6684e87ce268a2ca368
     shm_size: 256m
+    volumes:
+    - /run/dvmm/events:/run/dvmm/events:rw

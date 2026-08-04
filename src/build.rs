@@ -381,15 +381,20 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     //
     // DEFAULT outputs land under the resolved cache root's `artifacts/` dir (NOT
     // the source tree): an installed `dvmm` must not write build outputs into the
-    // repo. `-o <path>` still fully overrides the `.dvmm` destination; the
-    // intermediate cpio always lands under `artifacts/`.
+    // repo. `-o <path>` still fully overrides the `.dvmm` destination. The
+    // intermediate cpio is build debris, not a deliverable, so it lands under
+    // `bake/` (beside the content-hash cache) — keeping `artifacts/` all `.dvmm`.
+    // Its basename is unchanged and stack.lock records only the basename, so the
+    // `.dvmm` bytes stay byte-identical.
     let artifacts_dir = cache_dir.join("artifacts");
     std::fs::create_dir_all(&artifacts_dir)?;
+    let bake_out_dir = cache_dir.join("bake");
+    std::fs::create_dir_all(&bake_out_dir)?;
     let out_dvmm = match &args.out {
         Some(o) => PathBuf::from(o),
         None => artifacts_dir.join(format!("{stack_name}.dvmm")),
     };
-    let out_initramfs = artifacts_dir.join(format!("initramfs-alpine-{stack_name}.cpio.gz"));
+    let out_initramfs = bake_out_dir.join(format!("initramfs-alpine-{stack_name}.cpio.gz"));
     let committed_lock = here.join("stacks").join(&stack_name).join("compose.lock.yml");
     let stack_lock_path = here.join("stacks").join(&stack_name).join("stack.lock");
 
@@ -1742,7 +1747,7 @@ fn utc_now_iso() -> String {
     format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
 }
 
-fn civil_from_days(z: i64) -> (i64, i64, i64) {
+pub(crate) fn civil_from_days(z: i64) -> (i64, i64, i64) {
     let z = z + 719468;
     let era = if z >= 0 { z } else { z - 146096 } / 146097;
     let doe = z - era * 146097;

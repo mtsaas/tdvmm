@@ -143,6 +143,27 @@ impl Ioapic {
     pub fn apic_id(&self) -> u32 {
         self.apic_id
     }
+
+    /// Compact RTE snapshot for the wedge dump ([`crate::diag`]): the unmasked
+    /// redirection entries (pin -> vector / trigger). Read-only. A wedged guest
+    /// waiting on an IRQ whose pin is masked here shows up as an empty list.
+    pub fn diag_str(&self) -> String {
+        let parts: Vec<String> = self
+            .redtbl
+            .iter()
+            .enumerate()
+            .filter(|(_, &rte)| rte & RTE_MASK == 0)
+            .map(|(pin, &rte)| {
+                let trig = if rte & RTE_TRIGGER_LEVEL != 0 { "level" } else { "edge" };
+                format!("pin{pin}->{:#x}/{trig}", rte & 0xff)
+            })
+            .collect();
+        format!(
+            "ioapic: sel={:#x} unmasked[{}]",
+            self.ioregsel,
+            if parts.is_empty() { "none".into() } else { parts.join(",") }
+        )
+    }
 }
 
 #[cfg(test)]

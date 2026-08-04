@@ -24,29 +24,26 @@
 //! `std` ONLY. Raw-mode termios is done with a std-only inline-asm `ioctl`
 //! syscall — no `libc`.
 
-use std::collections::BTreeMap;
-use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::fs::OpenOptions;
 use std::os::fd::AsRawFd;
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
 
-use dvmm_proto::{
-    decode_line, encode_line, ContainerInfo, ErrorKind, Reply, Request, MAX_LOGS_CHUNK_BYTES, SCHEMA,
-};
-use serde::Deserialize;
+use dvmm_proto::Reply;
 
-const AGENT_ID: &str = "dvmm-agent/1";
+mod agent;
+mod bridge;
+mod sys;
+
+use agent::Agent;
+use bridge::{run_loop, write_line};
+
+pub(crate) const AGENT_ID: &str = "dvmm-agent/1";
 
 /// Build hash embedded at compile time by the reproducible builder (the compat-
 /// ibility oracle reported in the hello + `ping`). `dev` for plain host builds.
-const BUILD: &str = match option_env!("DVMM_AGENT_BUILD") {
+pub(crate) const BUILD: &str = match option_env!("DVMM_AGENT_BUILD") {
     Some(s) => s,
     None => "dev",
 };
-
-/// The compose label podman/compose sets on each service's container(s).
-const COMPOSE_SERVICE_LABEL: &str = "com.docker.compose.service";
 
 fn main() {
     // The control channel is ttyS1. Open read+write; the VMM captures our TX and
@@ -67,7 +64,7 @@ fn main() {
     // also drops canonical line-buffering and \n<->\r\n translation, so the bytes
     // on the wire are exactly what each side wrote. VMIN=1/VTIME=0 => a read
     // blocks until >=1 byte (no timer armed => fast-forward-transparent).
-    if let Err(e) = set_raw(file.as_raw_fd()) {
+    if let Err(e) = sys::set_raw(file.as_raw_fd()) {
         eprintln!("dvmm-agent: setRaw({dev}): errno {e}");
     }
 
@@ -78,771 +75,30 @@ fn main() {
             return;
         }
     };
-    let mut reader = BufReader::with_capacity(1 << 16, file);
-
-    let mut agent = Agent {
-        partitions: BTreeMap::new(),
+    // Event bridge (schema 3): a guest FIFO the workload containers write assertion
+    // events to. O_RDWR is load-bearing — the agent's open never blocks, a container
+    // `echo > fifo` never blocks, and poll never storms POLLHUP (the agent is always
+    // a writer). An absent FIFO degrades to control-only, byte-for-byte the old path.
+    let fifo_path = std::env::var("DVMM_AGENT_FIFO")
+        .unwrap_or_else(|_| dvmm_proto::EVENT_FIFO_PATH.to_string());
+    let fifo = match OpenOptions::new().read(true).write(true).open(&fifo_path) {
+        Ok(f) => Some(f),
+        Err(e) => {
+            eprintln!("dvmm-agent: no event FIFO at {fifo_path} ({e}); control-only");
+            None
+        }
     };
+
+    let mut agent = Agent::new();
 
     // Proactive hello: the VMM's harness waits for this to mark the agent ready
     // (no ping round-trip needed). Carries schema + build (the compat oracle).
     write_line(&mut writer, &Reply::hello(AGENT_ID, BUILD));
 
-    // The blocking read loop.
-    let mut line: Vec<u8> = Vec::with_capacity(1 << 12);
-    loop {
-        line.clear();
-        match reader.read_until(b'\n', &mut line) {
-            Ok(0) => return, // EOF / closed control channel: stop.
-            Ok(_) => {}
-            Err(_) => return,
-        }
-        if dvmm_proto::trim_frame(&line).is_empty() {
-            continue;
-        }
-        let req: Request = match decode_line(&line) {
-            Ok(r) => r,
-            Err(e) => {
-                write_line(
-                    &mut writer,
-                    &Reply {
-                        ok: Some(false),
-                        op: Some("?".into()),
-                        error: Some(ErrorKind::BadRequest.msg(e.to_string())),
-                        ..Default::default()
-                    },
-                );
-                continue;
-            }
-        };
-        let reply = agent.handle(&req);
-        write_line(&mut writer, &reply);
-    }
-}
-
-fn write_line<W: Write>(w: &mut W, reply: &Reply) {
-    if let Ok(bytes) = encode_line(reply) {
-        let _ = w.write_all(&bytes);
-        let _ = w.flush();
-    }
-}
-
-// ============================================================================
-// Raw termios via a std-only inline-asm ioctl (no libc).
-// ============================================================================
-
-const TCGETS: u64 = 0x5401;
-const TCSETS: u64 = 0x5402;
-// c_iflag
-const F_IGNBRK: u32 = 0x1;
-const F_BRKINT: u32 = 0x2;
-const F_PARMRK: u32 = 0x8;
-const F_ISTRIP: u32 = 0x20;
-const F_INLCR: u32 = 0x40;
-const F_IGNCR: u32 = 0x80;
-const F_ICRNL: u32 = 0x100;
-const F_IXON: u32 = 0x400;
-// c_oflag
-const F_OPOST: u32 = 0x1;
-// c_lflag
-const F_ECHO: u32 = 0x8;
-const F_ECHONL: u32 = 0x40;
-const F_ICANON: u32 = 0x2;
-const F_ISIG: u32 = 0x1;
-const F_IEXTEN: u32 = 0x8000;
-// c_cflag
-const F_CSIZE: u32 = 0x30;
-const F_PARENB: u32 = 0x100;
-const F_CS8: u32 = 0x30;
-// c_cc indices (kernel `struct termios`)
-const I_VTIME: usize = 5;
-const I_VMIN: usize = 6;
-
-/// The kernel `struct termios` (asm-generic): 4 flag words + c_line + c_cc[19].
-#[repr(C)]
-#[derive(Default)]
-struct Termios {
-    c_iflag: u32,
-    c_oflag: u32,
-    c_cflag: u32,
-    c_lflag: u32,
-    c_line: u8,
-    c_cc: [u8; 19],
-}
-
-/// `ioctl(fd, request, argp)` via the raw x86_64 syscall (nr 16). Returns the
-/// kernel return value (negative errno on failure). std/core only.
-#[cfg(target_arch = "x86_64")]
-unsafe fn ioctl(fd: i32, request: u64, argp: *mut Termios) -> i64 {
-    let ret: i64;
-    core::arch::asm!(
-        "syscall",
-        inlateout("rax") 16i64 => ret, // __NR_ioctl
-        in("rdi") fd as i64,
-        in("rsi") request,
-        in("rdx") argp,
-        lateout("rcx") _,
-        lateout("r11") _,
-        options(nostack),
-    );
-    ret
-}
-
-/// cfmakeraw-equivalent on `fd`: no echo, no canonical mode, no signal genera-
-/// tion, no I/O post-processing; VMIN=1/VTIME=0 blocking read. Returns Err(errno).
-fn set_raw(fd: i32) -> Result<(), i64> {
-    let mut t = Termios::default();
-    let r = unsafe { ioctl(fd, TCGETS, &mut t) };
-    if r < 0 {
-        return Err(-r);
-    }
-    t.c_iflag &= !(F_IGNBRK | F_BRKINT | F_PARMRK | F_ISTRIP | F_INLCR | F_IGNCR | F_ICRNL | F_IXON);
-    t.c_oflag &= !F_OPOST;
-    t.c_lflag &= !(F_ECHO | F_ECHONL | F_ICANON | F_ISIG | F_IEXTEN);
-    t.c_cflag &= !(F_CSIZE | F_PARENB);
-    t.c_cflag |= F_CS8;
-    t.c_cc[I_VMIN] = 1;
-    t.c_cc[I_VTIME] = 0;
-    let r = unsafe { ioctl(fd, TCSETS, &mut t) };
-    if r < 0 {
-        return Err(-r);
-    }
-    Ok(())
-}
-
-// ============================================================================
-// Agent state + dispatch
-// ============================================================================
-
-struct Agent {
-    /// Canonical unordered service-pair key -> the two container IPs to drop
-    /// between. The whole nft ruleset is rebuilt from this on every change, so the
-    /// installed rules are always exactly the active set. BTreeMap => sorted keys
-    /// (deterministic ruleset, matching the Go agent's `sort.Strings`).
-    partitions: BTreeMap<String, [String; 2]>,
-}
-
-impl Agent {
-    fn handle(&mut self, req: &Request) -> Reply {
-        match req.op.as_str() {
-            "ping" => Reply {
-                id: Some(req.id),
-                ok: Some(true),
-                op: Some("ping".into()),
-                agent: Some(AGENT_ID.into()),
-                schema: Some(SCHEMA),
-                build: Some(BUILD.into()),
-                ..Default::default()
-            },
-            "containers" => self.do_containers(req),
-            "exec" => self.do_exec(req),
-            "kill" => self.do_lifecycle(req, "kill"),
-            "stop" => self.do_lifecycle(req, "stop"),
-            "start" => self.do_start(req),
-            "partition" => self.do_partition(req),
-            "heal" => self.do_heal(req),
-            "logs" => self.do_logs(req),
-            other => Reply {
-                id: Some(req.id),
-                ok: Some(false),
-                op: Some(other.into()),
-                error: Some(ErrorKind::UnknownOp.msg(other)),
-                ..Default::default()
-            },
-        }
-    }
-
-    fn do_containers(&self, req: &Request) -> Reply {
-        match list_containers() {
-            Ok(list) => Reply {
-                id: Some(req.id),
-                ok: Some(true),
-                op: Some("containers".into()),
-                containers: Some(list),
-                ..Default::default()
-            },
-            Err(e) => err(req.id, "containers", ErrorKind::PodmanPs.msg(e)),
-        }
-    }
-
-    fn do_exec(&self, req: &Request) -> Reply {
-        let container = req.container.clone().unwrap_or_default();
-        let cmd = req.cmd.clone().unwrap_or_default();
-        if container.is_empty() || cmd.is_empty() {
-            return err(req.id, "exec", "exec requires `container` and `cmd`".into());
-        }
-        let id = match resolve_running(&container) {
-            Ok(Some((id, _))) => id,
-            Ok(None) => {
-                // No running container for this service — the VMM treats this as
-                // retryable inside wait_for, or an infra error for a hard exec.
-                return err(
-                    req.id,
-                    "exec",
-                    ErrorKind::NoContainer.msg(format!("no running container for service {container}")),
-                );
-            }
-            Err(e) => return err(req.id, "exec", ErrorKind::PodmanPs.msg(e)),
-        };
-
-        let start = Instant::now();
-        let out = Command::new("podman")
-            .arg("exec")
-            .arg(&id)
-            .args(&cmd)
-            .output();
-        let dur = start.elapsed().as_millis() as u64;
-        match out {
-            Ok(o) => Reply {
-                id: Some(req.id),
-                ok: Some(true),
-                op: Some("exec".into()),
-                exit: Some(o.status.code().unwrap_or(-1) as i64),
-                stdout: nonempty(o.stdout),
-                stderr: nonempty(o.stderr),
-                dur_ms: Some(dur),
-                ..Default::default()
-            },
-            // podman itself could not run (not the command's exit) — infra.
-            Err(e) => Reply {
-                id: Some(req.id),
-                ok: Some(false),
-                op: Some("exec".into()),
-                error: Some(ErrorKind::PodmanExec.msg(e.to_string())),
-                dur_ms: Some(dur),
-                ..Default::default()
-            },
-        }
-    }
-
-    /// `kill` / `stop`: resolve the RUNNING container, run the podman verb, then
-    /// WAIT for it to actually stop so a following census is deterministic.
-    fn do_lifecycle(&self, req: &Request, op: &str) -> Reply {
-        let container = req.container.clone().unwrap_or_default();
-        if container.is_empty() {
-            return err(req.id, op, format!("{op} requires `container`"));
-        }
-        let (id, name) = match resolve_by_service(&container, true) {
-            Ok(Some(v)) => v,
-            Ok(None) => {
-                return err(
-                    req.id,
-                    op,
-                    ErrorKind::NoContainer.msg(format!("no running container for service {container}")),
-                )
-            }
-            Err(e) => return err(req.id, op, ErrorKind::PodmanPs.msg(e)),
-        };
-        let (_so, se, run) = run_podman(req.timeout_s.unwrap_or(0), &[op, &id]);
-        if let Err(e) = run {
-            return err(req.id, op, format!("podman_{op}: {e} {}", se.trim()));
-        }
-        // Block until the container has actually stopped (kill does not wait; stop
-        // does, but this is idempotent + cheap and makes the census deterministic).
-        let _ = run_podman(req.timeout_s.unwrap_or(0), &["wait", &id]);
-        ok_stdout(req.id, op, format!("{op} {container} ({name})"))
-    }
-
-    /// Restart a previously stopped/killed container of the service.
-    fn do_start(&self, req: &Request) -> Reply {
-        let container = req.container.clone().unwrap_or_default();
-        if container.is_empty() {
-            return err(req.id, "start", "start requires `container`".into());
-        }
-        let (id, name) = match resolve_by_service(&container, false) {
-            Ok(Some(v)) => v,
-            Ok(None) => {
-                // Already running? Treat as an idempotent success.
-                if let Ok(Some(_)) = resolve_by_service(&container, true) {
-                    return ok_stdout(req.id, "start", format!("already running {container}"));
-                }
-                return err(
-                    req.id,
-                    "start",
-                    ErrorKind::NoContainer.msg(format!("no stopped container for service {container}")),
-                );
-            }
-            Err(e) => return err(req.id, "start", ErrorKind::PodmanPs.msg(e)),
-        };
-        let (_so, se, run) = run_podman(req.timeout_s.unwrap_or(0), &["start", &id]);
-        if let Err(e) = run {
-            return err(req.id, "start", format!("podman_start: {e} {}", se.trim()));
-        }
-        ok_stdout(req.id, "start", format!("start {container} ({name})"))
-    }
-
-    /// Drop all traffic between the two services' running containers.
-    fn do_partition(&mut self, req: &Request) -> Reply {
-        let a = req.container.clone().unwrap_or_default();
-        let b = req.peer.clone().unwrap_or_default();
-        if a.is_empty() || b.is_empty() {
-            return err(
-                req.id,
-                "partition",
-                "partition requires two services (`container` and `peer`)".into(),
-            );
-        }
-        let aid = match resolve_by_service(&a, true) {
-            Ok(v) => v,
-            Err(e) => return err(req.id, "partition", ErrorKind::PodmanPs.msg(e)),
-        };
-        let bid = match resolve_by_service(&b, true) {
-            Ok(v) => v,
-            Err(e) => return err(req.id, "partition", ErrorKind::PodmanPs.msg(e)),
-        };
-        let (aid, bid) = match (aid, bid) {
-            (Some((aid, _)), Some((bid, _))) => (aid, bid),
-            (aopt, bopt) => {
-                return err(
-                    req.id,
-                    "partition",
-                    ErrorKind::NoContainer.msg(format!(
-                        "need both running ({a} running={}, {b} running={})",
-                        aopt.is_some(),
-                        bopt.is_some()
-                    )),
-                )
-            }
-        };
-        let aip = match container_ip(&aid) {
-            Ok(ip) => ip,
-            Err(e) => return err(req.id, "partition", format!("ip({a}): {e}")),
-        };
-        let bip = match container_ip(&bid) {
-            Ok(ip) => ip,
-            Err(e) => return err(req.id, "partition", format!("ip({b}): {e}")),
-        };
-        enable_bridge_netfilter();
-        let key = pair_key(&a, &b);
-        self.partitions.insert(key.clone(), [aip.clone(), bip.clone()]);
-        if let Err(e) = self.apply_partitions() {
-            self.partitions.remove(&key);
-            return err(req.id, "partition", ErrorKind::Nft.msg(e));
-        }
-        ok_stdout(
-            req.id,
-            "partition",
-            format!("partition {a}({aip}) <-x-> {b}({bip})"),
-        )
-    }
-
-    /// Remove the partition between two services, or ALL partitions when no
-    /// services are given (`heal` / `heal: all`).
-    fn do_heal(&mut self, req: &Request) -> Reply {
-        let a = req.container.clone().unwrap_or_default();
-        let b = req.peer.clone().unwrap_or_default();
-        match (a.is_empty(), b.is_empty()) {
-            (true, true) => self.partitions.clear(),
-            (false, false) => {
-                self.partitions.remove(&pair_key(&a, &b));
-            }
-            _ => {
-                return err(
-                    req.id,
-                    "heal",
-                    "heal needs two services (`container` and `peer`) or none (heal all)".into(),
-                )
-            }
-        }
-        if let Err(e) = self.apply_partitions() {
-            return err(req.id, "heal", ErrorKind::Nft.msg(e));
-        }
-        let detail = if !a.is_empty() {
-            format!("heal {a} <-> {b}")
-        } else {
-            "heal all".to_string()
-        };
-        ok_stdout(req.id, "heal", detail)
-    }
-
-    /// Fetch one BOUNDED chunk of a service's container log. The compose k8s-file
-    /// backend gives every container a plain log file (path via `podman inspect
-    /// {{.LogPath}}`); we seek to `cursor`, read up to `min(max_bytes, cap)` raw
-    /// bytes, and return them with the advanced cursor + an EOF flag. The host
-    /// pages a whole log by looping from cursor 0 to `eof`. A single read, then
-    /// the agent blocks again — NEVER a follow/tail (which would defeat the host's
-    /// fast-forward).
-    fn do_logs(&self, req: &Request) -> Reply {
-        let service = req.container.clone().unwrap_or_default();
-        if service.is_empty() {
-            return err(req.id, "logs", "logs requires `container`".into());
-        }
-        let cursor = req.cursor.unwrap_or(0);
-        // Hard-cap the read at MAX_LOGS_CHUNK_BYTES regardless of a larger request,
-        // so a reply's JSON-escaped `data` can never approach the host TX_BUF_CAP.
-        let cap = req
-            .max_bytes
-            .unwrap_or(MAX_LOGS_CHUNK_BYTES)
-            .min(MAX_LOGS_CHUNK_BYTES) as usize;
-
-        // Resolve service -> a container id. Prefer a running one, but fall back to
-        // a stopped/exited container so a killed service's logs are still pullable.
-        let id = match resolve_by_service(&service, true) {
-            Ok(Some((id, _))) => id,
-            Ok(None) => match resolve_by_service(&service, false) {
-                Ok(Some((id, _))) => id,
-                Ok(None) => {
-                    return err(
-                        req.id,
-                        "logs",
-                        ErrorKind::NoContainer.msg(format!("no container for service {service}")),
-                    )
-                }
-                Err(e) => return err(req.id, "logs", ErrorKind::PodmanPs.msg(e)),
-            },
-            Err(e) => return err(req.id, "logs", ErrorKind::PodmanPs.msg(e)),
-        };
-
-        let log_path = match container_log_path(&id) {
-            Ok(p) => p,
-            Err(e) => return err(req.id, "logs", ErrorKind::PodmanPs.msg(e)),
-        };
-
-        match read_log_chunk(&log_path, cursor, cap) {
-            Ok((data, n, eof)) => Reply {
-                id: Some(req.id),
-                ok: Some(true),
-                op: Some("logs".into()),
-                data: if data.is_empty() { None } else { Some(data) },
-                next_cursor: Some(cursor.saturating_add(n as u64)),
-                eof: Some(eof),
-                ..Default::default()
-            },
-            Err(e) => err(
-                req.id,
-                "logs",
-                ErrorKind::PodmanOp.msg(format!("read log {log_path}: {e}")),
-            ),
-        }
-    }
-
-    /// Rebuild our nft table from `partitions` in ONE atomic transaction. The
-    /// add/delete/add idiom gives a clean slate whether or not the table pre-
-    /// existed. The chain is a default-ACCEPT forward base chain, so only our
-    /// explicit drop rules matter and all other traffic falls through to netavark.
-    fn apply_partitions(&self) -> Result<(), String> {
-        let mut b = String::new();
-        b.push_str("add table inet dvmm_faults\n");
-        b.push_str("delete table inet dvmm_faults\n");
-        b.push_str("add table inet dvmm_faults\n");
-        b.push_str("add chain inet dvmm_faults partition { type filter hook forward priority -300 ; policy accept ; }\n");
-        for ips in self.partitions.values() {
-            b.push_str(&format!(
-                "add rule inet dvmm_faults partition ip saddr {} ip daddr {} drop\n",
-                ips[0], ips[1]
-            ));
-            b.push_str(&format!(
-                "add rule inet dvmm_faults partition ip saddr {} ip daddr {} drop\n",
-                ips[1], ips[0]
-            ));
-        }
-        let mut child = Command::new("nft")
-            .arg("-f")
-            .arg("-")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| e.to_string())?;
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(b.as_bytes());
-        }
-        let out = child.wait_with_output().map_err(|e| e.to_string())?;
-        if !out.status.success() {
-            return Err(format!(
-                "exit status {}: {}",
-                out.status.code().unwrap_or(-1),
-                String::from_utf8_lossy(&out.stderr).trim()
-            ));
-        }
-        Ok(())
-    }
-}
-
-// ============================================================================
-// podman helpers
-// ============================================================================
-
-/// A subset of `podman ps --format json` (only the fields we use).
-#[derive(Deserialize, Default)]
-struct PodmanPs {
-    #[serde(rename = "Id", default)]
-    id: String,
-    #[serde(rename = "Names", default)]
-    names: Vec<String>,
-    #[serde(rename = "State", default)]
-    state: String,
-    #[serde(rename = "ExitCode", default)]
-    exit_code: i64,
-    #[serde(rename = "Labels", default)]
-    labels: BTreeMap<String, String>,
-    #[serde(rename = "Status", default)]
-    status: String,
-}
-
-/// `podman <args>` capturing stdout; Err on spawn failure or nonzero exit.
-fn podman_json(args: &[&str]) -> Result<Vec<PodmanPs>, String> {
-    let out = Command::new("podman")
-        .args(args)
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-    }
-    serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())
-}
-
-/// `podman ps -a --format json`, normalized to the wire census shape.
-fn list_containers() -> Result<Vec<ContainerInfo>, String> {
-    let raw = podman_json(&["ps", "-a", "--format", "json"])?;
-    let mut list = Vec::with_capacity(raw.len());
-    for c in &raw {
-        let name = c.names.first().cloned().unwrap_or_default();
-        let svc = c.labels.get(COMPOSE_SERVICE_LABEL).cloned().unwrap_or_default();
-        let s = c.status.to_lowercase();
-        let health = if s.contains("unhealthy") {
-            "unhealthy"
-        } else if s.contains("healthy") {
-            "healthy"
-        } else if s.contains("starting") {
-            "starting"
-        } else {
-            ""
-        };
-        list.push(ContainerInfo {
-            name,
-            service: svc,
-            state: c.state.to_lowercase(),
-            exit_code: c.exit_code,
-            health: health.to_string(),
-        });
-    }
-    Ok(list)
-}
-
-/// Find a RUNNING container id + name for the given compose service (label, else
-/// a name match for single-name stacks). `Ok(None)` = not found (retryable).
-fn resolve_running(service: &str) -> Result<Option<(String, String)>, String> {
-    let raw = podman_json(&["ps", "--format", "json"])?;
-    for c in &raw {
-        if c.state != "running" {
-            continue;
-        }
-        if c.labels.get(COMPOSE_SERVICE_LABEL).map(|v| v == service) == Some(true) {
-            return Ok(Some((c.id.clone(), c.names.first().cloned().unwrap_or_default())));
-        }
-        for n in &c.names {
-            if n == service {
-                return Ok(Some((c.id.clone(), n.clone())));
-            }
-        }
-    }
-    Ok(None)
-}
-
-/// Find a container of the service: the first RUNNING one if `want_running`, else
-/// the first NON-running one (for `start`). Matches label or name.
-fn resolve_by_service(service: &str, want_running: bool) -> Result<Option<(String, String)>, String> {
-    let raw = podman_json(&["ps", "-a", "--format", "json"])?;
-    for c in &raw {
-        let mut matched = c.labels.get(COMPOSE_SERVICE_LABEL).map(|v| v == service) == Some(true);
-        if !matched {
-            matched = c.names.iter().any(|n| n == service);
-        }
-        if !matched {
-            continue;
-        }
-        if (c.state == "running") == want_running {
-            return Ok(Some((c.id.clone(), c.names.first().cloned().unwrap_or_default())));
-        }
-    }
-    Ok(None)
-}
-
-/// The first bridge IP of a container.
-fn container_ip(id_or_name: &str) -> Result<String, String> {
-    let out = Command::new("podman")
-        .args([
-            "inspect",
-            "-f",
-            "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}",
-            id_or_name,
-        ])
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-    }
-    for tok in String::from_utf8_lossy(&out.stdout).split_whitespace() {
-        if !tok.is_empty() {
-            return Ok(tok.to_string());
-        }
-    }
-    Err(format!("no IP for {id_or_name}"))
-}
-
-/// The container's k8s-file log path. Podman (unlike Docker) has no top-level
-/// `.LogPath`; the k8s-file backend records the file under
-/// `.HostConfig.LogConfig.Path`. With the guest's `log_driver = "k8s-file"` this
-/// is a plain file whose lines are `<RFC3339-ts> <stdout|stderr> <F|P> <message>`.
-fn container_log_path(id_or_name: &str) -> Result<String, String> {
-    let out = Command::new("podman")
-        .args([
-            "inspect",
-            "--format",
-            "{{.HostConfig.LogConfig.Path}}",
-            id_or_name,
-        ])
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-    }
-    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if p.is_empty() {
-        return Err(format!("empty LogPath for {id_or_name}"));
-    }
-    Ok(p)
-}
-
-/// Read up to `cap` raw bytes from `path` starting at `cursor`. Returns
-/// `(lossy_utf8_data, raw_bytes_read, eof)`. A short read (fewer than `cap`
-/// bytes) means the current end of the log was reached (`eof = true`). A missing
-/// log file (a container that has not logged yet) reads as an empty log at EOF —
-/// not an error. `next_cursor` is derived from `raw_bytes_read`, so paging stays
-/// byte-exact even though `data` is lossy UTF-8.
-fn read_log_chunk(path: &str, cursor: u64, cap: usize) -> std::io::Result<(String, usize, bool)> {
-    let mut f = match File::open(path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((String::new(), 0, true));
-        }
-        Err(e) => return Err(e),
-    };
-    f.seek(SeekFrom::Start(cursor))?;
-    let mut buf = vec![0u8; cap];
-    let mut total = 0usize;
-    while total < cap {
-        let n = f.read(&mut buf[total..])?;
-        if n == 0 {
-            break;
-        }
-        total += n;
-    }
-    let eof = total < cap; // short read => reached the current end of the log.
-    let data = String::from_utf8_lossy(&buf[..total]).into_owned();
-    Ok((data, total, eof))
-}
-
-/// Make bridged (intra-network) packets traverse the ip/inet netfilter hooks, so
-/// our forward drop rules see container-to-container traffic. netavark already
-/// sets this; set it defensively and ignore errors.
-fn enable_bridge_netfilter() {
-    for p in [
-        "/proc/sys/net/bridge/bridge-nf-call-iptables",
-        "/proc/sys/net/bridge/bridge-nf-call-ip6tables",
-    ] {
-        let _ = std::fs::write(p, "1\n");
-    }
-}
-
-/// Run `podman <args>` under a timeout (guest seconds; fast-forwards), capturing
-/// stdout/stderr. Returns `(stdout, stderr, Ok/Err)`. std-only timeout: poll
-/// `try_wait`, `child.kill()` on the deadline (no libc, no raw signal syscall).
-fn run_podman(timeout_s: u64, args: &[&str]) -> (String, String, Result<(), String>) {
-    let timeout = Duration::from_secs(if timeout_s == 0 { 60 } else { timeout_s });
-    let mut child = match Command::new("podman")
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => return (String::new(), String::new(), Err(e.to_string())),
-    };
-    // Drain the pipes on threads so a chatty command can't deadlock on a full pipe
-    // while we poll for the timeout.
-    let mut so_pipe = child.stdout.take();
-    let mut se_pipe = child.stderr.take();
-    let so_h = std::thread::spawn(move || {
-        let mut v = Vec::new();
-        if let Some(p) = so_pipe.as_mut() {
-            let _ = p.read_to_end(&mut v);
-        }
-        v
-    });
-    let se_h = std::thread::spawn(move || {
-        let mut v = Vec::new();
-        if let Some(p) = se_pipe.as_mut() {
-            let _ = p.read_to_end(&mut v);
-        }
-        v
-    });
-
-    let start = Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(st)) => break Some(st),
-            Ok(None) => {
-                if start.elapsed() >= timeout {
-                    let _ = child.kill();
-                    break child.wait().ok();
-                }
-                std::thread::sleep(Duration::from_millis(25));
-            }
-            Err(_) => break None,
-        }
-    };
-
-    let so = String::from_utf8_lossy(&so_h.join().unwrap_or_default()).into_owned();
-    let se = String::from_utf8_lossy(&se_h.join().unwrap_or_default()).into_owned();
-    let res = match status {
-        Some(st) if st.success() => Ok(()),
-        Some(st) => Err(format!("exit status {}", st.code().unwrap_or(-1))),
-        None => Err("timed out".to_string()),
-    };
-    (so, se, res)
-}
-
-// ============================================================================
-// small helpers
-// ============================================================================
-
-/// Canonical unordered service-pair key: `min(a,b) \0 max(a,b)`.
-fn pair_key(a: &str, b: &str) -> String {
-    if a > b {
-        format!("{b}\0{a}")
-    } else {
-        format!("{a}\0{b}")
-    }
-}
-
-fn nonempty(bytes: Vec<u8>) -> Option<String> {
-    if bytes.is_empty() {
-        None
-    } else {
-        Some(String::from_utf8_lossy(&bytes).into_owned())
-    }
-}
-
-fn err(id: u64, op: &str, error: String) -> Reply {
-    Reply {
-        id: Some(id),
-        ok: Some(false),
-        op: Some(op.into()),
-        error: Some(error),
-        ..Default::default()
-    }
-}
-
-fn ok_stdout(id: u64, op: &str, stdout: String) -> Reply {
-    Reply {
-        id: Some(id),
-        ok: Some(true),
-        op: Some(op.into()),
-        stdout: Some(stdout),
-        ..Default::default()
-    }
+    // Two-source blocked poll: ttyS1 (control) + the event FIFO. An infinite-timeout
+    // poll arms no timer and generates no wakes, so fast-forward transparency is
+    // preserved exactly as the former blocked read.
+    run_loop(file, fifo, &mut writer, &mut agent);
 }
 
 // ============================================================================
@@ -851,8 +107,12 @@ fn ok_stdout(id: u64, op: &str, stdout: String) -> Reply {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::agent::{pair_key, read_log_chunk, Agent};
+    use crate::bridge::{parse_event, LineReader, RX_LINE_CAP};
+    use crate::AGENT_ID;
+    use dvmm_proto::{decode_line, encode_line, Reply, Request, SCHEMA};
     use serde_json::Value;
+    use std::io::{self, Read};
     use std::path::PathBuf;
 
     fn goldens_dir() -> PathBuf {
@@ -889,9 +149,7 @@ mod tests {
 
     #[test]
     fn unknown_op_is_rejected() {
-        let mut a = Agent {
-            partitions: BTreeMap::new(),
-        };
+        let mut a = Agent::new();
         let r = a.handle(&Request {
             id: 9,
             op: "frobnicate".into(),
@@ -903,9 +161,7 @@ mod tests {
 
     #[test]
     fn ping_carries_schema_and_build() {
-        let mut a = Agent {
-            partitions: BTreeMap::new(),
-        };
+        let mut a = Agent::new();
         let r = a.handle(&Request {
             id: 1,
             op: "ping".into(),
@@ -959,5 +215,92 @@ mod tests {
     fn read_log_chunk_missing_file_is_empty_eof() {
         let (d, n, eof) = read_log_chunk("/no/such/dvmm/log/file", 0, 4096).unwrap();
         assert!(d.is_empty() && n == 0 && eof);
+    }
+
+    // ---- schema-3 event bridge -------------------------------------------------
+
+    /// A `Read` that hands over `chunk` bytes per call — fragments frames across
+    /// reads the way a real FIFO/tty does, so the reassembly is exercised, not just
+    /// the happy single-read path.
+    struct Drip<'a> {
+        data: &'a [u8],
+        pos: usize,
+        chunk: usize,
+    }
+    impl Read for Drip<'_> {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            let n = self.chunk.min(out.len()).min(self.data.len() - self.pos);
+            out[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn line_reader_reassembles_frames_across_fragmented_reads() {
+        // Two atomic events + a trailing partial, delivered 3 bytes at a time.
+        let data = b"{\"kind\":\"always\",\"name\":\"a\",\"ok\":true}\n\
+                     {\"kind\":\"done\"}\n\
+                     {\"kind\":\"sometimes\",\"name\":\"s\",\"ok\":false}"; // last: no \n
+        let mut lr = LineReader::new(Drip { data, pos: 0, chunk: 3 });
+
+        let mut lines = Vec::new();
+        while lr.fill().unwrap() {
+            lines.extend(lr.by_ref());
+        }
+        // Two complete lines; the unterminated tail is NOT surfaced (no phantom line).
+        assert_eq!(lines.len(), 2);
+        assert!(lr.next().is_none());
+        assert_eq!(parse_event(&lines[0]).kind, "always");
+        assert_eq!(parse_event(&lines[1]).kind, "done");
+    }
+
+    #[test]
+    fn line_reader_bounds_an_oversized_unterminated_frame() {
+        let big = vec![b'x'; RX_LINE_CAP + 10]; // no newline, ever
+        let mut lr = LineReader::new(std::io::Cursor::new(big));
+        let mut surfaced = 0;
+        while lr.fill().unwrap() {
+            while lr.next().is_some() {
+                surfaced += 1; // truncated frame surfaced so memory stays bounded
+            }
+        }
+        while lr.next().is_some() {
+            surfaced += 1;
+        }
+        assert_eq!(surfaced, 1, "the oversized unterminated frame is surfaced once");
+    }
+
+    #[test]
+    fn parse_event_passes_wellformed_and_flags_malformed() {
+        let ok = parse_event(b"{\"kind\":\"always\",\"name\":\"books\",\"ok\":true}\n");
+        assert_eq!(ok.kind, "always");
+        assert_eq!(ok.name, "books");
+        assert_eq!(ok.ok, Some(true));
+
+        // Not JSON -> invalid, never dropped, raw preserved (truncated).
+        let bad = parse_event(b"not json at all\n");
+        assert_eq!(bad.kind, "invalid");
+        let raw = bad.details.unwrap();
+        assert_eq!(raw["raw"], "not json at all");
+
+        // Valid JSON but no `kind` -> invalid (a kind is mandatory).
+        let nokind = parse_event(b"{\"name\":\"x\",\"ok\":true}\n");
+        assert_eq!(nokind.kind, "invalid");
+
+        // An unknown kind is transport-passed as-is; the host decides policy.
+        let unknown = parse_event(b"{\"kind\":\"weird\",\"name\":\"y\"}\n");
+        assert_eq!(unknown.kind, "weird");
+    }
+
+    #[test]
+    fn forwarded_event_round_trips_as_an_id_less_reply() {
+        let ev = parse_event(b"{\"kind\":\"sometimes\",\"name\":\"n\",\"ok\":true}\n");
+        let line = encode_line(&Reply::from_event(7, ev)).unwrap();
+        let back: Reply = decode_line(&line).unwrap();
+        assert!(back.is_event(), "id-less + event set => is_event");
+        assert!(!back.is_hello());
+        assert_eq!(back.seq, Some(7));
+        assert_eq!(back.event.as_ref().unwrap().kind, "sometimes");
     }
 }

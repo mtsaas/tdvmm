@@ -1,0 +1,1 @@
+{"event":{"kind":"fault","name":"kill_replica","details":{"op":"kill","service":"replica2"}},"seq":4}

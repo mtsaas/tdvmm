@@ -18,8 +18,9 @@ use crate::{DEFAULT_CMDLINE, DEFAULT_MAX_JUMP_SECS, DEFAULT_MEM_MIB};
                   suffix (ms, s, m, h), e.g. 500ms, 30s, 5m, 2h.",
     after_help = "Examples:\n  \
                   dvmm build guest/stacks/insert-trim/compose.yml\n  \
-                  dvmm run guest/stacks/insert-trim/insert-trim.dvmm\n  \
-                  dvmm test insert-trim.dvmm --scenario guest/stacks/insert-trim/insert-trim.yml",
+                  dvmm ls\n  \
+                  dvmm run insert-trim\n  \
+                  dvmm test insert-trim --scenario guest/stacks/insert-trim/insert-trim.yml",
     version
 )]
 pub(crate) struct Cli {
@@ -49,7 +50,7 @@ pub(crate) enum Cmd {
     /// Boot a raw kernel + initramfs (the low-level VMM-dev / smoke verb).
     Boot(BootArgs),
     /// Run a .dvmm stack artifact: apply its baked run-defaults, then boot (offline).
-    #[command(after_help = "Example:\n  dvmm run insert-trim.dvmm --ff on")]
+    #[command(after_help = "Example:\n  dvmm run insert-trim --ff on   (a store name, or a path to a .dvmm)")]
     Run(RunArgs),
     /// Test a .dvmm stack against a scenario: drive virtual time, assert, verdict.
     #[command(
@@ -67,6 +68,8 @@ pub(crate) enum Cmd {
     Inspect(ArtifactArg),
     /// Verify a .dvmm: recompute member hashes vs the manifest; print its sha256 identity.
     Verify(ArtifactArg),
+    /// List the .dvmm artifacts in the local store (name, size, modified).
+    Ls(LsArgs),
     /// Print the effective guest clock/timer CPUID profile (the manifest artifact).
     DumpCpuid,
     /// [internal] Build the seed store inside `podman unshare` (used by `dvmm build`).
@@ -188,8 +191,8 @@ pub(crate) struct BootArgs {
 
 #[derive(Args)]
 pub(crate) struct RunArgs {
-    /// Path to the .dvmm stack artifact.
-    #[arg(value_name = "stack.dvmm")]
+    /// A store name (e.g. `tigerbeetle`) or a path to a .dvmm artifact.
+    #[arg(value_name = "stack")]
     pub(crate) artifact: String,
     /// Skip the default-ON member-hash verification on load.
     #[arg(long)]
@@ -204,8 +207,8 @@ pub(crate) struct RunArgs {
 
 #[derive(Args)]
 pub(crate) struct TestArgs {
-    /// Path to the .dvmm stack artifact.
-    #[arg(value_name = "stack.dvmm")]
+    /// A store name (e.g. `tigerbeetle`) or a path to a .dvmm artifact.
+    #[arg(value_name = "stack")]
     pub(crate) artifact: String,
     /// The scenario YAML (steps + assertions).
     #[arg(long, value_name = "PATH")]
@@ -233,9 +236,17 @@ pub(crate) struct TestArgs {
 
 #[derive(Args)]
 pub(crate) struct ArtifactArg {
-    /// Path to the .dvmm stack artifact.
-    #[arg(value_name = "stack.dvmm")]
+    /// A store name (e.g. `tigerbeetle`) or a path to a .dvmm artifact.
+    #[arg(value_name = "stack")]
     pub(crate) artifact: String,
+}
+
+#[derive(Args)]
+pub(crate) struct LsArgs {
+    /// Also compute and show each artifact's sha256 identity (first 12 hex).
+    /// Off by default: hashing every artifact reads hundreds of MB each.
+    #[arg(short, long)]
+    pub(crate) digest: bool,
 }
 
 /// clap value parser for `--ff on|off` (also accepts 1/0/true/false).

@@ -86,12 +86,19 @@ fi
 ip link set lo up 2>/dev/null || true
 hostname dvmm-guest 2>/dev/null || true
 
-# container storage: size-capped tmpfs seeded from the baked image store.
-# 3072m headroom for compose stacks: under the vfs graph driver each running
-# container's rootfs is a full copy of its image, so (for the dogfood) two
-# postgres-image containers + the store image + the seed coexist here. Cap, not
-# reservation -- RAM used tracks actual content, bounded by the 3 GiB guest.
-mount -t tmpfs -o size=2560m,mode=0700 tmpfs /var/lib/containers
+# container storage: size-capped tmpfs seeded from the baked image store. Holds
+# each container's overlay upper (its writable layer, including any data files a
+# service writes there) plus the seeded image store. This is a CAP, not a
+# reservation -- RAM used tracks actual content -- so we scale it with guest RAM
+# (60% of MemTotal), floored at the historical 2560 MiB so small guests are
+# unchanged. Scaling matters for multi-replica stacks like the TigerBeetle
+# cluster: each replica preallocates a ~1.06 GiB data file on its writable layer,
+# so three need ~3.2 GiB here -- past the old fixed 2560 MiB cap, which did not
+# grow with --mem (it predates the high-memory split).
+STORE_MIB=$(awk '/^MemTotal:/{print int($2/1024*60/100)}' /proc/meminfo 2>/dev/null)
+if [ -z "$STORE_MIB" ] || [ "$STORE_MIB" -lt 2560 ]; then STORE_MIB=2560; fi
+log "container-storage tmpfs cap: ${STORE_MIB}m (60% of guest RAM, floor 2560m)"
+mount -t tmpfs -o size="${STORE_MIB}m",mode=0700 tmpfs /var/lib/containers
 if [ -d /var/lib/containers-seed ]; then
   cp -a /var/lib/containers-seed/. /var/lib/containers/ 2>/dev/null || true
   # reclaim the seed's second copy from the root tmpfs now that it is in place.
@@ -104,13 +111,21 @@ echo "DVMM_ALPINE_BOOT_OK reached userspace"
 echo "kernel: $(uname -sr)   date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 echo
 
+# Event bridge (schema 3): the FIFO that workload containers write assertion events
+# to; the agent tails it (below) and forwards each over ttyS1. Created on the /run
+# tmpfs each boot, BEFORE the agent starts so its O_RDWR open finds it, and
+# unconditionally (even with dvmm.noagent=1) so every service's read-write bind-mount
+# of this path resolves. 0666 so containers write as their own uid.
+mkdir -p /run/dvmm
+mkfifo -m 0666 /run/dvmm/events 2>/dev/null || true
+
 # TEST-1a control-channel agent: a static Rust (musl) binary that BLOCKS reading /dev/ttyS1
 # (COM2). A blocked read arms no timer -> no wakes -> fast-forward-transparent. It
 # runs OUTSIDE the containers and services `dvmm test` control commands (exec /
-# container census via podman). Started in the background so it survives the
-# `exec` into compose-up.sh below. Skipped with `dvmm.noagent=1` (the A/B knob for
-# the FF-transparency gate). podman need not be up yet; the agent reports
-# "no_container" and the host wait_for retries.
+# container census via podman) and forwards guest events from /run/dvmm/events.
+# Started in the background so it survives the `exec` into compose-up.sh below.
+# Skipped with `dvmm.noagent=1` (the A/B knob for the FF-transparency gate). podman
+# need not be up yet; the agent reports "no_container" and the host wait_for retries.
 if ! grep -q 'dvmm.noagent=1' /proc/cmdline 2>/dev/null; then
   if [ -x /usr/local/bin/dvmm-agent ] && [ -c /dev/ttyS1 ]; then
     echo "[init] starting dvmm-agent on /dev/ttyS1 (control channel)"
