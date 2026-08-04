@@ -52,7 +52,7 @@
 //! failure, or the agent could not reach a container). CI can tell "your stack is
 //! wrong" (1) from "the tool broke" (2).
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
 use std::io::Write;
 use std::time::Instant;
@@ -61,7 +61,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use dvmm_proto::{decode_line, encode_line, ContainerInfo, Reply, Request};
+use dvmm_proto::{decode_line, encode_line, ContainerInfo, GuestEvent, Reply, Request};
 
 use crate::control::ControlChannel;
 use crate::vtsc::TscFrequency;
@@ -107,6 +107,11 @@ struct RawRun {
     ff: Option<bool>,
     #[serde(default)]
     max_virtual_time: Option<String>,
+    /// `until: done` — after all steps pass, keep the run alive (no timer) until a
+    /// guest `done` event arrives or the virtual-time horizon fires, so workload
+    /// assertions bridged over the FIFO can accumulate before the verdict.
+    #[serde(default)]
+    until: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -247,6 +252,8 @@ pub struct ScenarioRun {
     pub mem: Option<u64>,
     pub ff: Option<bool>,
     pub max_virtual_time: Option<String>,
+    /// Wait for a guest `done` event before deciding the verdict (from `run.until`).
+    pub until_done: bool,
 }
 
 pub struct PreparedStep {
@@ -613,7 +620,16 @@ impl Scenario {
         let death_policy = !expect_death.is_empty()
             || raw.steps.iter().any(|s| s.kill.is_some() || s.stop.is_some());
 
+        // `run.until`, if present, must be exactly "done" (the only completion mode).
+        if let Some(u) = raw.run.as_ref().and_then(|r| r.until.as_deref()) {
+            if u != "done" {
+                return Err(ScenarioError(format!(
+                    "run.until: expected \"done\" (got {u:?})"
+                )));
+            }
+        }
         let run = raw.run.map(|r| ScenarioRun {
+            until_done: r.until.as_deref() == Some("done"),
             cmdline: r.cmdline,
             mem: r.mem,
             ff: r.ff,
@@ -730,6 +746,10 @@ struct Report {
     steps: Vec<StepReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     failure: Option<String>,
+    /// Guest-assertion summary (schema 3+). Omitted when no guest events were seen,
+    /// so an event-free run's report is byte-for-byte unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    assertions: Option<AssertionSummary>,
 }
 
 #[derive(Clone, Serialize)]
@@ -755,7 +775,124 @@ enum Phase {
     /// TEST-1b: the implicit end-of-run container census that enforces the
     /// expected-death policy (only for scenarios that could produce a death).
     FinalCensus { id: u64 },
+    /// `run: until: done` — every step passed; the run stays alive with NO timer
+    /// (`next_deadline = None`) until a guest `done` event or the horizon fires.
+    AwaitDone,
     Done,
+}
+
+/// Accumulates guest→host assertion events into a verdict. Empty for a run that
+/// sees no events, so an event-free scenario's verdict/report/JSONL are unchanged.
+#[derive(Default)]
+struct AssertionLedger {
+    events: u64,
+    always_total: u64,
+    /// Names of `always` events that reported `ok:false`.
+    always_failed: Vec<String>,
+    /// `sometimes` name → whether it was ever satisfied (`ok:true`).
+    sometimes: BTreeMap<String, bool>,
+    faults: u64,
+    invalid: u64,
+    done: bool,
+    last_seq: Option<u64>,
+    seq_gaps: u64,
+}
+
+impl AssertionLedger {
+    fn is_empty(&self) -> bool {
+        self.events == 0
+    }
+
+    fn record(&mut self, ev: &GuestEvent) {
+        self.events += 1;
+        match ev.kind.as_str() {
+            "always" => {
+                self.always_total += 1;
+                if ev.ok == Some(false) {
+                    self.always_failed.push(ev.name.clone());
+                }
+            }
+            "sometimes" => {
+                let sat = self.sometimes.entry(ev.name.clone()).or_insert(false);
+                if ev.ok == Some(true) {
+                    *sat = true;
+                }
+            }
+            "fault" => self.faults += 1,
+            "done" => self.done = true,
+            _ => self.invalid += 1, // "invalid" and any unknown kind: recorded, non-verdict.
+        }
+    }
+
+    /// Fold into the shared 0/1/2 verdict. Empty ledger ⇒ ("pass", 0, None),
+    /// byte-identical to a run with no events.
+    fn verdict(&self) -> (&'static str, i32, Option<String>) {
+        if !self.always_failed.is_empty() {
+            return (
+                "fail",
+                1,
+                Some(format!(
+                    "assertion(s) failed: always {:?}",
+                    self.always_failed
+                )),
+            );
+        }
+        let unsatisfied: Vec<&String> =
+            self.sometimes.iter().filter(|(_, s)| !**s).map(|(n, _)| n).collect();
+        if !unsatisfied.is_empty() {
+            return (
+                "fail",
+                1,
+                Some(format!("sometimes assertion(s) never satisfied: {unsatisfied:?}")),
+            );
+        }
+        ("pass", 0, None)
+    }
+
+    /// Record a bridged event's sequence number and return how many lines the wire
+    /// dropped since the previous one (a gap greater than one). A `seq` that does
+    /// not advance is treated as an agent restart: tracking resets, no gap reported.
+    fn observe_seq(&mut self, s: u64) -> Option<u64> {
+        let dropped = self
+            .last_seq
+            .and_then(|prev| s.checked_sub(prev))
+            .filter(|&delta| delta > 1)
+            .map(|delta| delta - 1);
+        self.last_seq = Some(s);
+        if let Some(d) = dropped {
+            self.seq_gaps += d;
+        }
+        dropped
+    }
+
+    fn summary(&self) -> AssertionSummary {
+        AssertionSummary {
+            always_failed: self.always_failed.clone(),
+            always_total: self.always_total,
+            events: self.events,
+            faults: self.faults,
+            invalid: self.invalid,
+            seq_gaps: self.seq_gaps,
+            sometimes_satisfied: self.sometimes.values().filter(|s| **s).count() as u64,
+            sometimes_total: self.sometimes.len() as u64,
+        }
+    }
+}
+
+/// The guest-assertion summary embedded in `run_end` and the report (schema 3+).
+/// Fields are ordered alphabetically so the typed report struct and the
+/// `serde_json::Value` copy in the JSONL serialize to identical bytes under
+/// serde_json's sorted-key default.
+#[derive(Serialize)]
+struct AssertionSummary {
+    always_failed: Vec<String>,
+    always_total: u64,
+    events: u64,
+    faults: u64,
+    invalid: u64,
+    seq_gaps: u64,
+    sometimes_satisfied: u64,
+    sometimes_total: u64,
 }
 
 struct Outcome {
@@ -782,6 +919,8 @@ pub struct ScenarioEngine {
 
     step_reports: Vec<StepReport>,
     outcome: Option<Outcome>,
+    /// Guest→host assertion events folded into the verdict (schema 3+).
+    ledger: AssertionLedger,
 }
 
 /// What the caller should do after an engine call.
@@ -809,6 +948,7 @@ impl ScenarioEngine {
             final_census_done: false,
             step_reports: Vec::new(),
             outcome: None,
+            ledger: AssertionLedger::default(),
         })
     }
 
@@ -891,6 +1031,59 @@ impl ScenarioEngine {
         });
     }
 
+    /// Fold the assertion ledger into the terminal verdict. An empty ledger yields
+    /// ("pass", 0, None) — byte-identical to a run that saw no guest events.
+    fn finish_with_ledger(&mut self, now: u64) {
+        let (verdict, code, failure) = self.ledger.verdict();
+        self.finish(now, verdict, code, failure);
+    }
+
+    /// Complete the run once every step (and any final container census) has
+    /// passed. With `run: until: done` and no `done` event yet, stay alive in
+    /// `AwaitDone` — no timer — so bridged assertions keep accumulating; otherwise
+    /// fold the ledger into the terminal verdict now, so a recorded `always:false`
+    /// still fails the run rather than a census pass hard-coding exit 0. The single
+    /// owner of the completion policy — every "all steps passed" site routes here.
+    fn complete_run(&mut self, now: u64) {
+        if self.scn.run.until_done && !self.ledger.done {
+            self.phase = Phase::AwaitDone;
+            self.next_deadline = None;
+        } else {
+            self.finish_with_ledger(now);
+        }
+    }
+
+    /// The `--max-virtual-time` horizon fired. In `AwaitDone` (every step already
+    /// passed) this is a legitimate completion — evaluate the ledger. In any other
+    /// phase the scenario did not complete in time: an infrastructure error (exit
+    /// 2), byte-identical to the prior unconditional `record_abort`.
+    pub fn on_horizon(&mut self, now: u64) {
+        if self.outcome.is_some() {
+            return;
+        }
+        if let Phase::AwaitDone = self.phase {
+            // `until: done` reached the horizon without its `done` event. An empty
+            // ledger means no guest event ever arrived — the bridge is almost
+            // certainly broken (FIFO missing, agent dead, workload crashed), and
+            // grading that PASS would launder "no news" into "good news"; treat it
+            // as infra error. A non-empty ledger folds normally, but warn.
+            if self.ledger.is_empty() {
+                self.record_abort(
+                    now,
+                    "virtual-time horizon reached awaiting `done` with no guest events (bridge broken?)",
+                );
+            } else {
+                crate::log_line(format_args!(
+                    "[dvmm][WARN] horizon reached before a `done` event; folding {} guest event(s) into the verdict",
+                    self.ledger.events
+                ));
+                self.finish_with_ledger(now);
+            }
+        } else {
+            self.record_abort(now, "scenario did not complete before the virtual-time horizon");
+        }
+    }
+
     /// External stop (guest died, horizon, wall timeout) before the scenario
     /// completed: classify as an infrastructure error (exit 2).
     pub fn record_abort(&mut self, now: u64, reason: &str) {
@@ -916,7 +1109,7 @@ impl ScenarioEngine {
                 self.final_census_done = true;
                 self.begin_final_census(now, com2);
             } else {
-                self.finish(now, "pass", 0, None);
+                self.complete_run(now);
             }
             return;
         }
@@ -1005,7 +1198,7 @@ impl ScenarioEngine {
             }),
         );
         if reply.ok != Some(true) {
-            self.finish(now, "pass", 0, None);
+            self.complete_run(now);
             return;
         }
         let empty = Vec::new();
@@ -1019,7 +1212,7 @@ impl ScenarioEngine {
                     "unexpected container death: {bad} (not declared in expect_death)"
                 )),
             ),
-            None => self.finish(now, "pass", 0, None),
+            None => self.complete_run(now),
         }
     }
 
@@ -1212,15 +1405,18 @@ impl ScenarioEngine {
             }
             Phase::FinalCensus { .. } => {
                 // The end-of-run census did not return in time. Do NOT fail an
-                // otherwise-passing run (every step already passed); log + pass.
+                // otherwise-passing run (every step already passed); log and
+                // complete through the ledger (which still folds any assertions).
                 self.logger.event(
                     now,
                     "final_census",
                     json!({ "ok": false, "error": "final census timed out" }),
                 );
-                self.finish(now, "pass", 0, None);
+                self.complete_run(now);
             }
-            Phase::Done => {}
+            // AwaitDone arms no deadline, so on_due is never called for it; the arm
+            // exists only for match exhaustiveness.
+            Phase::AwaitDone | Phase::Done => {}
         }
         if self.is_finished() {
             Flow::Finished
@@ -1273,6 +1469,15 @@ impl ScenarioEngine {
             return self.flow();
         }
 
+        // Bridged guest→host assertion event (schema 3+): id-less, `event` set.
+        // Handled before the id-gate below, which would otherwise drop it.
+        if parsed.is_event() {
+            if let Some(ev) = &parsed.event {
+                self.on_guest_event(now, ev, parsed.seq);
+            }
+            return self.flow();
+        }
+
         let id = match parsed.id {
             Some(id) => id,
             None => return Flow::Continue,
@@ -1300,6 +1505,33 @@ impl ScenarioEngine {
             Flow::Finished
         } else {
             Flow::Continue
+        }
+    }
+
+    /// A bridged guest assertion event arrived (id-less line, `event` set). Log it
+    /// (vtsc-stamped), fold it into the ledger, and — if `done` arrives while in
+    /// `AwaitDone` — decide the verdict. Never verdict-affecting on its own except
+    /// through the ledger fold at completion.
+    fn on_guest_event(&mut self, now: u64, ev: &GuestEvent, seq: Option<u64>) {
+        if let Some(dropped) = seq.and_then(|s| self.ledger.observe_seq(s)) {
+            crate::log_line(format_args!(
+                "[dvmm][WARN] guest event seq gap: {dropped} line(s) dropped"
+            ));
+        }
+        self.logger.event(
+            now,
+            "guest_event",
+            json!({
+                "kind": ev.kind, "name": ev.name, "ok": ev.ok,
+                "seq": seq, "details": ev.details,
+            }),
+        );
+        self.ledger.record(ev);
+        // A `done` while awaiting it decides the run (fold the ledger).
+        if ev.kind == "done" {
+            if let Phase::AwaitDone = self.phase {
+                self.finish_with_ledger(now);
+            }
         }
     }
 
@@ -1443,17 +1675,23 @@ impl ScenarioEngine {
             .count();
         let steps_total = self.scn.steps.len();
 
-        self.logger.event(
-            now,
-            "run_end",
-            json!({
-                "verdict": out.verdict, "exit_code": out.exit_code,
-                "steps_total": steps_total, "steps_passed": steps_passed,
-                "duration_wall_s": round3(wall_s),
-                "virtual_seconds": round3(ff.virtual_seconds),
-                "failure": out.failure,
-            }),
-        );
+        let mut run_end = json!({
+            "verdict": out.verdict, "exit_code": out.exit_code,
+            "steps_total": steps_total, "steps_passed": steps_passed,
+            "duration_wall_s": round3(wall_s),
+            "virtual_seconds": round3(ff.virtual_seconds),
+            "failure": out.failure,
+        });
+        // The assertions block is added ONLY when at least one guest event was
+        // seen, so an event-free run's `run_end` line is byte-for-byte unchanged.
+        if !self.ledger.is_empty() {
+            if let (Some(obj), Ok(summary)) =
+                (run_end.as_object_mut(), serde_json::to_value(self.ledger.summary()))
+            {
+                obj.insert("assertions".into(), summary);
+            }
+        }
+        self.logger.event(now, "run_end", run_end);
 
         let report = Report {
             schema: SCHEMA_VERSION,
@@ -1471,6 +1709,11 @@ impl ScenarioEngine {
             steps_passed,
             steps: self.step_reports.clone(),
             failure: out.failure.clone(),
+            assertions: if self.ledger.is_empty() {
+                None
+            } else {
+                Some(self.ledger.summary())
+            },
         };
         match serde_json::to_vec_pretty(&report) {
             Ok(mut v) => {
@@ -1782,14 +2025,19 @@ mod tests {
     }
 
     fn scn_from(yaml: &str) -> Result<Scenario, ScenarioError> {
-        let dir = std::env::temp_dir();
-        let p = dir.join(format!(
-            "dvmm-scn-test-{}-{:p}.yml",
-            std::process::id(),
-            yaml
-        ));
+        use std::sync::atomic::{AtomicU64, Ordering};
+        // A monotonic counter guarantees a unique path per call. Keying the
+        // filename on the literal's address (`{:p}`) collided instead: identical
+        // string literals dedupe to one address, so concurrent tests raced the
+        // same file across `fs::write`'s truncate window.
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let p = std::env::temp_dir()
+            .join(format!("dvmm-scn-test-{}-{n}.yml", std::process::id()));
         std::fs::write(&p, yaml).unwrap();
-        Scenario::load_and_validate(p.to_str().unwrap(), &svc())
+        let result = Scenario::load_and_validate(p.to_str().unwrap(), &svc());
+        let _ = std::fs::remove_file(&p);
+        result
     }
 
     /// The error message of an expected-to-fail scenario (avoids requiring
@@ -1981,5 +2229,140 @@ steps:
         assert!(check_unexpected_deaths(&list, &none).is_some(), "unexpected death must be flagged");
         let expect: HashSet<String> = ["postgres".to_string()].into_iter().collect();
         assert!(check_unexpected_deaths(&list, &expect).is_none(), "expected death must be exempt");
+    }
+
+    // ---- step 4: guest-event bridge / assertion ledger ----------------------
+
+    #[test]
+    fn run_until_done_parses_and_rejects_junk() {
+        let y = "run:\n  until: done\nsteps:\n  - at: 0s\n    exec: { container: service, cmd: \"true\" }\n    expect: { exit: 0 }\n";
+        assert!(scn_from(y).unwrap().run.until_done);
+        let none = "steps:\n  - at: 0s\n    exec: { container: service, cmd: \"true\" }\n    expect: { exit: 0 }\n";
+        assert!(!scn_from(none).unwrap().run.until_done);
+        assert!(err_of("run:\n  until: whenever\nsteps:\n  - at: 0s\n    exec: { container: service, cmd: \"true\" }\n    expect: { exit: 0 }\n").contains("until"));
+    }
+
+    fn ev(kind: &str, name: &str, ok: Option<bool>) -> GuestEvent {
+        GuestEvent { kind: kind.into(), name: name.into(), ok, details: None }
+    }
+
+    #[test]
+    fn ledger_verdict_folds_assertions() {
+        // Empty ledger is a pass — the byte-identical event-free case.
+        let l = AssertionLedger::default();
+        assert!(l.is_empty());
+        assert_eq!(l.verdict(), ("pass", 0, None));
+
+        // always ok:false -> fail(1), naming the failed assertion.
+        let mut l = AssertionLedger::default();
+        l.record(&ev("always", "a", Some(true)));
+        l.record(&ev("always", "b", Some(false)));
+        let (v, c, f) = l.verdict();
+        assert_eq!((v, c), ("fail", 1));
+        assert!(f.unwrap().contains('b'));
+
+        // sometimes registered but never satisfied -> fail(1); then satisfied -> pass.
+        let mut l = AssertionLedger::default();
+        l.record(&ev("sometimes", "s", Some(false)));
+        assert_eq!(l.verdict().1, 1);
+        l.record(&ev("sometimes", "s", Some(true)));
+        assert_eq!(l.verdict(), ("pass", 0, None));
+        assert!(!l.is_empty());
+
+        // fault / invalid recorded but non-verdict-affecting.
+        let mut l = AssertionLedger::default();
+        l.record(&ev("fault", "", None));
+        l.record(&ev("invalid", "", None));
+        assert_eq!(l.verdict(), ("pass", 0, None));
+        assert_eq!((l.faults, l.invalid), (1, 1));
+    }
+
+    fn engine_for(yaml: &str) -> ScenarioEngine {
+        let scn = scn_from(yaml).unwrap();
+        // These tests assert on the engine outcome, not on file contents, so sink
+        // the JSONL/report to /dev/null rather than leaking temp files.
+        let meta = RunMeta {
+            stack: "t".into(),
+            artifact_sha256: "x".into(),
+            fast_forward: true,
+            jsonl_path: "/dev/null".into(),
+            report_path: "/dev/null".into(),
+        };
+        let mut e = ScenarioEngine::new(scn, TscFrequency::from_hz(1_000_000_000), meta).unwrap();
+        e.start(0);
+        e
+    }
+
+    #[test]
+    fn await_done_at_horizon_folds_ledger_not_infra() {
+        // Satisfied `sometimes` in AwaitDone, horizon fires -> pass(0), NOT infra(2).
+        let mut e = engine_for("run:\n  until: done\nsteps:\n  - at: 0s\n    exec: { container: service, cmd: \"true\" }\n    expect: { exit: 0 }\n");
+        e.phase = Phase::AwaitDone;
+        e.on_guest_event(1, &ev("sometimes", "s", Some(true)), Some(1));
+        e.on_horizon(2);
+        assert!(e.is_finished());
+        assert_eq!(e.outcome.as_ref().unwrap().exit_code, 0);
+
+        // always:false in AwaitDone, horizon fires -> fail(1).
+        let mut e = engine_for("run:\n  until: done\nsteps:\n  - at: 0s\n    exec: { container: service, cmd: \"true\" }\n    expect: { exit: 0 }\n");
+        e.phase = Phase::AwaitDone;
+        e.on_guest_event(1, &ev("always", "a", Some(false)), Some(1));
+        e.on_horizon(2);
+        assert_eq!(e.outcome.as_ref().unwrap().exit_code, 1);
+    }
+
+    #[test]
+    fn non_await_done_horizon_stays_infra_error() {
+        // A normal (no `until`) scenario reaching the horizon mid-run is exit 2 —
+        // byte-compatible with the prior unconditional record_abort.
+        let mut e = engine_for("steps:\n  - at: 10s\n    exec: { container: service, cmd: \"true\" }\n    expect: { exit: 0 }\n");
+        e.on_horizon(5);
+        assert_eq!(e.outcome.as_ref().unwrap().exit_code, 2);
+    }
+
+    #[test]
+    fn done_event_in_await_done_finishes() {
+        let mut e = engine_for("run:\n  until: done\nsteps:\n  - at: 0s\n    exec: { container: service, cmd: \"true\" }\n    expect: { exit: 0 }\n");
+        e.phase = Phase::AwaitDone;
+        e.on_guest_event(1, &ev("done", "", None), Some(1));
+        assert!(e.is_finished());
+        assert_eq!(e.outcome.as_ref().unwrap().exit_code, 0);
+    }
+
+    #[test]
+    fn final_census_pass_folds_failed_assertion() {
+        // Regression C1: a passing final census must fold the ledger, not hard-code
+        // "pass" — a recorded `always:false` still fails the run (exit 1).
+        let mut e = engine_for("steps:\n  - at: 0s\n    exec: { container: service, cmd: \"true\" }\n    expect: { exit: 0 }\n");
+        e.on_guest_event(1, &ev("always", "boom", Some(false)), Some(1));
+        let census = Reply { ok: Some(true), containers: Some(Vec::new()), ..Default::default() };
+        e.on_final_census_reply(2, &census);
+        let out = e.outcome.as_ref().unwrap();
+        assert_eq!((out.verdict, out.exit_code), ("fail", 1));
+    }
+
+    #[test]
+    fn observe_seq_counts_gaps_and_survives_reset() {
+        // Regression C2: `seq` is guest-controlled and must never underflow.
+        let mut l = AssertionLedger::default();
+        assert_eq!(l.observe_seq(u64::MAX), None); // first observation: no gap
+        assert_eq!(l.observe_seq(1), None); // reset (agent restart): no gap, no panic
+        assert_eq!(l.seq_gaps, 0);
+
+        let mut l = AssertionLedger::default();
+        l.observe_seq(1);
+        l.observe_seq(2); // consecutive: no gap
+        assert_eq!(l.observe_seq(5), Some(2)); // 3, 4 dropped
+        assert_eq!(l.seq_gaps, 2);
+    }
+
+    #[test]
+    fn await_done_horizon_with_empty_ledger_is_infra_error() {
+        // Regression C3: `until: done` reaching the horizon with NO guest events
+        // means the bridge delivered nothing — infra error (2), not a false pass.
+        let mut e = engine_for("run:\n  until: done\nsteps:\n  - at: 0s\n    exec: { container: service, cmd: \"true\" }\n    expect: { exit: 0 }\n");
+        e.phase = Phase::AwaitDone;
+        e.on_horizon(2);
+        assert_eq!(e.outcome.as_ref().unwrap().exit_code, 2);
     }
 }

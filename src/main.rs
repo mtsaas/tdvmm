@@ -973,7 +973,9 @@ fn run_user_backend(
         let fired = service_timers(&mut lapic, &mut events, horizon_vtsc, scn_deadline, now);
         if fired.horizon {
             if let Some(e) = engine.as_mut() {
-                e.record_abort(now, "scenario did not complete before the virtual-time horizon");
+                // `until: done` runs evaluate their assertion ledger at the horizon;
+                // every other run treats an unfinished scenario as an infra error.
+                e.on_horizon(now);
                 stop_reason = StopReason::Scenario;
                 break;
             }
