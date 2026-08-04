@@ -38,6 +38,7 @@ mod boot;
 mod build;
 mod cli;
 mod compose;
+mod conscan;
 mod control;
 mod cpio;
 mod cpuid;
@@ -161,6 +162,9 @@ struct LogsCapture {
     dir: std::path::PathBuf,
     /// Compose service names, sorted for a deterministic per-service file order.
     services: Vec<String>,
+    /// The compose project (`dvmm_<stack>`), for mapping `<project>-<service>-<n>`
+    /// container-log prefixes back to services in the console scanner.
+    project: String,
 }
 
 /// Create `<dir>` (idempotent) and prove it is writable by round-tripping a probe
@@ -349,7 +353,11 @@ fn cmd_run(args: RunArgs) -> Result<i32, Box<dyn std::error::Error>> {
                 .map(|s| s.into_iter().collect())
                 .unwrap_or_default();
             svc.sort();
-            Some(LogsCapture { dir: path, services: svc })
+            Some(LogsCapture {
+                dir: path,
+                services: svc,
+                project: payload.manifest.project.clone(),
+            })
         }
         None => None,
     };
@@ -464,7 +472,11 @@ fn cmd_test(args: TestArgs) -> Result<i32, Box<dyn std::error::Error>> {
             };
             let mut svc: Vec<String> = services.iter().cloned().collect();
             svc.sort();
-            Some(LogsCapture { dir: path, services: svc })
+            Some(LogsCapture {
+                dir: path,
+                services: svc,
+                project: payload.manifest.project.clone(),
+            })
         }
         None => None,
     };
@@ -752,7 +764,11 @@ fn boot_and_run(
     boot::configure_system(&guest_mem, &eff.cmdline, Some(initrd_cfg), mem_size, 1)?;
 
     // --- Serial console ---
-    let (serial, serial_drain) = serial::new_serial()?;
+    // Under `--logs-dir`, COM1 output is teed into this shared buffer so the
+    // console scanner can demux it per service. `None` = plain stdout passthrough.
+    let console_tee: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>> =
+        logs.as_ref().map(|_| std::sync::Arc::new(std::sync::Mutex::new(Vec::new())));
+    let (serial, serial_drain) = serial::new_serial(console_tee.clone())?;
     let raw_term = serial::RawTerminal::enable(0);
     // From here our own log lines must snap to column 0 with CRLF (raw mode turns
     // off the tty's ONLCR). Flip the flag only if raw mode actually took effect
@@ -772,6 +788,7 @@ fn boot_and_run(
         eff.metrics_out.clone(),
         scenario,
         logs,
+        console_tee,
     )
 }
 
@@ -806,6 +823,7 @@ fn run_user_backend(
     metrics_out: Option<String>,
     scenario_setup: Option<ScenarioSetup>,
     logs: Option<LogsCapture>,
+    console_tee: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
 ) -> Result<RunOutcome, Box<dyn std::error::Error>> {
     // The devices we now own, all on this thread. The LAPIC timer counts at the
     // core-crystal frequency the guest derives from CPUID 0x15 (which we pass
@@ -873,6 +891,20 @@ fn run_user_backend(
     // Virtual-time span for the speedup metric (gate 2): virtual seconds elapsed
     // / real seconds elapsed. Sampled once here, again at stop.
     let vtsc_start = clock.vtsc_now();
+
+    // Console scanner (`--logs-dir`): demux the teed COM1 stream into per-service
+    // files live as the run proceeds, so crash logs survive. Passive + FF-neutral.
+    let mut conscan = match (&logs, &console_tee) {
+        (Some(l), Some(tee)) => Some(conscan::ConsoleScan::new(
+            tee.clone(),
+            l.dir.clone(),
+            &l.project,
+            l.services.clone(),
+            vtsc_start,
+            clock.freq(),
+        )),
+        _ => None,
+    };
 
     // `--max-virtual-time` horizon: the vtsc at which the run must stop, as an
     // absolute deadline `vtsc_start + budget`. Enforced NOT as a loop check but
@@ -981,6 +1013,13 @@ fn run_user_backend(
             }
         } else {
             while com2.poll_line().is_some() {}
+        }
+
+        // (1c) Demux the teed COM1 console into per-service log files (--logs-dir).
+        //      Passive: reads bytes the guest already emitted; no guest state, no
+        //      clock, no queue touched — so it adds zero wakes and is FF-neutral.
+        if let Some(sc) = conscan.as_mut() {
+            sc.drain(clock.vtsc_now());
         }
 
         // (2) Sync task priority from the guest's CR8 (mov %cr8 path).
@@ -1119,6 +1158,12 @@ fn run_user_backend(
                 // The window is open; the next loop iteration injects.
             }
             VcpuExit::Hlt => {
+                // Flush console logs before a (possibly hour-long, FF-off) park, so
+                // `tail -f <logs-dir>/<svc>.log` stays live and a line printed just
+                // before the halt is on disk before we sleep.
+                if let Some(sc) = conscan.as_mut() {
+                    sc.drain(clock.vtsc_now());
+                }
                 // A HLT taken with interrupts disabled (IF=0) can NEVER wake: no
                 // interrupt is deliverable, so it is a terminal halt — where the
                 // guest's `poweroff` ends when there is no ACPI (the kernel
@@ -1351,6 +1396,13 @@ fn run_user_backend(
                 stop_reason.as_str()
             );
         }
+    }
+
+    // Flush any remaining teed console bytes (including those emitted during the
+    // capture above) plus the trailing partial line. On a guest-death stop this is
+    // the ONLY per-service output — the headline win: crash logs survive.
+    if let Some(sc) = conscan.as_mut() {
+        sc.finish(clock.vtsc_now()); // finish() drains first, then flushes the trailing partial
     }
 
     // Finalize the scenario — emit ff_stats + run_end to the JSONL, write the JSON
@@ -1781,7 +1833,7 @@ fn read_console_input(serial: &serial::SharedSerial) -> Option<usize> {
 /// Container/service names are HOSTILE guest data, so accept only a strict
 /// `[A-Za-z0-9._-]+` single path component — never empty, never `.`/`..`, never a
 /// path separator. Returns `None` (skip that service) for anything else.
-fn sanitize_service_filename(name: &str) -> Option<String> {
+pub(crate) fn sanitize_service_filename(name: &str) -> Option<String> {
     if name.is_empty() || name == "." || name == ".." {
         return None;
     }

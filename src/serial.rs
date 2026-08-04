@@ -37,18 +37,57 @@ impl Trigger for EventFdTrigger {
     }
 }
 
-/// Unbuffered writer straight to host stdout (fd 1) so guest console output
-/// appears byte-by-byte.
-pub struct RawStdout;
-impl Write for RawStdout {
+/// Cap on the guest-console tee buffer: a runaway (never-drained) writer is
+/// dropped rather than grown without bound. Mirrors [`crate::control`]'s TX cap.
+/// Every console byte is a PIO exit and the scanner drains each loop boundary, so
+/// this only trips pathologically.
+const CONSOLE_TEE_CAP: usize = 1 << 20;
+
+/// The COM1 console writer: passes every guest-TX byte straight through to host
+/// stdout (fd 1), byte-by-byte, and — when `--logs-dir` is on — ALSO tees a copy
+/// into a shared buffer for the console scanner ([`crate::conscan`]).
+///
+/// The value returned to the UART model is fd 1's own `write` result; the tee
+/// append is a pure observer that can never change it. So the guest's serial
+/// stream on stdout is byte-identical whether or not a tee is attached — the
+/// "clean machine output" invariant holds by construction.
+pub struct ConsoleOut {
+    tee: Option<Arc<Mutex<Vec<u8>>>>,
+    /// One-shot: an overflow warns once, not per byte.
+    overflowed: bool,
+}
+impl ConsoleOut {
+    pub fn new(tee: Option<Arc<Mutex<Vec<u8>>>>) -> Self {
+        Self {
+            tee,
+            overflowed: false,
+        }
+    }
+}
+impl Write for ConsoleOut {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // Passthrough FIRST; its result is what we return.
         // SAFETY: fd 1 is valid; buf points to `buf.len()` readable bytes.
         let n = unsafe { libc::write(1, buf.as_ptr() as *const libc::c_void, buf.len()) };
         if n < 0 {
-            Err(std::io::Error::last_os_error())
-        } else {
-            Ok(n as usize)
+            return Err(std::io::Error::last_os_error());
         }
+        let n = n as usize;
+        if let Some(tee) = &self.tee {
+            let mut b = tee.lock().unwrap();
+            if b.len() + n > CONSOLE_TEE_CAP {
+                b.clear();
+                if !self.overflowed {
+                    self.overflowed = true;
+                    crate::log_line(format_args!(
+                        "[dvmm][WARN] console tee exceeded {CONSOLE_TEE_CAP} bytes \
+                         between drains — dropping backlog"
+                    ));
+                }
+            }
+            b.extend_from_slice(&buf[..n]);
+        }
+        Ok(n)
     }
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
@@ -69,14 +108,18 @@ pub(crate) fn is_serial(port: u16) -> bool {
     (crate::arch::SERIAL_PORT_BASE..crate::arch::SERIAL_PORT_BASE + 8).contains(&port)
 }
 
-pub type SharedSerial = Arc<Mutex<Serial<EventFdTrigger, NoEvents, RawStdout>>>;
+pub type SharedSerial = Arc<Mutex<Serial<EventFdTrigger, NoEvents, ConsoleOut>>>;
 
 /// Build the shared UART. Returns the serial handle and a clone of its
-/// interrupt eventfd for the vCPU thread to drain.
-pub fn new_serial() -> std::io::Result<(SharedSerial, EventFdTrigger)> {
+/// interrupt eventfd for the vCPU thread to drain. `tee` is `Some` only under
+/// `--logs-dir` (COM1 output is copied into it for the console scanner);
+/// `None` is exactly the plain stdout passthrough.
+pub fn new_serial(
+    tee: Option<Arc<Mutex<Vec<u8>>>>,
+) -> std::io::Result<(SharedSerial, EventFdTrigger)> {
     let trigger = EventFdTrigger::new()?;
     let drain_handle = trigger.try_clone()?;
-    let serial = Serial::new(trigger, RawStdout);
+    let serial = Serial::new(trigger, ConsoleOut::new(tee));
     Ok((Arc::new(Mutex::new(serial)), drain_handle))
 }
 
@@ -164,6 +207,73 @@ impl Drop for RawTerminal {
             // SAFETY: restoring the previously saved termios on the same fd.
             unsafe {
                 let _ = libc::tcsetattr(self.fd, libc::TCSANOW, &original);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn console_out_tee_never_changes_the_write_result() {
+        // With a tee attached, write() returns exactly the fd-1 byte count and
+        // ALSO mirrors the bytes into the tee — the append can't alter the return.
+        let tee = Arc::new(Mutex::new(Vec::new()));
+        let mut out = ConsoleOut::new(Some(tee.clone()));
+        assert_eq!(out.write(b"hello").unwrap(), 5);
+        assert_eq!(&*tee.lock().unwrap(), b"hello");
+        // Without a tee: same return, nothing captured (plain passthrough).
+        let mut bare = ConsoleOut::new(None);
+        assert_eq!(bare.write(b"xy").unwrap(), 2);
+    }
+
+    #[test]
+    fn console_tee_is_bounded_under_a_runaway_writer() {
+        // `ConsoleOut::write` always hits real fd 1, and the cap forces ~1 MiB
+        // through it; redirect fd 1 to /dev/null so it doesn't spam test output.
+        // The assertion is on the tee buffer, so this never depends on fd 1.
+        let _redirect = Fd1ToDevNull::redirect();
+        let tee = Arc::new(Mutex::new(Vec::new()));
+        let mut out = ConsoleOut::new(Some(tee.clone()));
+        let chunk = vec![b'a'; 4096];
+        // Push just past the 1 MiB cap; the buffer must stay bounded.
+        for _ in 0..(CONSOLE_TEE_CAP / chunk.len() + 8) {
+            out.write(&chunk).unwrap();
+        }
+        assert!(tee.lock().unwrap().len() <= CONSOLE_TEE_CAP + chunk.len());
+    }
+
+    /// Redirects fd 1 to /dev/null for the current scope, restoring on drop, so a
+    /// test that must write through the real fd-1 path doesn't pollute `cargo test`
+    /// output. (The only raw fd-1 writer in this crate is `ConsoleOut`, and its
+    /// assertions never read fd 1, so the process-global swap can't cause flakes.)
+    struct Fd1ToDevNull {
+        saved: i32,
+        devnull: i32,
+    }
+    impl Fd1ToDevNull {
+        fn redirect() -> Self {
+            // SAFETY: standard fd dup/redirect; the saved fd 1 is restored on drop.
+            unsafe {
+                let saved = libc::dup(1);
+                let devnull = libc::open(
+                    b"/dev/null\0".as_ptr() as *const libc::c_char,
+                    libc::O_WRONLY,
+                );
+                libc::dup2(devnull, 1);
+                Self { saved, devnull }
+            }
+        }
+    }
+    impl Drop for Fd1ToDevNull {
+        fn drop(&mut self) {
+            // SAFETY: restore the original fd 1 and close the temporaries we own.
+            unsafe {
+                libc::dup2(self.saved, 1);
+                libc::close(self.saved);
+                libc::close(self.devnull);
             }
         }
     }
