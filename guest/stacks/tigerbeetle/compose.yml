@@ -1,26 +1,27 @@
 # deterministic-vmm -- TigerBeetle cluster stack (3 replicas + a demo client).
 #
 # ============================================================================
-#  STATUS: RAM cap LIFTED, but still not a passing stack (new blocker below).
+#  STATUS: PASSING. The 3-replica cluster forms and runs.
 #
-#  UPDATE (high-memory split): the hard 3072 MiB cap is gone. Guest RAM now
-#  splits across the 32-bit MMIO gap (a low region below 3 GiB + a high region
-#  based at 4 GiB), so `--mem 6144` is reachable. This stack now BAKES and BOOTS
-#  with the guest kernel seeing the full ~6 GiB (BIOS-e820 shows the two RAM
-#  ranges + an unbacked [3 GiB, 4 GiB) gap; `Memory: .../6291064K available`).
+#  Post-doorbell (commit b60dde8: tick doorbell + wedge observability), the
+#  cluster bakes, boots, and BRINGS UP all three replicas: they form a quorum,
+#  elect a primary, and synchronize clocks. The client opens two accounts and,
+#  each interval, moves money A->B and reads the balances back -- double-entry
+#  holds (debits == credits, e.g. 83500/83500). Replicas 0/1/2 stay in NORMAL
+#  status for a full virtual hour, then shut down cleanly at the
+#  --max-virtual-time horizon.
 #
-#  NEW BLOCKER (single vCPU): the 3-replica cluster still does not FORM. Bringing
-#  up all three TigerBeetle replicas via `docker compose up` wedges the single
-#  vCPU during container start -- the guest makes ZERO forward progress (the
-#  kernel-log timestamp freezes at ~4.5 s and no replica ever prints), IDENTICAL
-#  with fast-forward ON and OFF, so it is neither a RAM nor a fast-forward issue.
-#  Three CPU-heavy consensus nodes (io_uring + ~100 Hz VSR tick + ~1.5 GiB heap
-#  each) contend on ONE vCPU and never complete bring-up. This VMM is single-vCPU
-#  by design, so there is no in-scope knob to give the cluster more CPUs.
-#  (`--validate-only` still passes: the compose is a valid closed-world stack.)
+#  The one loud observable is a flood of `loop_run_for_ns too slow` warnings.
+#  These are NOT a wedge and NOT a fast-forward bug: the idle time-jump is exact
+#  (dvmm advances virtual time straight to the next armed deadline). The warnings
+#  are the guest truthfully measuring real single-vCPU contention -- four busy
+#  co-tenants (3 replicas + client) serialized on ONE vCPU, exactly as they
+#  would on real single-core hardware. Their magnitude is host-load-dependent.
+#  Making execution time (not just idle) deterministic is a Phase-3 item (see
+#  ARCHITECTURE.md section 12).
 # ============================================================================
 #
-# WHAT THIS WOULD BE
+# WHAT THIS IS
 #   A 3-replica TigerBeetle consensus cluster (replica0/1/2) doing double-entry
 #   accounting, plus a REPL-based client that opens two accounts and, each
 #   virtual interval, moves money A->B and reads the balances back. The scenario
@@ -30,41 +31,28 @@
 # FINDINGS (measured on the host with this exact image, runc + netavark +
 # seccomp=unconfined, which mirrors the guest's podman/DNS/io_uring path):
 #
-#   1. ADDRESSING -- SOLVED. TigerBeetle's --addresses accepts only IPv4/IPv6
-#      LITERALS; service names are rejected ("--addresses: invalid IPv4 or IPv6
-#      address"). We stay closed-world by resolving the replica SERVICE NAMES to
-#      their netavark IPs at start via getent, in fixed replica order (see
-#      replica.sh / client.sh). Verified: the cluster forms, elects a primary,
-#      and synchronizes clocks. No host networking, no hard-coded IPs.
+#   1. ADDRESSING. TigerBeetle's --addresses accepts only IPv4/IPv6 LITERALS;
+#      service names are rejected ("--addresses: invalid IPv4 or IPv6 address").
+#      We stay closed-world by resolving the replica SERVICE NAMES to their
+#      netavark IPs at start via getent, in fixed replica order (see replica.sh
+#      / client.sh). The cluster forms, elects a primary, and synchronizes
+#      clocks. No host networking, no hard-coded IPs.
 #
-#   2. RAM -- HARD BLOCKER. TigerBeetle statically commits ~1537 MiB of
-#      anonymous (private-dirty, unreclaimable) heap PER replica at init -- even
-#      with --development and --cache-grid=64MiB (the smallest knobs it exposes;
-#      the ~1.5 GiB floor is compile-time, no runtime flag lowers it). Three
-#      replicas = ~4.6 GiB of un-reclaimable RAM before the base runtime, the
-#      client, or the (RAM-backed tmpfs) data files -- vs the hard 3072 MiB cap.
-#      Corroborated by upstream: a SINGLE replica OOM-crashes on a 2 GB box
-#      (tigerbeetle#2055), and the documented production minimum is 6 GiB/replica.
-#      => was: 3 replicas cannot fit under the 3072 MiB cap.
-#      RESOLVED (RAM) by the high-memory split: the guest now boots with 6144 MiB
-#      and the cap no longer blocks. (The heaps are never even allocated now --
-#      the single-vCPU wedge above happens earlier, at container bring-up.)
+#   2. RAM. TigerBeetle statically commits ~1537 MiB of anonymous (private-dirty,
+#      unreclaimable) heap PER replica at init -- even with --development and
+#      --cache-grid=64MiB (the smallest knobs it exposes; the ~1.5 GiB floor is
+#      compile-time, no runtime flag lowers it). Three replicas need ~4.6 GiB
+#      before the base runtime, the client, or the (RAM-backed tmpfs) data files.
+#      The high-memory split (guest RAM across the 32-bit MMIO gap) lifted the old
+#      3072 MiB cap; this stack runs with `--mem 6144`+, so RAM no longer blocks.
 #
-#   3. FAST-FORWARD -- SECONDARY BLOCKER. Idle replicas do NOT busy-poll the CPU
-#      (~0.25% of one core; they HLT), which is good. BUT each replica wakes
-#      ~103 times/second even when idle -- TigerBeetle's ~100 Hz VSR consensus
-#      tick (ping/heartbeat/clock-sync), a compile-time constant with no CLI
-#      knob. A guest woken ~100x/s per replica can barely fast-forward (the same
-#      reason the demo had to drop Redis to --hz 1 and stretch Postgres timers).
-#      So even if RAM fit, FF speedup would be poor and cadence-bound, not idle-
-#      collapsed.
-#
-# HOW TO REVISIT: the RAM ceiling is no longer the blocker (the high-memory split
-# lifted it). What remains is the single-vCPU wedge when three CPU-heavy consensus
-# nodes start together. Revisiting would need either multi-vCPU support (out of
-# scope for this single-vCPU VMM) or a smaller cluster / a custom-compiled
-# TigerBeetle with a lighter static config (non-standard; contradicts "reuse the
-# pinned official image"). Neither is in scope here.
+#   3. FAST-FORWARD. Idle replicas do NOT busy-poll the CPU (~0.25% of one core;
+#      they HLT), which is good. BUT each replica wakes ~103 times/second even
+#      when idle -- TigerBeetle's ~100 Hz VSR consensus tick
+#      (ping/heartbeat/clock-sync), a compile-time constant with no CLI knob. A
+#      guest woken ~100x/s per replica fast-forwards poorly: speedup is
+#      cadence-bound, not idle-collapsed (the same reason the demo dropped Redis
+#      to --hz 1 and stretched Postgres timers).
 #
 # Image pinned by digest (closed world): resolve `ghcr.io/tigerbeetle/tigerbeetle`
 # tag 0.17.7 -> the index digest below (amd64, Alpine 3.24 + busybox base,
