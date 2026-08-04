@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""deterministic-vmm demo stack — the api service (a real gRPC server).
+"""dvmm demo stack — the api service (a real gRPC server).
 
 A genuine, interpreted microservice: it serves the OrderService gRPC contract
 (orders.proto) over the compose network and talks to two real backends by name —

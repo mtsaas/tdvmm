@@ -49,7 +49,7 @@ COMPOSE_VERSION=""; COMPOSE_SHA256=""
 [ -f "$COMPOSE_LOCK" ] && source "$COMPOSE_LOCK"
 
 GEN="$(cat <<EOF
-# deterministic-vmm artifact manifest (Phase 1)
+# dvmm artifact manifest (Phase 1)
 #
 # The unit of run-to-run reproducibility: the boot artifacts (vmlinux + initramfs)
 # AND the effective guest CPUID profile the VMM presents. The declared LAPIC-timer

@@ -1,4 +1,4 @@
-// deterministic-vmm demo stack — the gRPC contract between the load client and
+// dvmm demo stack — the gRPC contract between the load client and
 // the api service. A real .proto compiled to Python stubs (committed alongside,
 // generated with grpcio-tools matching the pinned py3-grpcio/py3-protobuf apk).
 //

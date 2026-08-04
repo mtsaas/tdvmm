@@ -1,4 +1,4 @@
-# deterministic-vmm guest compose engine pin.
+# dvmm guest compose engine pin.
 #
 # The GENUINE Docker Compose v2 CLI (a static Go binary) is baked into the guest
 # and driven against `podman system service`'s Docker-compatible API socket

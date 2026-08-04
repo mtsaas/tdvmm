@@ -1,5 +1,5 @@
 #!/bin/sh
-# deterministic-vmm Step 2a container self-test.
+# dvmm Step 2a container self-test.
 #
 # Proves the guest is container-capable, fully offline (closed world):
 #   1. create a podman bridge network ("appnet") via netavark, and

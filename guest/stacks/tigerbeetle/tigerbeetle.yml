@@ -1,4 +1,4 @@
-# deterministic-vmm -- TigerBeetle cluster scenario (3-replica fault tolerance).
+# dvmm -- TigerBeetle cluster scenario (3-replica fault tolerance).
 #
 #   dvmm test tigerbeetle.dvmm --scenario tigerbeetle.yml --mem 12288 --logs-dir /tmp/tb-logs
 #

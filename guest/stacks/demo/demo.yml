@@ -1,4 +1,4 @@
-# deterministic-vmm DEMO scenario — the flagship capability reference as a test.
+# dvmm DEMO scenario — the flagship capability reference as a test.
 #
 #   dvmm test demo.dvmm --scenario demo.yml --logs-dir /tmp/demo-logs  ->  PASS, exit 0
 #

@@ -1,5 +1,5 @@
 #!/bin/sh
-# deterministic-vmm TigerBeetle stack -- demo accounting client (closed world).
+# dvmm TigerBeetle stack -- demo accounting client (closed world).
 #
 # Reuses the pinned TigerBeetle image's built-in REPL (no extra language
 # toolchain, stays reproducible + closed-world). One `tigerbeetle repl

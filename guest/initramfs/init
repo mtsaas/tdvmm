@@ -1,5 +1,5 @@
 #!/bin/busybox sh
-# PID 1 for the deterministic-vmm test guest.
+# PID 1 for the dvmm test guest.
 # Permanent fixture: the minimal guest used for later clock/fast-forward work.
 
 /bin/busybox mkdir -p /proc /sys /dev /bin /sbin

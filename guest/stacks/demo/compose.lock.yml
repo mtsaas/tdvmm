@@ -16,7 +16,9 @@ services:
       PGHOST: postgres
       PGUSER: postgres
       REDIS_HOST: redis
-    image: localhost/dvmm-demo-app@sha256:90c1378f0022512aef57192fe865d92f72a62a7615f44a51154231c4d3e9c171
+    image: localhost/dvmm-demo-app@sha256:9e59fdba3718f3c6fcd8fb635cf5a64ae9cc6df6e1bc1e567e6cbde7185d89c1
+    volumes:
+    - /run/dvmm/events:/run/dvmm/events:rw
   client:
     command:
     - /app/client.py
@@ -26,7 +28,9 @@ services:
     environment:
       API_ADDR: api:50051
       INTERVAL_SECONDS: ${DVMM_INTERVAL:-3600}
-    image: localhost/dvmm-demo-app@sha256:90c1378f0022512aef57192fe865d92f72a62a7615f44a51154231c4d3e9c171
+    image: localhost/dvmm-demo-app@sha256:9e59fdba3718f3c6fcd8fb635cf5a64ae9cc6df6e1bc1e567e6cbde7185d89c1
+    volumes:
+    - /run/dvmm/events:/run/dvmm/events:rw
   postgres:
     command:
     - postgres
@@ -53,6 +57,7 @@ services:
     shm_size: 256m
     volumes:
     - /var/lib/dvmm-stack/binds/postgres/schema.sql:/docker-entrypoint-initdb.d/10-schema.sql:ro
+    - /run/dvmm/events:/run/dvmm/events:rw
   redis:
     command:
     - redis-server
@@ -72,6 +77,8 @@ services:
       - ping
       timeout: 3s
     image: docker.io/library/redis@sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf
+    volumes:
+    - /run/dvmm/events:/run/dvmm/events:rw
   worker:
     command:
     - /app/worker.py
@@ -83,4 +90,6 @@ services:
       PGDATABASE: appdb
       PGHOST: postgres
       PGUSER: postgres
-    image: localhost/dvmm-demo-app@sha256:90c1378f0022512aef57192fe865d92f72a62a7615f44a51154231c4d3e9c171
+    image: localhost/dvmm-demo-app@sha256:9e59fdba3718f3c6fcd8fb635cf5a64ae9cc6df6e1bc1e567e6cbde7185d89c1
+    volumes:
+    - /run/dvmm/events:/run/dvmm/events:rw

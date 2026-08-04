@@ -1,4 +1,4 @@
-# deterministic-vmm Step 2b "service" image.
+# dvmm Step 2b "service" image.
 #
 # Ours, so it is built SINGLE-LAYER from the start (prebake_images.sh builds it
 # with `podman build --squash-all`) -- the same one-layer policy the pinned

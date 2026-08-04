@@ -1,4 +1,4 @@
-# deterministic-vmm TEST-1b FAULT-LAB stack.
+# dvmm TEST-1b FAULT-LAB stack.
 #
 # A minimal two-service stack purpose-built for fault injection:
 #   * db     — a normal Postgres server (the dependency).

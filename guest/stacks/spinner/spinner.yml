@@ -1,4 +1,4 @@
-# deterministic-vmm -- tick-doorbell regression scenario.
+# dvmm -- tick-doorbell regression scenario.
 #
 #   dvmm test spinner.dvmm --scenario spinner.yml   ->  PASS (exit 0) with the doorbell
 #   DVMM_NO_DOORBELL=1 dvmm test ... --scenario spinner.yml -> wedges (exit 2) without it

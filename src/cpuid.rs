@@ -170,9 +170,9 @@ pub(crate) fn dump_cpuid(kvm: &Kvm) -> Result<(), Box<dyn std::error::Error>> {
     let entries = filtered.as_slice();
     let find = |func: u32| entries.iter().find(|e| e.function == func && e.index == 0);
 
-    println!("# deterministic-vmm effective guest clock/timer CPUID profile (userspace backend)");
+    println!("# dvmm effective guest clock/timer CPUID profile (userspace backend)");
     println!("#");
-    println!("# The CPUID leaves the determinism + fast-forward guarantee depends on. A host or");
+    println!("# The CPUID leaves the owned-clock + fast-forward guarantee depends on. A host or");
     println!("# CPU change surfaces here as a changed line. Per-core-volatile fields (leaf-1");
     println!("# initial-APIC-ID byte, topology x2APIC IDs) are excluded so this is stable");
     println!("# run-to-run on one host.");

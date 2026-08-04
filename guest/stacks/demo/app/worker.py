@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""deterministic-vmm demo stack — the rollup worker (a real Postgres client).
+"""dvmm demo stack — the rollup worker (a real Postgres client).
 
 Once per virtual hour it does an incremental roll-up: it reads the orders that
 have not yet been summarized and writes one `summaries` row for the hour. It runs

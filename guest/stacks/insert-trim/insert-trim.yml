@@ -1,4 +1,4 @@
-# deterministic-vmm TEST-1a — the insert-trim stack expressed as a test scenario.
+# dvmm TEST-1a — the insert-trim stack expressed as a test scenario.
 #
 #   dvmm test insert-trim.dvmm --scenario insert-trim.yml   ->   PASS, exit 0
 #

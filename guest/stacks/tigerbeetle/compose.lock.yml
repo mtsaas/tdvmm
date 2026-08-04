@@ -26,6 +26,7 @@ services:
     - seccomp=unconfined
     volumes:
     - /var/lib/dvmm-stack/binds/client/client.sh:/scripts/client.sh:ro
+    - /run/dvmm/events:/run/dvmm/events:rw
   replica0:
     entrypoint:
     - /bin/sh
@@ -39,6 +40,7 @@ services:
     - seccomp=unconfined
     volumes:
     - /var/lib/dvmm-stack/binds/replica0/replica.sh:/scripts/replica.sh:ro
+    - /run/dvmm/events:/run/dvmm/events:rw
   replica1:
     entrypoint:
     - /bin/sh
@@ -52,6 +54,7 @@ services:
     - seccomp=unconfined
     volumes:
     - /var/lib/dvmm-stack/binds/replica1/replica.sh:/scripts/replica.sh:ro
+    - /run/dvmm/events:/run/dvmm/events:rw
   replica2:
     entrypoint:
     - /bin/sh
@@ -65,3 +68,4 @@ services:
     - seccomp=unconfined
     volumes:
     - /var/lib/dvmm-stack/binds/replica2/replica.sh:/scripts/replica.sh:ro
+    - /run/dvmm/events:/run/dvmm/events:rw
