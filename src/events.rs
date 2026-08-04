@@ -18,8 +18,9 @@
 //! JUMPs to.
 //!
 //! Ordering is deterministic: strictly by `deadline`, and for equal deadlines
-//! by insertion order (FIFO). Determinism is the whole point of the project, so
-//! ties must never resolve by address or hash iteration order.
+//! by insertion order (FIFO). Stable, reproducible ordering keeps virtual-time
+//! semantics well-defined and runs debuggable, so ties must never resolve by
+//! address or hash iteration order.
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;

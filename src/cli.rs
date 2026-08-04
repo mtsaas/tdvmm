@@ -10,7 +10,7 @@ use crate::{DEFAULT_CMDLINE, DEFAULT_MAX_JUMP_SECS, DEFAULT_MEM_MIB};
 #[derive(Parser)]
 #[command(
     name = "dvmm",
-    about = "deterministic KVM VMM — run/inspect/verify a .dvmm stack, or boot raw artifacts",
+    about = "fast-forward KVM VMM — run/inspect/verify a .dvmm stack, or boot raw artifacts",
     long_about = "A single-vCPU, fast-forwardable KVM VMM. `run` boots a self-contained \
                   .dvmm stack artifact (baked defaults, overridable by flags); `boot` is \
                   the low-level raw kernel+initramfs verb for VMM development.\n\n\

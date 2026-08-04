@@ -1,4 +1,4 @@
-# deterministic-vmm e2e test manifest (goal-3a).
+# dvmm e2e test manifest (goal-3a).
 #
 # The single source of truth for the tiered runner (scripts/test.sh). Each
 # [[test]] declares:

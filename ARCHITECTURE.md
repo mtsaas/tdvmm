@@ -1,6 +1,6 @@
 # Architecture, from first principles
 
-This document explains what `deterministic-vmm` is, how it works, and why it is
+This document explains what `dvmm` is, how it works, and why it is
 built the way it is — starting from zero. It assumes you can read code but does
 **not** assume you know anything about hypervisors, KVM, or how a CPU keeps time.
 Every piece of jargon is defined the first time it appears; there is also a
@@ -13,7 +13,7 @@ conceptual map: the *ideas*, the *techniques*, and the *challenges*.
 
 ## 1. What this is, in one paragraph
 
-`deterministic-vmm` is a small **hypervisor** — a program that runs a whole other
+`dvmm` is a small **hypervisor** — a program that runs a whole other
 computer (a "virtual machine") inside itself. It's about 4,500 lines of Rust. It
 boots one Linux virtual machine, runs a real workload inside it (a PostgreSQL
 database plus a little service container that writes a row every hour), and — the
@@ -23,11 +23,12 @@ the hypervisor jumps the guest's clock straight to that moment. The result: the
 guest lives through **24 hours in about 90 real seconds** (~950× faster than
 wall-clock), while believing each hour genuinely passed.
 
-This is stage one of a larger goal: a platform for **deterministic** testing of
-software systems — run the same services twice and get the *exact* same
-execution, with the ability to skip idle time and (eventually) replay bugs
-perfectly. Determinism itself is future work; everything here is the foundation
-built so it drops in cleanly.
+This is a **time-dilation VMM**: it bakes a Docker Compose–style service stack
+into one self-contained file and runs it in a single Linux VM, fast-forwarding
+virtual time whenever the guest is idle — so a multi-service test spanning hours
+of service time finishes in seconds to minutes of real time. The guest lives in a
+**closed world** (no network uplink, no disk, fixed start time), and that
+closedness is what lets dvmm collapse the idle stretches safely.
 
 ---
 
@@ -134,14 +135,12 @@ the hardware reads our memory directly — no exit, full speed. (See `memory.rs`
 
 ## 3. The goal — and why *time* is the entire problem
 
-We want two properties:
+We want one property: **fast-forward time** — skip the boring idle stretches
+instantly, so a stack that idles through hours of virtual time runs in seconds to
+minutes of real time.
 
-1. **Fast-forward time** — skip the boring idle stretches instantly. (Done.)
-2. **Deterministic execution** — run the same inputs twice, get bit-for-bit the
-   same run. (Future.)
-
-Both come down to controlling one thing: **the guest's sense of time.** Here's
-why time is hard.
+It comes down to controlling one thing: **the guest's sense of time.** Here's why
+time is hard.
 
 A normal VM's clock is glued to the *host's* wall clock:
 
@@ -153,8 +152,7 @@ A normal VM's clock is glued to the *host's* wall clock:
 - Interrupts arrive on the host's schedule.
 
 So by default, time inside the guest *is* host time. You cannot skip an hour,
-because the guest is reading a counter you don't control; and you cannot make two
-runs identical, because host time is never identical twice.
+because the guest is reading a counter you don't control.
 
 **The insight that makes everything work: if we control the one clock the guest
 reads, every time-dependent behavior follows.** Own the clock, own time.
@@ -184,10 +182,6 @@ Now watch what falls out:
   entire sense of time — `rdtsc`, its monotonic clock, its wall clock, its next
   timer deadline — jumps forward by Δ, atomically, because *all of them are
   computed from that one offset*. Move the offset and you move time itself.
-- **Determinism (later) = make the offset a function of *work done*, not
-  wall-clock.** If time only advances as a function of how many instructions the
-  guest has executed, then two runs that execute the same instructions see the
-  same time. That's Phase 3; the plumbing is already here.
 
 The offset is **cached** in the VMM (a shared cell every clock-reader sees), so
 the hot loop never has to ask KVM for it. When we jump, we write KVM's offset
@@ -287,7 +281,7 @@ machine up by hand and jump straight into the Linux kernel (`boot.rs`,
 This is a **closed world**: no network uplink, no disk, no outside input. Every
 container image is baked in ahead of time and pinned by cryptographic digest.
 That closedness is not incidental — it's what makes fast-forward safe (§8) and
-determinism reachable (§11).
+the system simple to reason about (§11).
 
 ---
 
@@ -405,7 +399,8 @@ The reusable tricks that make the above work:
 - **Integer-only time math.** Cycle↔nanosecond and APIC-count↔TSC conversions
   use exact integer ratios (e.g. `count × EBX/EAX` from CPUID `0x15`, in 128-bit
   integers) — **no floating point anywhere** in the time path. Floats round
-  differently in ways that would break bit-exact replay later.
+  differently across compilers and hosts; exact integer ratios keep the timer
+  math consistent run-to-run.
 - **Closed-world image baking.** Container images are pulled and pinned by
   digest at *build* time and baked into the guest; nothing is fetched at runtime.
   (See the squash technique in §10.)
@@ -511,53 +506,58 @@ single offset.
 ## 11. Design discipline — the choices that made it tractable
 
 A few deliberate constraints keep the whole thing simple enough to reason about,
-and are the reason determinism is reachable later without a rewrite:
+and keep the clock jumps trustworthy:
 
 - **Single vCPU.** With one CPU, there is no shared-memory race between cores —
-  the single hardest source of nondeterminism in a multiprocessor VM simply
-  doesn't exist. The guest's behavior becomes a pure function of its inputs and
-  its interrupt timing.
+  the single hardest thing to reason about in a multiprocessor VM simply doesn't
+  exist. The guest's behavior follows from its inputs and its interrupt timing.
 - **Closed world.** No network uplink, no disk, fixed start time. Every source of
-  "the outside world" — the #1 source of nondeterminism — is removed. Inputs that
-  *do* need to exist later (fault injection, real time-of-day) will be modeled as
-  *scheduled events on the queue*, not ambient I/O.
+  "the outside world" — the thing that could invalidate a clock jump — is
+  removed. Inputs that *do* need to exist later (fault injection, real
+  time-of-day) are modeled as *scheduled events on the queue*, not ambient I/O.
 - **The single-writer invariant.** *All* effects on guest state — memory,
   interrupt raises, device registers, the TSC offset — happen on the vCPU thread,
   at loop boundaries. Host I/O may happen on other threads, but its *effects*
-  land only at controlled points. This is what makes a future "record the exact
-  order of everything" tractable.
+  land only at controlled points, so the guest never observes a half-applied
+  change.
 - **Chokepoints, not sprawl.** One clock (`vtsc.rs`), one event queue
-  (`events.rs`), one wait-or-jump seam (`park.rs`). Determinism means changing
-  *how the offset advances* — at one place — not rearchitecting.
+  (`events.rs`), one wait-or-jump seam (`park.rs`). The whole time behavior lives
+  at three small, auditable places — not scattered across the codebase.
 - **Pinned + hashed everything.** Kernel, initramfs, CPUID profile: all hashed,
   so the guest is reproducible and drift is detectable.
 
-None of these were needed to make fast-forward *work* — they were chosen so that
-determinism (Phase 3) is a change at the existing chokepoints rather than a new
-project.
+None of these were strictly needed to make fast-forward *work* — they were chosen
+so the system stays simple to reason about and the clock jumps stay trustworthy.
 
 ---
 
 ## 12. What's done, what's next
 
-**Done (Phase 1):** a from-scratch KVM hypervisor that boots a Linux guest, runs
-a real closed-world PostgreSQL + service workload on a container runtime, owns the
+**Done:** a from-scratch KVM hypervisor that boots a Linux guest, runs a real
+closed-world PostgreSQL + service workload on a container runtime, owns the
 guest's clock through a userspace interrupt controller, and fast-forwards idle
-time (~950× on the demo), with all the determinism chokepoints in place.
+time (~950× on the demo).
 
-**Not yet — the road to determinism (Phase 3):**
+**How virtual time advances.** Fast-forward skips *idle* time: when the guest
+halts, the clock jumps straight to the next armed event. While the guest is
+actually running, virtual time advances with real host cycles at 1:1
+(`vtsc = host_tsc + offset`) — execution runs at real wall-clock rate. dvmm
+compresses the gaps between work, not the work itself.
 
-- **Trap `rdtsc`.** Today the guest reads the TSC without exiting, so time is
-  observed as `host_TSC + offset` — still coupled to real host cycles *during
-  active execution*. True determinism requires making every observed time a
-  function of *work done*, which means trapping `rdtsc` (a VT-x feature) and
-  feeding it a value derived from an instruction/branch count. This costs
-  performance and needs the small KVM patch noted in §10.5.
-- **Count executed work precisely.** Deterministic interrupt placement needs a
-  hardware performance counter (retired branches) plus single-stepping to land an
-  interrupt at an exact instruction — the technique the `rr` debugger uses. This
-  needs a **real hardware PMU**, which is unreliable under nested virtualization,
-  so it wants bare-metal or a dedicated box.
+Two mechanisms couple execution to real host time. Driving virtual time from
+*work done* instead would take a different machine — different costs, different
+hardware:
+
+- **The guest reads the TSC directly.** `rdtsc` doesn't exit, so during active
+  execution the guest's clock is `host_TSC + offset` — real host cycles. Driving
+  it from work done would mean trapping `rdtsc` (a VT-x feature) and feeding it a
+  value derived from an instruction/branch count, which costs performance and
+  needs the small KVM patch noted in §10.5.
+- **Work is counted at event granularity, not per instruction.** Landing an
+  interrupt at an exact instruction would need a hardware performance counter
+  (retired branches) plus single-stepping — the technique the `rr` debugger uses.
+  That needs a **real hardware PMU**, which is unreliable under nested
+  virtualization, so it wants bare-metal or a dedicated box.
 
 **Adjacent future work:**
 
@@ -608,7 +608,7 @@ time (~950× on the demo), with all the determinism chokepoints in place.
   tick, it programs the timer for exactly the next thing it needs, which is what
   makes idle jumps land on meaningful deadlines rather than every millisecond.
 - **closed world** — no network, no disk, fixed start time; the property that
-  makes fast-forward safe and determinism reachable.
+  makes fast-forward safe.
 
 ---
 

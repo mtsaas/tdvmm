@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# deterministic-vmm TEST-1a acceptance + negative gates for `dvmm test`.
+# dvmm TEST-1a acceptance + negative gates for `dvmm test`.
 #
 # Runs the insert-trim-as-scenario acceptance and the exit-code contract:
 #   - insert-trim.dvmm + insert-trim.yml    -> PASS, exit 0 (JSONL + report produced)

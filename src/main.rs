@@ -1,4 +1,4 @@
-//! deterministic-vmm — fast-forward virtual time on idle.
+//! dvmm — fast-forward virtual time on idle.
 //!
 //! A single-vCPU, Firecracker-shaped KVM VMM. The guest runs on a **userspace**
 //! interrupt controller we own: no in-kernel irqchip, no in-kernel PIT. The
@@ -911,8 +911,7 @@ fn run_user_backend(
     // as a `(vtsc, StopRun)` entry pushed into the one event queue each boundary
     // (see `service_timers`); when vtsc reaches it, `pop_due` fires StopRun and
     // the run terminates through the same drain path a timer does. This makes the
-    // horizon deterministic + replayable (a pure function of vtsc), which the
-    // future determinism phase needs. A wedged guest fast-forwards to any sane
+    // horizon a pure function of vtsc. A wedged guest fast-forwards to any sane
     // horizon in seconds of real time; a legitimate long idle also reaches it,
     // which is correct — a run has a bounded virtual duration.
     let horizon_vtsc: Option<u64> = max_virtual_time_secs.map(|secs| {

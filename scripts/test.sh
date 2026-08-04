@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# deterministic-vmm — the single tiered e2e test runner (goal-3a).
+# dvmm — the single tiered e2e test runner (goal-3a).
 #
 #   scripts/test.sh --fast      # T0 + T1        (the pre-push / inner loop)
 #   scripts/test.sh --merge     # T0 + T1 + T2   (the PR gate)

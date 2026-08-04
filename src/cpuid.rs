@@ -1,7 +1,7 @@
 //! CPUID filter.
 //!
 //! This module exists now, not later, because it protects the whole point of
-//! the project: deterministic, fast-forwardable virtual time. The edits to
+//! the project: owned, fast-forwardable virtual time. The edits to
 //! the CPUID KVM reports to the guest:
 //!
 //! 1. **Mask the KVM paravirt-clock leaves** (the `0x4000_00xx` hypervisor
@@ -152,7 +152,7 @@ fn host_cpuid(leaf: u32) -> core::arch::x86_64::CpuidResult {
 /// stable, diffable text block, then return — the manifest CPUID artifact
 /// (`--dump-cpuid`).
 ///
-/// Records exactly the leaves the determinism + fast-forward guarantee hangs on:
+/// Records exactly the leaves the owned-clock + fast-forward guarantee hangs on:
 ///   * `0x15`/`0x16` — the LAPIC-timer / TSC frequency the guest derives
 ///     (counts→TSC cycles uses `0x15` EBX/EAX exactly, see
 ///     [`lapic::apic_timer_tsc_ratio`]).

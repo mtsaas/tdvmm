@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# deterministic-vmm OP-1a acceptance gate: the .dvmm single-file artifact.
+# dvmm OP-1a acceptance gate: the .dvmm single-file artifact.
 #
 # Proves every OP-1a property WITHOUT re-baking (it packs the already-built boot
 # artifacts of each stack). For each stack it:
