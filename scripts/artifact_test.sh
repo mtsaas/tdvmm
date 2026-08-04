@@ -71,7 +71,7 @@ for stack in "${STACKS[@]}"; do
     echo "  SKIP: $stack has no compose.yml at $compose"; continue
   fi
   # `dvmm build --cache-dir "$CACHE"` writes the per-stack initramfs here (gate 8's raw boot).
-  initrd="$CACHE/artifacts/initramfs-alpine-${stack}.cpio.gz"
+  initrd="$CACHE/bake/initramfs-alpine-${stack}.cpio.gz"
   A="$TMP/$stack-A.dvmm"; B="$TMP/$stack-B.dvmm"
   ok=1
 
