@@ -13,7 +13,7 @@ use crate::artifact;
 use crate::engine;
 use super::cache::CACHE_VERSION;
 use super::fsops::tree_hash;
-use super::util::{mkdtemp, now_nanos};
+use super::util::{now_nanos, ScratchDir};
 use super::ux::{run, Ux};
 use super::{ALPINE_VER, BUILD_EPOCH, MINIROOTFS_SHA256, PKGS};
 
@@ -36,8 +36,8 @@ pub(super) fn build_base_rootfs(
     ux: &Ux,
 ) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(out_dir)?;
-    let confdir = mkdtemp()?;
-    let conf = confdir.join("containers.conf");
+    let confdir = ScratchDir::new()?;
+    let conf = confdir.path().join("containers.conf");
     std::fs::write(&conf, "[engine]\nruntime=\"runc\"\n")?;
     let mini_name = minirootfs.file_name().unwrap().to_string_lossy().into_owned();
     let pkg_args = pkgs.join(" ");
@@ -64,7 +64,6 @@ pub(super) fn build_base_rootfs(
         .arg(format!("{}:/out", out_dir.display()))
         .arg(img_ref)
         .args(["sh", "-c", &script]), ux.mode)?;
-    let _ = std::fs::remove_dir_all(&confdir);
     Ok(())
 }
 

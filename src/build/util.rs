@@ -4,6 +4,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::engine;
+
 /// The sha256 of a file's contents, hex-encoded.
 pub(super) fn sha256_file_hex(path: &Path) -> std::io::Result<String> {
     use sha2::{Digest, Sha256};
@@ -33,13 +35,117 @@ pub(super) fn self_here() -> Result<PathBuf, Box<dyn std::error::Error>> {
     Err("could not locate the repo guest/ directory (run from the repo, or keep target/ in place)".into())
 }
 
+/// Filename prefix for every build scratch dir (`dvmm-build-<pid>-<nanos>`). The
+/// pid is the first hyphen-field after it — [`sweep_stale_scratch`] parses it, so
+/// keep the two in sync.
+const SCRATCH_PREFIX: &str = "dvmm-build-";
+
 /// Create a fresh, uniquely-named scratch directory under the system temp dir.
-pub(super) fn mkdtemp() -> std::io::Result<PathBuf> {
+fn mkdtemp() -> std::io::Result<PathBuf> {
     let base = std::env::temp_dir();
-    let name = format!("dvmm-build-{}-{}", std::process::id(), now_nanos());
+    let name = format!("{SCRATCH_PREFIX}{}-{}", std::process::id(), now_nanos());
     let dir = base.join(name);
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
+}
+
+/// A build scratch directory that removes itself when dropped — on every exit
+/// path, including `?` early-returns and unwinds.
+///
+/// Cleanup is **unshare-aware**: some build steps fill the dir with files owned by
+/// subordinate UIDs (rootless podman seed stores / bind-mount output) that a plain
+/// `remove_dir_all` can't unlink (`EPERM`). On that failure it retries inside the
+/// podman user namespace, and it *logs* — never silently swallows — a removal that
+/// still fails. A swallowed `let _ = remove_dir_all` on those subuid-owned stores
+/// is what leaked tens of GB of scratch into `$TMPDIR`.
+pub(super) struct ScratchDir {
+    path: PathBuf,
+}
+
+impl ScratchDir {
+    /// Create a fresh, uniquely-named scratch dir under the system temp dir.
+    pub(super) fn new() -> std::io::Result<Self> {
+        Ok(Self { path: mkdtemp()? })
+    }
+
+    /// The directory path. Borrowed: the dir exists until the guard is dropped.
+    pub(super) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        remove_build_scratch(&self.path);
+    }
+}
+
+/// Remove a build scratch tree, tolerating the subuid-owned files rootless podman
+/// leaves behind. Plain recursive remove first; only on `EPERM` fall back to
+/// removing the tree inside the podman user namespace. A still-failing removal is
+/// logged, not swallowed — a leaked seed store is multiple GB.
+pub(super) fn remove_build_scratch(path: &Path) {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            if let Err(msg) = unshare_remove(path) {
+                eprintln!(
+                    "warning: leaked build scratch {} (unshare cleanup failed: {msg})",
+                    path.display()
+                );
+            }
+        }
+        Err(e) => eprintln!("warning: leaked build scratch {} ({e})", path.display()),
+    }
+}
+
+/// Remove `path` from inside the podman user namespace, where the subordinate UIDs
+/// owning a rootless seed store map back to ones we can unlink. A minimal clean
+/// `CONTAINERS_CONF` (a sibling file, cleaned up after) keeps us off the host
+/// default runtime — see [`crate::engine`].
+fn unshare_remove(path: &Path) -> Result<(), String> {
+    let conf = path.with_extension("cleanup-conf");
+    std::fs::write(&conf, "[engine]\n").map_err(|e| format!("write cleanup conf: {e}"))?;
+    let result = engine::run(
+        engine::unshare(&conf).arg("rm").arg("-rf").arg(path),
+        engine::OutputMode::CaptureOnFailure,
+    );
+    let _ = std::fs::remove_file(&conf);
+    result
+}
+
+/// Sweep scratch dirs orphaned by dvmm processes no longer alive — e.g. a
+/// SIGKILL/OOM where [`ScratchDir`]'s Drop never ran. Best-effort; call once at
+/// `dvmm build` start. A dir whose embedded pid is still alive is left untouched,
+/// so concurrent bakes never reap each other's scratch.
+pub(super) fn sweep_stale_scratch() {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(pid) = name
+            .to_str()
+            .and_then(|n| n.strip_prefix(SCRATCH_PREFIX))
+            .and_then(|rest| rest.split('-').next())
+            .and_then(|pid| pid.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if !pid_is_alive(pid) {
+            remove_build_scratch(&entry.path());
+        }
+    }
+}
+
+/// Whether a pid currently exists (Linux `/proc`). Conservative: a reused pid
+/// reads as alive, so we never reap a running bake's scratch.
+fn pid_is_alive(pid: u32) -> bool {
+    Path::new("/proc").join(pid.to_string()).exists()
 }
 
 /// Nanoseconds since the Unix epoch (best-effort; used only to name scratch dirs).

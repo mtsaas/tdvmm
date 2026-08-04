@@ -9,7 +9,7 @@ use crate::engine;
 use crate::ui;
 use super::fsops::tree_hash;
 use super::pins::read_builder_pin;
-use super::util::{mkdtemp, self_here, sha256_file_hex};
+use super::util::{self_here, sha256_file_hex, ScratchDir};
 use super::ux::{run, Ux};
 use super::BUILD_EPOCH;
 
@@ -41,10 +41,11 @@ pub(super) fn build_agent(here: &Path, out: &Path, ux: &Ux) -> Result<String, Bo
     let build_hash = agent_src_id(&repo_root)?;
     ux.progress.detail(format!("building dvmm-agent (static musl, reproducible) in {img_ref}"));
 
-    let confdir = mkdtemp()?;
-    let conf = confdir.join("containers.conf");
+    let confdir = ScratchDir::new()?;
+    let conf = confdir.path().join("containers.conf");
     std::fs::write(&conf, "[engine]\nruntime=\"runc\"\n")?;
-    let work = mkdtemp()?;
+    let work_guard = ScratchDir::new()?;
+    let work = work_guard.path();
 
     // rust-lld consumes link args directly (no `cc` driver), so `--build-id=none`
     // is passed as-is. The remaps stabilize the two absolute paths that would
@@ -79,8 +80,6 @@ pub(super) fn build_agent(here: &Path, out: &Path, ux: &Ux) -> Result<String, Bo
 
     std::fs::copy(work.join("dvmm-agent"), out)
         .map_err(|e| format!("agent build produced no binary: {e}"))?;
-    let _ = std::fs::remove_dir_all(&work);
-    let _ = std::fs::remove_dir_all(&confdir);
     Ok(build_hash)
 }
 

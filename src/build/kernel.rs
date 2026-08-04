@@ -12,7 +12,7 @@ use crate::engine;
 use crate::ui;
 use super::cache::resolve_cache_dir;
 use super::pins::{fetch_in_container, fetch_verify};
-use super::util::{mkdtemp, self_here, sha256_file_hex};
+use super::util::{self_here, sha256_file_hex, ScratchDir};
 use super::ux::{capture, run, Ux};
 use super::{BuildKernelArgs, BUILD_EPOCH};
 
@@ -195,10 +195,11 @@ fn build_kernel_container(
     }
 
     // 2. runc conf (host default runtime is misconfigured — Fable host fact) + work.
-    let confdir = mkdtemp()?;
-    let conf = confdir.join("containers.conf");
+    let confdir = ScratchDir::new()?;
+    let conf = confdir.path().join("containers.conf");
     std::fs::write(&conf, "[engine]\nruntime=\"runc\"\n")?;
-    let work = mkdtemp()?;
+    let work_guard = ScratchDir::new()?;
+    let work = work_guard.path();
     let config_src = here.join("kernel").join(KERNEL_CONFIG_NAME);
 
     // 3. the in-container build script — a faithful port of build_kernel.sh with
@@ -254,8 +255,6 @@ fn build_kernel_container(
     }
     std::fs::copy(work.join("vmlinux-out"), out)
         .map_err(|e| format!("kernel build produced no vmlinux: {e}"))?;
-    let _ = std::fs::remove_dir_all(&work);
-    let _ = std::fs::remove_dir_all(&confdir);
     Ok(())
 }
 
@@ -263,15 +262,14 @@ fn build_kernel_container(
 /// `--record`-only (never in `dvmm build`'s pipeline): always inherits, like
 /// every other command outside the `build` orchestrator.
 fn resolve_image_digest(image: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let confdir = mkdtemp()?;
-    let conf = confdir.join("containers.conf");
+    let confdir = ScratchDir::new()?;
+    let conf = confdir.path().join("containers.conf");
     std::fs::write(&conf, "[engine]\nruntime=\"runc\"\n")?;
     run(engine::command().env("CONTAINERS_CONF", &conf).args(["pull", "-q", image]), engine::OutputMode::Inherit)?;
     let repo = image.split(':').next().unwrap_or(image);
     let digests = capture(engine::command().env("CONTAINERS_CONF", &conf).args([
         "image", "inspect", image, "--format", "{{range .RepoDigests}}{{println .}}{{end}}",
     ]))?;
-    let _ = std::fs::remove_dir_all(&confdir);
     let pin = digests
         .lines()
         .find(|l| l.starts_with(&format!("{repo}@")))

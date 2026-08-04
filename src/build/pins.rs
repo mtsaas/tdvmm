@@ -7,7 +7,7 @@ use std::path::Path;
 
 use crate::engine;
 use super::kernel::read_kernel_lock;
-use super::util::{mkdtemp, self_here, sha256_file_hex};
+use super::util::{self_here, sha256_file_hex, ScratchDir};
 use super::ux::{run, Ux};
 
 /// Read the pinned rust+musl builder image ref + digest from
@@ -75,8 +75,8 @@ pub(super) fn fetch_in_container(dest: &Path, url: &str, ux: &Ux) -> Result<(), 
         .to_string_lossy()
         .into_owned();
     std::fs::create_dir_all(dir)?;
-    let confdir = mkdtemp()?;
-    let conf = confdir.join("containers.conf");
+    let confdir = ScratchDir::new()?;
+    let conf = confdir.path().join("containers.conf");
     std::fs::write(&conf, "[engine]\nruntime=\"runc\"\n")?;
     let target = format!("/cache/{name}");
     run(engine::command()
@@ -87,7 +87,6 @@ pub(super) fn fetch_in_container(dest: &Path, url: &str, ux: &Ux) -> Result<(), 
         .arg(format!("{}:/cache", dir.display()))
         .arg(&img_ref)
         .args(["wget", "-q", "-O", &target, url]), ux.mode)?;
-    let _ = std::fs::remove_dir_all(&confdir);
     Ok(())
 }
 

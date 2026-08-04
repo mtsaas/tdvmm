@@ -21,7 +21,7 @@ use super::pack::pack_dvmm;
 use super::pins::{collect_builder_pins, fetch_verify, read_compose_lock, read_rootfs_builder_pin};
 use super::seed::{SeedConfig, SeedSquash};
 use super::stack_lock::{append_stack_lock_dvmm, write_stack_lock};
-use super::util::{mkdtemp, self_here, sha256_file_hex, utc_now_iso};
+use super::util::{self_here, sha256_file_hex, sweep_stale_scratch, utc_now_iso, ScratchDir};
 use super::ux::{capture, run, Ux};
 use super::{
     BuildArgs, ALPINE_BRANCH, BUILD_EPOCH, BUSYBOX_REF, DEFAULT_MEM_MIB, DEFAULT_MIRROR,
@@ -212,8 +212,13 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
         }
     }
 
+    // Reap scratch dirs orphaned by earlier builds that were SIGKILLed before
+    // their ScratchDir guard could run (best-effort).
+    sweep_stale_scratch();
+
     // --- scratch workdir + clean CONTAINERS_CONF ---
-    let work = mkdtemp()?;
+    let work_guard = ScratchDir::new()?;
+    let work = work_guard.path().to_path_buf();
     let conf = work.join("containers.conf");
     std::fs::write(&conf, "[engine]\n")?;
 
@@ -540,7 +545,6 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     // covers it byte-for-byte.
     ux.progress.print_summary(&out_dvmm, &dvmm_sha, dvmm_bytes.len() as u64, progress.elapsed(), diag_path.as_deref());
 
-    let _ = std::fs::remove_dir_all(&work);
     Ok(0)
 }
 
