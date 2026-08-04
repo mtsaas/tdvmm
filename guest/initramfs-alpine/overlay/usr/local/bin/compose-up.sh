@@ -1,5 +1,5 @@
 #!/bin/sh
-# dvmm Phase-2a stack launcher (closed world, no runtime network).
+# tdvmm Phase-2a stack launcher (closed world, no runtime network).
 #
 # Replaces the hand-rolled workload.sh with the GENERIC compose path:
 #   1. start `podman system service` (Docker-compatible API) with an IDLE TIMEOUT,
@@ -14,35 +14,35 @@
 # The machine never powers off in this mode; the host acceptance test watches the
 # serial markers and stops the VMM when it has its proof.
 #
-# Cadence/cap knobs come from the kernel cmdline (dvmm.interval= / dvmm.maxrows=)
-# and are handed to compose via ${DVMM_INTERVAL}/${DVMM_MAXROWS} interpolation, so
+# Cadence/cap knobs come from the kernel cmdline (tdvmm.interval= / tdvmm.maxrows=)
+# and are handed to compose via ${TDVMM_INTERVAL}/${TDVMM_MAXROWS} interpolation, so
 # one baked lockfile serves both the fast FF demo and the small smoke test.
 set -u
 
-LOCK=/var/lib/dvmm-stack/compose.lock.yml
+LOCK=/var/lib/tdvmm-stack/compose.lock.yml
 SOCK=/run/podman/podman.sock
 DOCKER_HOST="unix://$SOCK"; export DOCKER_HOST
-IDLE_TIMEOUT="${DVMM_ENGINE_IDLE:-30}"     # podman system service idle-exit seconds
-PROJECT="$(cat /etc/dvmm-stack-project 2>/dev/null)"
+IDLE_TIMEOUT="${TDVMM_ENGINE_IDLE:-30}"     # podman system service idle-exit seconds
+PROJECT="$(cat /etc/tdvmm-stack-project 2>/dev/null)"
 [ -n "$PROJECT" ] && export COMPOSE_PROJECT_NAME="$PROJECT"
 
 # cadence/cap knobs (kernel cmdline overrides the lockfile defaults)
-# dvmm.memsample=1 opts into the peak-RAM console sampler below (default OFF).
-DVMM_MEMSAMPLE=0
+# tdvmm.memsample=1 opts into the peak-RAM console sampler below (default OFF).
+TDVMM_MEMSAMPLE=0
 for tok in $(cat /proc/cmdline 2>/dev/null); do
   case "$tok" in
-    dvmm.interval=*)  export DVMM_INTERVAL="${tok#dvmm.interval=}" ;;
-    dvmm.maxrows=*)   export DVMM_MAXROWS="${tok#dvmm.maxrows=}" ;;
-    dvmm.memsample=*) DVMM_MEMSAMPLE="${tok#dvmm.memsample=}" ;;
+    tdvmm.interval=*)  export TDVMM_INTERVAL="${tok#tdvmm.interval=}" ;;
+    tdvmm.maxrows=*)   export TDVMM_MAXROWS="${tok#tdvmm.maxrows=}" ;;
+    tdvmm.memsample=*) TDVMM_MEMSAMPLE="${tok#tdvmm.memsample=}" ;;
   esac
 done
 
-fail() { echo "DVMM_STACK_FAIL: $*"; podman ps -a 2>/dev/null | sed 's/^/[stack][ps] /'; exit 1; }
+fail() { echo "TDVMM_STACK_FAIL: $*"; podman ps -a 2>/dev/null | sed 's/^/[stack][ps] /'; exit 1; }
 
 [ -f "$LOCK" ] || fail "no compose.lock.yml at $LOCK (guest not baked in stack mode)"
 command -v docker-compose >/dev/null 2>&1 || fail "docker-compose engine not installed"
 
-echo "DVMM_STACK_START project=$PROJECT interval=${DVMM_INTERVAL:-<lock>} max_rows=${DVMM_MAXROWS:-<lock>}"
+echo "TDVMM_STACK_START project=$PROJECT interval=${TDVMM_INTERVAL:-<lock>} max_rows=${TDVMM_MAXROWS:-<lock>}"
 echo "[stack] compose.lock.yml:"; sed 's/^/[stack][lock] /' "$LOCK"
 
 # 1. start the Docker-compatible API with an idle timeout -----------------------
@@ -57,7 +57,7 @@ until [ -S "$SOCK" ]; do
   tries=$((tries + 1)); [ "$tries" -gt 100 ] && { sed 's/^/[stack][engine] /' /tmp/podman-service.log; fail "API socket never appeared"; }
   sleep 0.1
 done
-echo "DVMM_ENGINE_UP pid=$ENGINE_PID sock=$SOCK"
+echo "TDVMM_ENGINE_UP pid=$ENGINE_PID sock=$SOCK"
 
 # 1b. healthcheck ticker (2b items 3&4) -----------------------------------------
 # If the stack declares any healthcheck, start the guest-side ticker BEFORE
@@ -77,7 +77,7 @@ fi
 echo "[stack] docker compose up --pull=never -d"
 if docker-compose -f "$LOCK" up --pull never -d >/tmp/compose-up.log 2>&1; then
   sed 's/^/[stack][up] /' /tmp/compose-up.log
-  echo "DVMM_STACK_UP"
+  echo "TDVMM_STACK_UP"
 else
   sed 's/^/[stack][up] /' /tmp/compose-up.log
   fail "compose up"
@@ -92,49 +92,49 @@ census() {
     sleep 0.5
   done
   if kill -0 "$ENGINE_PID" 2>/dev/null; then
-    echo "DVMM_ENGINE_RESIDENT WARNING: podman system service still running after idle window"
+    echo "TDVMM_ENGINE_RESIDENT WARNING: podman system service still running after idle window"
   else
-    echo "DVMM_ENGINE_EXITED podman system service has exited (no resident engine)"
+    echo "TDVMM_ENGINE_EXITED podman system service has exited (no resident engine)"
   fi
-  echo "==== DVMM_PROCESS_CENSUS (after compose up; engine exited) ===="
+  echo "==== TDVMM_PROCESS_CENSUS (after compose up; engine exited) ===="
   # busybox ps: show every process; the census must be conmon + container procs
   # + this launcher + log tailers -- and NO `podman system service`.
   ps -o pid,args 2>/dev/null || ps 2>/dev/null || ps aux 2>/dev/null
   echo "---- podman containers (via CLI, no API) ----"
   podman ps --format '{{.Names}} {{.Status}} {{.Image}}' 2>/dev/null | sed 's/^/[census] /'
   if pgrep -f 'system service' >/dev/null 2>&1; then
-    echo "DVMM_CENSUS_ENGINE_PRESENT (unexpected)"
+    echo "TDVMM_CENSUS_ENGINE_PRESENT (unexpected)"
   else
-    echo "DVMM_CENSUS_NO_ENGINE ok: no 'podman system service' process"
+    echo "TDVMM_CENSUS_NO_ENGINE ok: no 'podman system service' process"
   fi
-  echo "==== DVMM_PROCESS_CENSUS_END ===="
+  echo "==== TDVMM_PROCESS_CENSUS_END ===="
 
   # 4. closed-world observations ------------------------------------------------
   if [ -z "$(ip route show default 2>/dev/null)" ]; then
-    echo "DVMM_CLOSED_WORLD_OK no default route on the guest (egress cannot leave)"
+    echo "TDVMM_CLOSED_WORLD_OK no default route on the guest (egress cannot leave)"
   else
-    echo "DVMM_CLOSED_WORLD_WARN a default route exists: $(ip route show default 2>/dev/null)"
+    echo "TDVMM_CLOSED_WORLD_WARN a default route exists: $(ip route show default 2>/dev/null)"
   fi
   # best-effort: external name resolution from inside a container must fail.
   c="$(podman ps --format '{{.Names}}' 2>/dev/null | head -1)"
   if [ -n "$c" ]; then
     if podman exec "$c" getent hosts example.com >/dev/null 2>&1; then
-      echo "DVMM_EGRESS_DNS_WARN external lookup resolved (egress DNS reachable)"
+      echo "TDVMM_EGRESS_DNS_WARN external lookup resolved (egress DNS reachable)"
     else
-      echo "DVMM_CLOSED_WORLD_DNS_OK external lookup failed (service-name DNS only)"
+      echo "TDVMM_CLOSED_WORLD_DNS_OK external lookup failed (service-name DNS only)"
     fi
   fi
 }
 census &
 
-# RAM sampler (opt-in via dvmm.memsample=1): lets the host record actual peak
+# RAM sampler (opt-in via tdvmm.memsample=1): lets the host record actual peak
 # guest RAM (MemTotal - min MemAvail). OFF by default so a normal run -- and
-# especially a fast-forward run -- is never flooded with DVMM_MEM console lines;
-# scripts/smoke_test_workload.sh passes dvmm.memsample=1 to collect its samples.
-if [ "$DVMM_MEMSAMPLE" = "1" ]; then
+# especially a fast-forward run -- is never flooded with TDVMM_MEM console lines;
+# scripts/smoke_test_workload.sh passes tdvmm.memsample=1 to collect its samples.
+if [ "$TDVMM_MEMSAMPLE" = "1" ]; then
   ( while :; do
       grep -E '^(MemTotal|MemFree|MemAvailable|Cached):' /proc/meminfo \
-        | awk '{printf "%s%s ", $1, $2} END{print ""}' | sed 's/^/DVMM_MEM /'
+        | awk '{printf "%s%s ", $1, $2} END{print ""}' | sed 's/^/TDVMM_MEM /'
       sleep 5
     done ) &
 fi
@@ -147,5 +147,5 @@ NAMES="$(podman ps --format '{{.Names}}' 2>/dev/null)"
 for n in $NAMES; do
   ( podman logs -f "$n" 2>&1 | sed "s/^/[$n] /" ) &
 done
-echo "DVMM_STACK_STREAMING $(echo "$NAMES" | tr '\n' ' ')"
+echo "TDVMM_STACK_STREAMING $(echo "$NAMES" | tr '\n' ' ')"
 wait

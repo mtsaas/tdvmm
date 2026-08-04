@@ -5,14 +5,14 @@
 # small MAX_ROWS, watches the serial console, and asserts the two properties of
 # the closed-world Postgres + insert/trim workload:
 #
-#   (a) rows ACCUMULATE at the interval  -- DVMM_ROWCOUNT rises 1,2,3,... and the
+#   (a) rows ACCUMULATE at the interval  -- TDVMM_ROWCOUNT rises 1,2,3,... and the
 #       wall-time between successive inserts is ~INTERVAL_SECONDS (genuine sleep,
 #       so the guest HLTs between inserts), and
 #   (b) the row count CAPS at MAX_ROWS and NEVER exceeds it as inserts continue
 #       past the cap (the trim holds).
 #
 # Exits 0 only if both hold; non-zero otherwise. Also reports the measured peak
-# guest RAM use (from the guest's DVMM_MEM samples).
+# guest RAM use (from the guest's TDVMM_MEM samples).
 #
 # The workload loops forever (never powers off), so this test stops the VMM once
 # it has its proof.
@@ -27,10 +27,10 @@ ROOT="$(cd "$HERE/.." && pwd)"
 
 TIMEOUT="${1:-240}"
 STACK="${STACK:-insert-trim}"
-# Self-contained: bake the stack into a gitignored test dir, then `dvmm run` it
-# (kernel + initramfs come from the .dvmm; no repo / ~/.dvmm/artifacts dependency).
-OUTDIR="${DVMM_OUT_DIR:-$ROOT/.dvmm-test-results}"; mkdir -p "$OUTDIR"
-DVMM="${DVMM_ARTIFACT:-$OUTDIR/$STACK.dvmm}"
+# Self-contained: bake the stack into a gitignored test dir, then `tdvmm run` it
+# (kernel + initramfs come from the .tdvmm; no repo / ~/.tdvmm/artifacts dependency).
+OUTDIR="${TDVMM_OUT_DIR:-$ROOT/.tdvmm-test-results}"; mkdir -p "$OUTDIR"
+TDVMM="${TDVMM_ARTIFACT:-$OUTDIR/$STACK.tdvmm}"
 
 INTERVAL_SECONDS="${INTERVAL_SECONDS:-2}"
 MAX_ROWS="${MAX_ROWS:-5}"
@@ -43,15 +43,15 @@ FF="${FF:-off}"              # fast-forward on|off. Default OFF so this stays a
 # this test's known budget (a few interval*rows seconds + boot), so a wedged
 # guest can't fast-forward forever. Comfortably clears a healthy run.
 MAX_VIRTUAL_TIME="${MAX_VIRTUAL_TIME:-$(( TIMEOUT + 300 ))s}"
-BIN="$ROOT/target/release/dvmm"
+BIN="$ROOT/target/release/tdvmm"
 
 if [ ! -x "$BIN" ]; then
   echo "building release binary..."
   ( cd "$ROOT" && cargo build --release ) || { echo "SMOKE FAIL: build error"; exit 3; }
 fi
-if [ ! -f "$DVMM" ]; then
-  echo "[smoke] baking $STACK -> $DVMM"
-  "$BIN" build "$ROOT/guest/stacks/$STACK/compose.yml" -o "$DVMM" \
+if [ ! -f "$TDVMM" ]; then
+  echo "[smoke] baking $STACK -> $TDVMM"
+  "$BIN" build "$ROOT/guest/stacks/$STACK/compose.yml" -o "$TDVMM" \
     || { echo "SMOKE FAIL: bake error"; exit 3; }
 fi
 
@@ -60,22 +60,22 @@ PID=""
 cleanup() { [ -n "$PID" ] && kill "$PID" 2>/dev/null; [ -n "$PID" ] && wait "$PID" 2>/dev/null; rm -f "$LOG"; }
 trap cleanup EXIT
 
-# dvmm.memsample=1 opts into the guest RAM sampler (the DVMM_MEM console lines);
+# tdvmm.memsample=1 opts into the guest RAM sampler (the TDVMM_MEM console lines);
 # this test measures peak guest RAM, so it enables it (the sampler is OFF by
 # default so normal / fast-forward runs are not flooded).
-CMDLINE="console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable dvmm.stack=1 dvmm.interval=$INTERVAL_SECONDS dvmm.maxrows=$MAX_ROWS dvmm.memsample=1"
+CMDLINE="console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable tdvmm.stack=1 tdvmm.interval=$INTERVAL_SECONDS tdvmm.maxrows=$MAX_ROWS tdvmm.memsample=1"
 echo "[smoke] run: mem=${MEM}MiB interval=${INTERVAL_SECONDS}s max_rows=$MAX_ROWS past_cap=$PAST_CAP ff=$FF timeout=${TIMEOUT}s max-virtual-time=${MAX_VIRTUAL_TIME}"
-"$BIN" run "$DVMM" --mem "$MEM" --ff "$FF" \
+"$BIN" run "$TDVMM" --mem "$MEM" --ff "$FF" \
   --max-virtual-time "$MAX_VIRTUAL_TIME" --cmdline "$CMDLINE" \
   </dev/null >"$LOG" 2>&1 &
 PID=$!
 
-# Extract the ordered DVMM_ROWCOUNT counts and their guest timestamps.
-counts_of()   { grep -oE 'DVMM_ROWCOUNT=[0-9]+' "$LOG" | cut -d= -f2; }
+# Extract the ordered TDVMM_ROWCOUNT counts and their guest timestamps.
+counts_of()   { grep -oE 'TDVMM_ROWCOUNT=[0-9]+' "$LOG" | cut -d= -f2; }
 result=""; reason=""
 deadline=$(( $(date +%s) + TIMEOUT ))
 while [ "$(date +%s)" -lt "$deadline" ]; do
-  if grep -qE 'DVMM_WORKLOAD_FAIL|DVMM_SVC_FAIL' "$LOG"; then result="fail"; reason="guest reported failure"; break; fi
+  if grep -qE 'TDVMM_WORKLOAD_FAIL|TDVMM_SVC_FAIL' "$LOG"; then result="fail"; reason="guest reported failure"; break; fi
 
   mapfile -t C < <(counts_of)
   n="${#C[@]}"
@@ -102,12 +102,12 @@ done
 
 # ---- final assertions on the full captured sequence -----------------------
 mapfile -t C < <(counts_of)
-mapfile -t TS < <(grep -oE 'DVMM_ROWCOUNT=[0-9]+ iter=[0-9]+ max=[0-9]+ ts=[0-9T:-]+Z' "$LOG" \
+mapfile -t TS < <(grep -oE 'TDVMM_ROWCOUNT=[0-9]+ iter=[0-9]+ max=[0-9]+ ts=[0-9T:-]+Z' "$LOG" \
                     | sed -E 's/.*ts=([0-9T:-]+)Z/\1/')
 
 echo
-echo "==== observed DVMM_ROWCOUNT sequence (${#C[@]} samples) ===="
-grep -E 'DVMM_ROWCOUNT=' "$LOG" | sed 's/^/  /'
+echo "==== observed TDVMM_ROWCOUNT sequence (${#C[@]} samples) ===="
+grep -E 'TDVMM_ROWCOUNT=' "$LOG" | sed 's/^/  /'
 echo "==========================================================="
 
 if [ "$result" = "pass" ]; then
@@ -141,9 +141,9 @@ if [ "$result" = "pass" ]; then
   [ "$min_delta" -ge 1 ]        || { echo "ASSERT FAIL: inserts not spaced by ~interval (guest not sleeping)"; ok=0; }
   [ "$max_delta" -le "$((INTERVAL_SECONDS + 5))" ] || { echo "ASSERT FAIL: inserts stalled (delta $max_delta > interval+5)"; ok=0; }
 
-  # peak guest RAM from DVMM_MEM samples: peak_used = MemTotal - min(MemAvailable)
+  # peak guest RAM from TDVMM_MEM samples: peak_used = MemTotal - min(MemAvailable)
   peak_line="$(awk '
-    /DVMM_MEM/ {
+    /TDVMM_MEM/ {
       for (i=1;i<=NF;i++){ if ($i ~ /^MemTotal:/) t=$i; if ($i ~ /^MemAvailable:/) a=$i }
       gsub(/[^0-9]/,"",t); gsub(/[^0-9]/,"",a);
       if (t!="") T=t;
@@ -154,7 +154,7 @@ if [ "$result" = "pass" ]; then
     set -- $peak_line; T="$1"; A="$2"
     echo "[smoke] measured peak guest RAM: $(( (T - A) / 1024 )) MiB used of $(( T / 1024 )) MiB (min MemAvailable $(( A / 1024 )) MiB)"
   else
-    echo "[smoke] (no DVMM_MEM samples captured)"
+    echo "[smoke] (no TDVMM_MEM samples captured)"
   fi
 
   if [ "$ok" -eq 1 ]; then

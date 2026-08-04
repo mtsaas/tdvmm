@@ -12,32 +12,28 @@
 # Kernel build tool binary (source gen_init_cpio.c is committed)
 /guest/initramfs/gen_init_cpio
 
-# Alpine container guest: the large built initramfs (~150 MiB) and the
-# downloaded pinned minirootfs are rebuildable via build_rootfs.sh (the
-# reproducibility anchor). packages.lock, images.lock, the scripts, and the
-# artifact hash (initramfs-alpine.cpio.gz.sha256) ARE committed.
-/guest/initramfs-alpine/initramfs-alpine.cpio.gz
+# Alpine container guest download caches: the pinned minirootfs + Docker Compose
+# v2 CLI, fetched + sha256-verified by `tdvmm build`. packages.lock IS committed.
 /guest/initramfs-alpine/alpine-minirootfs-*.tar.gz
-
-# Phase 2a: pinned compose engine binary (fetched + sha256-verified) and the
-# per-stack baked initramfs images are rebuildable via bake-stack.sh.
 /guest/initramfs-alpine/docker-compose-*
+
+# Per-stack baked initramfs images produced by `tdvmm build` (rebuildable).
 /guest/initramfs-alpine/initramfs-alpine-*.cpio.gz
 /guest/initramfs-alpine/initramfs-alpine-*.cpio.gz.sha256
 
-# OP-1a: the single-file .dvmm artifacts (bake-stack.sh output) are rebuildable;
+# OP-1a: the single-file .tdvmm artifacts (bake-stack.sh output) are rebuildable;
 # the manifest anchors live in each stack's stack.lock, which IS committed.
-*.dvmm
+*.tdvmm
 
 # goal-3a: the content-hash bake cache, the runner's scratch TMPDIR, and the
 # per-run test results (JSON + logs). All rebuildable / transient.
-/.dvmm-cache
-/.dvmm-tmp
-/.dvmm-test-results
-*.dvmm.jsonl
-*.dvmm.report.json
-# `dvmm test` now defaults its jsonl/report to CWD as `<stack>.jsonl` /
+/.tdvmm-cache
+/.tdvmm-tmp
+/.tdvmm-test-results
+*.tdvmm.jsonl
+*.tdvmm.report.json
+# `tdvmm test` now defaults its jsonl/report to CWD as `<stack>.jsonl` /
 # `<stack>.report.json`; ignore those in the repo root only (root-anchored, so
-# the tracked goldens under dvmm-proto/goldens/ are untouched).
+# the tracked goldens under tdvmm-proto/goldens/ are untouched).
 /*.jsonl
 /*.report.json

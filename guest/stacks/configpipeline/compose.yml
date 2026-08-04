@@ -1,4 +1,4 @@
-# dvmm Phase-2b CORPUS stack #2: CONFIGPIPELINE
+# tdvmm Phase-2b CORPUS stack #2: CONFIGPIPELINE
 #
 # A realistic "worker + sidecar sharing state" shape that exercises the build /
 # bind / volume features TOGETHER:
@@ -20,9 +20,9 @@ services:
     build:
       context: ./worker
       dockerfile: Containerfile
-    image: localhost/dvmm-configpipeline-worker:corpus
+    image: localhost/tdvmm-configpipeline-worker:corpus
     environment:
-      INTERVAL_SECONDS: "${DVMM_INTERVAL:-3600}"
+      INTERVAL_SECONDS: "${TDVMM_INTERVAL:-3600}"
     volumes:
       - ./config:/etc/app:rw   # relative RW bind -> materialized, mounted rw
       - state:/var/state       # named volume -> tmpfs-backed, shared w/ sidecar
@@ -37,7 +37,7 @@ services:
       - /bin/sh
       - -c
       - |
-        echo "DVMM_SIDECAR_START ts=$$(date -u +%H:%M:%S)"
+        echo "TDVMM_SIDECAR_START ts=$$(date -u +%H:%M:%S)"
         # Poll the SHARED named volume on a short cadence (a virtual sleep FF
         # collapses) so we reliably observe the worker's write regardless of
         # start order, and announce the first time we see it.
@@ -46,11 +46,11 @@ services:
         while :; do
           i=$$((i + 1))
           latest="$$(cat /var/state/latest.txt 2>/dev/null)"
-          echo "DVMM_SIDECAR_READ iter=$$i latest=$${latest:-<none>} ts=$$(date -u +%H:%M:%S)"
+          echo "TDVMM_SIDECAR_READ iter=$$i latest=$${latest:-<none>} ts=$$(date -u +%H:%M:%S)"
           case "$$latest" in
             worker-iter-*)
               if [ "$$seen" -eq 0 ]; then
-                echo "DVMM_SIDECAR_SHARED_OK latest=$$latest (read worker data via shared named volume)"
+                echo "TDVMM_SIDECAR_SHARED_OK latest=$$latest (read worker data via shared named volume)"
                 seen=1
               fi
               ;;

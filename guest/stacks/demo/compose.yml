@@ -1,4 +1,4 @@
-# dvmm — DEMO stack: the flagship capability reference.
+# tdvmm — DEMO stack: the flagship capability reference.
 #
 # A small but REAL, end-to-end microservice stack, closed-world and
 # fast-forwardable, that exercises the whole supported compose subset at once:
@@ -12,7 +12,7 @@
 #   client             a REAL Python gRPC client. Once per virtual hour it submits
 #                      a batch of orders and reads the stats back — genuine
 #                      service-to-service RPC over the compose network. Sleeps a
-#                      full virtual hour between cycles, which dvmm fast-forwards;
+#                      full virtual hour between cycles, which tdvmm fast-forwards;
 #   worker             rolls up each hour's orders into a summaries row (psycopg2
 #                      -> postgres). Gated on postgres service_healthy.
 #
@@ -73,7 +73,7 @@ services:
     build:
       context: ./app
       dockerfile: Containerfile
-    image: localhost/dvmm-demo-app:demo
+    image: localhost/tdvmm-demo-app:demo
     command: ["/app/server.py"]
     depends_on:
       postgres:
@@ -90,13 +90,13 @@ services:
     build:
       context: ./app
       dockerfile: Containerfile
-    image: localhost/dvmm-demo-app:demo
+    image: localhost/tdvmm-demo-app:demo
     command: ["/app/worker.py"]
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      INTERVAL_SECONDS: "${DVMM_INTERVAL:-3600}"
+      INTERVAL_SECONDS: "${TDVMM_INTERVAL:-3600}"
       PGHOST: postgres
       PGUSER: postgres
       PGDATABASE: appdb
@@ -105,11 +105,11 @@ services:
     build:
       context: ./app
       dockerfile: Containerfile
-    image: localhost/dvmm-demo-app:demo
+    image: localhost/tdvmm-demo-app:demo
     command: ["/app/client.py"]
     depends_on:
       api:
         condition: service_started
     environment:
-      INTERVAL_SECONDS: "${DVMM_INTERVAL:-3600}"
+      INTERVAL_SECONDS: "${TDVMM_INTERVAL:-3600}"
       API_ADDR: api:50051

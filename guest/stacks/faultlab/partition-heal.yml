@@ -1,6 +1,6 @@
 # TEST-1b acceptance: PARTITION + HEAL.
 #
-#   dvmm test faultlab.dvmm --scenario partition-heal.yml   ->   PASS, exit 0
+#   tdvmm test faultlab.tdvmm --scenario partition-heal.yml   ->   PASS, exit 0
 #
 # Two services communicate; we drop all traffic between them (a network partition
 # via nftables drop rules on the bridge, both directions), observe connectivity is

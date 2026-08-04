@@ -18,7 +18,7 @@
 # Runs the DOGFOOD stack through the generic 2a compose path (bake-stack ->
 # compose.lock.yml -> guest -> docker compose up), not the retired workload.sh.
 #
-# Prints a canonical `DVMM_DEMO_SEQ=<counts>` line so a caller can check
+# Prints a canonical `TDVMM_DEMO_SEQ=<counts>` line so a caller can check
 # repeatability (gate 6). Exits 0 only if every assertion holds.
 #
 # Usage: scripts/ff_demo.sh [target_virtual_hours] [wall_timeout_s]
@@ -27,12 +27,12 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-BIN="$ROOT/target/release/dvmm"
+BIN="$ROOT/target/release/tdvmm"
 STACK="${STACK:-insert-trim}"
-# Self-contained: bake the stack into a gitignored test dir, then `dvmm run` it
-# (kernel + initramfs come from the .dvmm; no repo / ~/.dvmm/artifacts dependency).
-OUTDIR="${DVMM_OUT_DIR:-$ROOT/.dvmm-test-results}"; mkdir -p "$OUTDIR"
-DVMM="${DVMM_ARTIFACT:-$OUTDIR/$STACK.dvmm}"
+# Self-contained: bake the stack into a gitignored test dir, then `tdvmm run` it
+# (kernel + initramfs come from the .tdvmm; no repo / ~/.tdvmm/artifacts dependency).
+OUTDIR="${TDVMM_OUT_DIR:-$ROOT/.tdvmm-test-results}"; mkdir -p "$OUTDIR"
+TDVMM="${TDVMM_ARTIFACT:-$OUTDIR/$STACK.tdvmm}"
 
 TARGET_HOURS="${1:-24}"
 WALL_TIMEOUT="${2:-300}"
@@ -47,9 +47,9 @@ MAX_JUMP_SECS="${MAX_JUMP_SECS:-300}"
 MAX_VIRTUAL_TIME="${MAX_VIRTUAL_TIME:-$(( (TARGET_HOURS + 12) * 3600 ))s}"
 
 [ -x "$BIN" ] || { echo "ff_demo: building..."; ( cd "$ROOT" && cargo build --release ) || exit 3; }
-if [ ! -f "$DVMM" ]; then
-  echo "[ff_demo] baking $STACK -> $DVMM"
-  "$BIN" build "$ROOT/guest/stacks/$STACK/compose.yml" -o "$DVMM" \
+if [ ! -f "$TDVMM" ]; then
+  echo "[ff_demo] baking $STACK -> $TDVMM"
+  "$BIN" build "$ROOT/guest/stacks/$STACK/compose.yml" -o "$TDVMM" \
     || { echo "ff_demo: bake failed"; exit 3; }
 fi
 
@@ -57,10 +57,10 @@ LOG="$(mktemp)"; PID=""
 cleanup() { [ -n "$PID" ] && kill "$PID" 2>/dev/null; [ -n "$PID" ] && { sleep 1; kill -9 "$PID" 2>/dev/null; }; rm -f "$LOG"; }
 trap cleanup EXIT
 
-CMDLINE="console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable dvmm.stack=1 dvmm.interval=$INTERVAL dvmm.maxrows=$MAX_ROWS"
+CMDLINE="console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable tdvmm.stack=1 tdvmm.interval=$INTERVAL tdvmm.maxrows=$MAX_ROWS"
 echo "[ff_demo] boot: interval=${INTERVAL}s max_rows=$MAX_ROWS target=${TARGET_HOURS} virtual-hours mem=${MEM}MiB ff=ON max-virtual-time=${MAX_VIRTUAL_TIME}"
 START_WALL=$(date +%s.%N)
-"$BIN" run "$DVMM" --mem "$MEM" --ff on --max-jump-secs "$MAX_JUMP_SECS" \
+"$BIN" run "$TDVMM" --mem "$MEM" --ff on --max-jump-secs "$MAX_JUMP_SECS" \
   --max-virtual-time "$MAX_VIRTUAL_TIME" \
   --cmdline "$CMDLINE" </dev/null >"$LOG" 2>&1 &
 PID=$!
@@ -69,31 +69,31 @@ PID=$!
 NEED=$(( TARGET_HOURS + 1 ))
 deadline=$(( $(date +%s) + WALL_TIMEOUT )); result=""; reason=""
 while [ "$(date +%s)" -lt "$deadline" ]; do
-  if grep -qE 'exceeds the sanity bound|panicked|DVMM_WORKLOAD_FAIL|DVMM_SVC_FAIL|dvmm: fatal' "$LOG"; then
+  if grep -qE 'exceeds the sanity bound|panicked|TDVMM_WORKLOAD_FAIL|TDVMM_SVC_FAIL|tdvmm: fatal' "$LOG"; then
     result="fail"; reason="vmm/guest error"; break
   fi
-  n=$(grep -c 'DVMM_ROWCOUNT=' "$LOG" 2>/dev/null); n=${n:-0}
+  n=$(grep -c 'TDVMM_ROWCOUNT=' "$LOG" 2>/dev/null); n=${n:-0}
   [ "$n" -ge "$NEED" ] && { result="pass"; break; }
   kill -0 "$PID" 2>/dev/null || { result="fail"; reason="vmm exited early"; break; }
   sleep 2
 done
 END_WALL=$(date +%s.%N)
-[ -z "$result" ] && { result="fail"; reason="timeout after ${WALL_TIMEOUT}s (only $(grep -c 'DVMM_ROWCOUNT=' "$LOG") rows)"; }
+[ -z "$result" ] && { result="fail"; reason="timeout after ${WALL_TIMEOUT}s (only $(grep -c 'TDVMM_ROWCOUNT=' "$LOG") rows)"; }
 
 WALL=$(awk "BEGIN{printf \"%.1f\", $END_WALL-$START_WALL}")
 
 # ---- gather evidence -------------------------------------------------------
-mapfile -t C  < <(grep -oE 'DVMM_ROWCOUNT=[0-9]+' "$LOG" | cut -d= -f2)
-mapfile -t TS < <(grep -oE 'DVMM_ROWCOUNT=[0-9]+ iter=[0-9]+ max=[0-9]+ ts=[0-9T:-]+Z' "$LOG" | sed -E 's/.*ts=([0-9T:-]+)Z/\1/')
-METRIC="$(grep -E '\[dvmm\] fast-forward:' "$LOG" | tail -1)"
+mapfile -t C  < <(grep -oE 'TDVMM_ROWCOUNT=[0-9]+' "$LOG" | cut -d= -f2)
+mapfile -t TS < <(grep -oE 'TDVMM_ROWCOUNT=[0-9]+ iter=[0-9]+ max=[0-9]+ ts=[0-9T:-]+Z' "$LOG" | sed -E 's/.*ts=([0-9T:-]+)Z/\1/')
+METRIC="$(grep -E '\[tdvmm\] fast-forward:' "$LOG" | tail -1)"
 
 echo
-echo "==== DVMM_ROWCOUNT sequence (${#C[@]} rows; wall ${WALL}s) ===="
-grep -E 'DVMM_ROWCOUNT=' "$LOG" | tail -30 | sed 's/^/  /'
+echo "==== TDVMM_ROWCOUNT sequence (${#C[@]} rows; wall ${WALL}s) ===="
+grep -E 'TDVMM_ROWCOUNT=' "$LOG" | tail -30 | sed 's/^/  /'
 echo "==== last fast-forward metric line ===="
 echo "  $METRIC"
 echo "======================================="
-echo "DVMM_DEMO_SEQ=$(IFS=,; echo "${C[*]}")"
+echo "TDVMM_DEMO_SEQ=$(IFS=,; echo "${C[*]}")"
 
 if [ "$result" != "pass" ]; then
   echo "FF DEMO FAIL: $reason"

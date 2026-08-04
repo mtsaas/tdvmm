@@ -1,4 +1,4 @@
-# dvmm Phase-2b CORPUS stack #1: WEBSTACK
+# tdvmm Phase-2b CORPUS stack #1: WEBSTACK
 #
 # A realistic "web/api + cache + relational db" shape that exercises SEVERAL
 # supported-subset features TOGETHER:
@@ -15,7 +15,7 @@
 #
 # Knobs (INTERVAL_SECONDS / MAX_ROWS) use ${VAR:-default} interpolation so the
 # committed lockfile stays deterministic while the corpus runner overrides cadence
-# + cap via the kernel cmdline (dvmm.interval= / dvmm.maxrows=).
+# + cap via the kernel cmdline (tdvmm.interval= / tdvmm.maxrows=).
 
 services:
   postgres:
@@ -52,15 +52,15 @@ services:
     build:
       context: ./api
       dockerfile: Containerfile
-    image: localhost/dvmm-webstack-api:corpus
+    image: localhost/tdvmm-webstack-api:corpus
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
     environment:
-      INTERVAL_SECONDS: "${DVMM_INTERVAL:-3600}"
-      MAX_ROWS: "${DVMM_MAXROWS:-1000}"
+      INTERVAL_SECONDS: "${TDVMM_INTERVAL:-3600}"
+      MAX_ROWS: "${TDVMM_MAXROWS:-1000}"
       PGHOST: postgres
       PGUSER: postgres
       PGDATABASE: appdb

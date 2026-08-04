@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# dvmm Phase-2b CORPUS runner (PERMANENT tooling).
+# tdvmm Phase-2b CORPUS runner (PERMANENT tooling).
 #
 # Proves the supported compose subset on a set of realistic, real-world-shaped
 # stacks -- each exercising SEVERAL features together (multi-service, health
 # gating, build: contexts, ro/rw binds, named volumes, service-name DNS), all
 # closed-world and fast-forwardable. For every corpus stack it:
 #
-#   1. BAKES it (`dvmm build`) if the initramfs is missing or BAKE=1;
+#   1. BAKES it (`tdvmm build`) if the initramfs is missing or BAKE=1;
 #   2. BOOTS it under fast-forward with a virtual-time horizon + --metrics-out
 #      (the VMM stops ITSELF at the horizon, flushing metrics -- never a SIGTERM);
 #   3. asserts FUNCTIONAL CORRECTNESS from the serial markers (services come up;
@@ -32,11 +32,11 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-BIN="$ROOT/target/release/dvmm"
+BIN="$ROOT/target/release/tdvmm"
 STACKS_DIR="$ROOT/guest/stacks"
-# Self-contained: bake each stack into a gitignored test dir, then `dvmm run` it
-# (kernel + initramfs come from the .dvmm; no repo / ~/.dvmm/artifacts dependency).
-OUTDIR="${DVMM_OUT_DIR:-$ROOT/.dvmm-test-results}"; mkdir -p "$OUTDIR"
+# Self-contained: bake each stack into a gitignored test dir, then `tdvmm run` it
+# (kernel + initramfs come from the .tdvmm; no repo / ~/.tdvmm/artifacts dependency).
+OUTDIR="${TDVMM_OUT_DIR:-$ROOT/.tdvmm-test-results}"; mkdir -p "$OUTDIR"
 
 STACKS=("$@"); [ "${#STACKS[@]}" -eq 0 ] && STACKS=(demo webstack configpipeline svcchain)
 BAKE="${BAKE:-0}"
@@ -54,7 +54,7 @@ WALL_TIMEOUT="${WALL_TIMEOUT:-300}"
 # horizon still clears them comfortably.
 MAX_VIRTUAL_TIME="${MAX_VIRTUAL_TIME:-$(( (TARGET_ROWS + 2) * INTERVAL ))s}"
 
-[ -x "$BIN" ] || { echo "[corpus] building dvmm..."; ( cd "$ROOT" && cargo build --release ) || exit 3; }
+[ -x "$BIN" ] || { echo "[corpus] building tdvmm..."; ( cd "$ROOT" && cargo build --release ) || exit 3; }
 
 TMP="$(mktemp -d)"; trap 'rm -f "$TMP"/*.log "$TMP"/*.metrics 2>/dev/null; rmdir "$TMP" 2>/dev/null' EXIT
 
@@ -73,7 +73,7 @@ order_ok() {
   echo "    ORDER FAIL: $label (first=$a second=$b)"; return 1
 }
 
-# rows_ok <log> : DVMM_ROWCOUNT present, started low, non-decreasing, capped.
+# rows_ok <log> : TDVMM_ROWCOUNT present, started low, non-decreasing, capped.
 rows_ok() {
   local log="$1" prev=-1 mx=0 low=0 over=0 nondec=1 v
   while read -r v; do
@@ -83,7 +83,7 @@ rows_ok() {
     [ "$v" -gt "$mx" ] && mx="$v"
     [ "$v" -gt "$MAX_ROWS" ] && over=1
     prev="$v"
-  done < <(grep -oE 'DVMM_ROWCOUNT=[0-9]+' "$log" | cut -d= -f2)
+  done < <(grep -oE 'TDVMM_ROWCOUNT=[0-9]+' "$log" | cut -d= -f2)
   echo "    rows: started_low=$low non_decreasing=$nondec max=$mx cap=$MAX_ROWS over_cap=$over"
   [ "$low" -eq 1 ] && [ "$nondec" -eq 1 ] && [ "$over" -eq 0 ] && [ "$mx" -ge 1 ]
 }
@@ -97,13 +97,13 @@ have() {
 # ---- per-stack functional gates -------------------------------------------
 gate_webstack() {
   local log="$1" p=1
-  local P=dvmm_webstack-postgres-1 R=dvmm_webstack-redis-1 A=dvmm_webstack-api-1
-  have "$log" 'DVMM_STACK_UP' 'compose brought the stack up' || p=0
-  have "$log" "DVMM_HC_HEALTHY container=$P" 'postgres reached healthy (ticker)' || p=0
-  have "$log" "DVMM_HC_HEALTHY container=$R" 'redis reached healthy (ticker)' || p=0
-  have "$log" 'DVMM_API_UP' 'api started (=> both service_healthy gates resolved)' || p=0
-  have "$log" 'DVMM_API_REDIS_PING=PONG' 'api reached redis by name (PONG)' || p=0
-  have "$log" 'DVMM_API_PG_OK' 'api reached postgres by name' || p=0
+  local P=tdvmm_webstack-postgres-1 R=tdvmm_webstack-redis-1 A=tdvmm_webstack-api-1
+  have "$log" 'TDVMM_STACK_UP' 'compose brought the stack up' || p=0
+  have "$log" "TDVMM_HC_HEALTHY container=$P" 'postgres reached healthy (ticker)' || p=0
+  have "$log" "TDVMM_HC_HEALTHY container=$R" 'redis reached healthy (ticker)' || p=0
+  have "$log" 'TDVMM_API_UP' 'api started (=> both service_healthy gates resolved)' || p=0
+  have "$log" 'TDVMM_API_REDIS_PING=PONG' 'api reached redis by name (PONG)' || p=0
+  have "$log" 'TDVMM_API_PG_OK' 'api reached postgres by name' || p=0
   # ordering: both backends Healthy before the api Started (compose stream).
   order_ok "$log" "postgres Healthy < api Started" \
     "\[stack\]\[up\].*Container $P Healthy" "\[stack\]\[up\].*Container $A Started" || p=0
@@ -115,23 +115,23 @@ gate_webstack() {
 
 gate_configpipeline() {
   local log="$1" p=1
-  have "$log" 'DVMM_STACK_UP' 'compose brought the stack up' || p=0
-  have "$log" 'DVMM_CONFIG_SEED=configpipeline-seed-v1' 'RW bind materialized (baked seed visible)' || p=0
-  have "$log" 'DVMM_CONFIG_WRITE_OK=generated-by-worker' 'RW bind writable (write + read back)' || p=0
-  have "$log" 'DVMM_STATE_WRITE_OK' 'named volume writable (worker published)' || p=0
+  have "$log" 'TDVMM_STACK_UP' 'compose brought the stack up' || p=0
+  have "$log" 'TDVMM_CONFIG_SEED=configpipeline-seed-v1' 'RW bind materialized (baked seed visible)' || p=0
+  have "$log" 'TDVMM_CONFIG_WRITE_OK=generated-by-worker' 'RW bind writable (write + read back)' || p=0
+  have "$log" 'TDVMM_STATE_WRITE_OK' 'named volume writable (worker published)' || p=0
   # cross-service: the sidecar read what the worker wrote via the SHARED volume.
-  have "$log" 'DVMM_SIDECAR_SHARED_OK latest=worker-iter-[0-9]+' 'named volume SHARED (sidecar read worker data)' || p=0
+  have "$log" 'TDVMM_SIDECAR_SHARED_OK latest=worker-iter-[0-9]+' 'named volume SHARED (sidecar read worker data)' || p=0
   return $((1 - p))
 }
 
 gate_svcchain() {
   local log="$1" p=1
-  local D=dvmm_svcchain-db-1 B=dvmm_svcchain-backend-1 F=dvmm_svcchain-frontend-1
-  have "$log" 'DVMM_STACK_UP' 'compose brought the stack up' || p=0
-  have "$log" "DVMM_HC_HEALTHY container=$D" 'db reached healthy (ticker)' || p=0
-  have "$log" 'DVMM_BACKEND_READY' 'backend connected to db + signalled readiness' || p=0
-  have "$log" "DVMM_HC_HEALTHY container=$B" 'backend reached healthy (ticker)' || p=0
-  have "$log" 'DVMM_FRONTEND_UP' 'frontend started (=> backend service_healthy resolved)' || p=0
+  local D=tdvmm_svcchain-db-1 B=tdvmm_svcchain-backend-1 F=tdvmm_svcchain-frontend-1
+  have "$log" 'TDVMM_STACK_UP' 'compose brought the stack up' || p=0
+  have "$log" "TDVMM_HC_HEALTHY container=$D" 'db reached healthy (ticker)' || p=0
+  have "$log" 'TDVMM_BACKEND_READY' 'backend connected to db + signalled readiness' || p=0
+  have "$log" "TDVMM_HC_HEALTHY container=$B" 'backend reached healthy (ticker)' || p=0
+  have "$log" 'TDVMM_FRONTEND_UP' 'frontend started (=> backend service_healthy resolved)' || p=0
   # 2-hop chain ordering (compose stream): db healthy -> backend started;
   # backend healthy -> frontend started.
   order_ok "$log" "db Healthy < backend Started" \
@@ -144,10 +144,10 @@ gate_svcchain() {
 
 gate_demo() {
   local log="$1" p=1
-  local P=dvmm_demo-postgres-1 R=dvmm_demo-redis-1 A=dvmm_demo-api-1
-  have "$log" 'DVMM_STACK_UP' 'compose brought the stack up' || p=0
-  have "$log" "DVMM_HC_HEALTHY container=$P" 'postgres reached healthy (ticker)' || p=0
-  have "$log" "DVMM_HC_HEALTHY container=$R" 'redis reached healthy (ticker)' || p=0
+  local P=tdvmm_demo-postgres-1 R=tdvmm_demo-redis-1 A=tdvmm_demo-api-1
+  have "$log" 'TDVMM_STACK_UP' 'compose brought the stack up' || p=0
+  have "$log" "TDVMM_HC_HEALTHY container=$P" 'postgres reached healthy (ticker)' || p=0
+  have "$log" "TDVMM_HC_HEALTHY container=$R" 'redis reached healthy (ticker)' || p=0
   have "$log" 'api gRPC OrderService listening' 'api started (=> both service_healthy gates resolved)' || p=0
   have "$log" 'hour [0-9]+: received [0-9]+ orders' 'client->api->postgres+redis gRPC roundtrip worked' || p=0
   have "$log" 'GET /stats  pg\+redis OK' 'api served the read-side gRPC (pg+redis)' || p=0
@@ -168,26 +168,26 @@ for stack in "${STACKS[@]}"; do
   echo " CORPUS STACK: $stack"
   echo "==================================================================="
   compose="$STACKS_DIR/$stack/compose.yml"
-  dvmm="$OUTDIR/${stack}.dvmm"
+  tdvmm="$OUTDIR/${stack}.tdvmm"
   if [ ! -f "$compose" ]; then echo "  FAIL: no compose.yml at $compose"; RESULT[$stack]="fail:no-compose"; overall=1; continue; fi
 
-  if [ "$BAKE" = "1" ] || [ ! -f "$dvmm" ]; then
-    echo "[corpus] baking $stack -> $dvmm ..."
-    if ! "$BIN" build "$compose" -o "$dvmm" >"$TMP/$stack.bake.log" 2>&1; then
+  if [ "$BAKE" = "1" ] || [ ! -f "$tdvmm" ]; then
+    echo "[corpus] baking $stack -> $tdvmm ..."
+    if ! "$BIN" build "$compose" -o "$tdvmm" >"$TMP/$stack.bake.log" 2>&1; then
       echo "  FAIL: bake error (tail):"; tail -20 "$TMP/$stack.bake.log" | sed 's/^/    /'
       RESULT[$stack]="fail:bake"; overall=1; continue
     fi
     echo "  baked OK: $(grep -E 'sha256:' "$TMP/$stack.bake.log" | tail -1 | sed 's/^ *//')"
   else
-    echo "[corpus] using existing artifact ($(basename "$dvmm")); set BAKE=1 to re-bake"
+    echo "[corpus] using existing artifact ($(basename "$tdvmm")); set BAKE=1 to re-bake"
   fi
-  [ -f "$dvmm" ] || { echo "  FAIL: artifact missing after bake"; RESULT[$stack]="fail:no-dvmm"; overall=1; continue; }
+  [ -f "$tdvmm" ] || { echo "  FAIL: artifact missing after bake"; RESULT[$stack]="fail:no-tdvmm"; overall=1; continue; }
 
   log="$TMP/$stack.log"; metrics="$TMP/$stack.metrics"
-  cmdline="console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable dvmm.stack=1 dvmm.hc_tick=$HC_TICK dvmm.interval=$INTERVAL dvmm.maxrows=$MAX_ROWS"
+  cmdline="console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable tdvmm.stack=1 tdvmm.hc_tick=$HC_TICK tdvmm.interval=$INTERVAL tdvmm.maxrows=$MAX_ROWS"
   echo "[corpus] boot: mem=${MEM}MiB ff=ON horizon=${MAX_VIRTUAL_TIME} hc_tick=${HC_TICK}s wall_timeout=${WALL_TIMEOUT}s"
   start=$(date +%s.%N)
-  timeout "$WALL_TIMEOUT" "$BIN" run "$dvmm" --mem "$MEM" --ff on \
+  timeout "$WALL_TIMEOUT" "$BIN" run "$tdvmm" --mem "$MEM" --ff on \
     --max-virtual-time "$MAX_VIRTUAL_TIME" --metrics-out "$metrics" --cmdline "$cmdline" \
     </dev/null >"$log" 2>&1
   rc=$?

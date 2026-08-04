@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# dvmm OP-1a acceptance gate: the .dvmm single-file artifact.
+# tdvmm OP-1a acceptance gate: the .tdvmm single-file artifact.
 #
 # Proves every OP-1a property WITHOUT re-baking (it packs the already-built boot
 # artifacts of each stack). For each stack it:
 #
-#   1. BIT-REPRODUCIBLE: pack the same inputs twice -> byte-identical .dvmm.
+#   1. BIT-REPRODUCIBLE: pack the same inputs twice -> byte-identical .tdvmm.
 #   2. INSPECT: prints valid manifest JSON, fast (manifest member only).
 #   3. VERIFY: passes on the good artifact (exit 0).
-#   4. RUN-FROM-ARTIFACT (FF): `dvmm run <stack>.dvmm` boots offline under FF,
+#   4. RUN-FROM-ARTIFACT (FF): `tdvmm run <stack>.tdvmm` boots offline under FF,
 #      rows ascend + cap, per-hop mean <= 500us (the VMM property).
 #   5. OFFLINE: the same run under `unshare -rn` (networking blocked) still works.
 #
@@ -15,7 +15,7 @@
 #   6. VERIFY catches a flipped byte (nonzero) and `run` refuses to boot it.
 #   7. OVERRIDE PRECEDENCE: baked run-defaults < CLI flags; the effective-config
 #      provenance line reflects it.
-#   8. RUN==BOOT: `dvmm run <stack>.dvmm` matches the raw `dvmm boot` path
+#   8. RUN==BOOT: `tdvmm run <stack>.tdvmm` matches the raw `tdvmm boot` path
 #      (same kernel/initramfs/cmdline) in cadence + per-hop gate.
 #
 # Exits 0 only if every gate passes.
@@ -27,12 +27,12 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-BIN="$ROOT/target/release/dvmm"
+BIN="$ROOT/target/release/tdvmm"
 KERNEL="$ROOT/guest/kernel/vmlinux-6.1.128"
 # Self-contained bake outputs: a gitignored, persistent test cache dir (NOT the
-# repo, NOT ~/.dvmm). The per-stack initramfs (needed by gate 8's raw boot) lands
+# repo, NOT ~/.tdvmm). The per-stack initramfs (needed by gate 8's raw boot) lands
 # in $CACHE/artifacts/; keeping the dir warm across runs makes re-bakes fast.
-CACHE="${DVMM_TEST_CACHE:-$ROOT/.dvmm-tmp/dvmm-cache}"; mkdir -p "$CACHE"
+CACHE="${TDVMM_TEST_CACHE:-$ROOT/.tdvmm-tmp/tdvmm-cache}"; mkdir -p "$CACHE"
 
 STACKS=("$@"); [ "${#STACKS[@]}" -eq 0 ] && STACKS=(insert-trim svcchain)
 MEM="${MEM:-3072}"
@@ -42,16 +42,16 @@ HORIZON="${HORIZON:-24s}"
 WALL_TIMEOUT="${WALL_TIMEOUT:-120}"
 GATE_HOP_US="${GATE_HOP_US:-500}"
 
-[ -x "$BIN" ] || { echo "[artifact] building dvmm..."; ( cd "$ROOT" && cargo build --release ) || exit 3; }
+[ -x "$BIN" ] || { echo "[artifact] building tdvmm..."; ( cd "$ROOT" && cargo build --release ) || exit 3; }
 [ -f "$KERNEL" ] || { echo "[artifact] kernel missing: $KERNEL"; exit 3; }
 
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
-CMDLINE="console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable dvmm.stack=1 dvmm.interval=$INTERVAL dvmm.maxrows=$MAX_ROWS dvmm.hc_tick=2"
+CMDLINE="console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable tdvmm.stack=1 tdvmm.interval=$INTERVAL tdvmm.maxrows=$MAX_ROWS tdvmm.hc_tick=2"
 
 # ascending unique prefix of the row sequence, e.g. "1 2 3 4 5".
-asc_prefix() { grep -oE 'DVMM_ROWCOUNT=[0-9]+' "$1" | cut -d= -f2 | awk '!seen[$0]++'; }
+asc_prefix() { grep -oE 'TDVMM_ROWCOUNT=[0-9]+' "$1" | cut -d= -f2 | awk '!seen[$0]++'; }
 rows_ok() {  # <log> : started low, non-decreasing, capped at MAX_ROWS, never over
-  grep -oE 'DVMM_ROWCOUNT=[0-9]+' "$1" | cut -d= -f2 | awk -v cap="$MAX_ROWS" '
+  grep -oE 'TDVMM_ROWCOUNT=[0-9]+' "$1" | cut -d= -f2 | awk -v cap="$MAX_ROWS" '
     { v=$1+0; n++;
       if (n==1 && v<=2) low=1; if (n>1 && v<prev) nondec=0; if (v>mx) mx=v;
       if (v>cap) over=1; prev=v }
@@ -70,21 +70,21 @@ for stack in "${STACKS[@]}"; do
   if [ ! -f "$compose" ]; then
     echo "  SKIP: $stack has no compose.yml at $compose"; continue
   fi
-  # `dvmm build --cache-dir "$CACHE"` writes the per-stack initramfs here (gate 8's raw boot).
+  # `tdvmm build --cache-dir "$CACHE"` writes the per-stack initramfs here (gate 8's raw boot).
   initrd="$CACHE/bake/initramfs-alpine-${stack}.cpio.gz"
-  A="$TMP/$stack-A.dvmm"; B="$TMP/$stack-B.dvmm"
+  A="$TMP/$stack-A.tdvmm"; B="$TMP/$stack-B.tdvmm"
   ok=1
 
-  # (1) bit-reproducible: `dvmm build` the SAME compose twice -> byte-identical .dvmm
+  # (1) bit-reproducible: `tdvmm build` the SAME compose twice -> byte-identical .tdvmm
   #     (OP-1b folds the whole bake into the binary; the initramfs IS now bit-repro).
-  #     Bake to the canonical <stack>.dvmm basename (so the committed stack.lock's
+  #     Bake to the canonical <stack>.tdvmm basename (so the committed stack.lock's
   #     recorded artifact filename is unchanged), then copy each result aside to compare.
-  "$BIN" build "$compose" -o "$TMP/$stack.dvmm" --cache-dir "$CACHE" >/dev/null 2>"$TMP/packA.err" || { echo "  FAIL: build A"; tail -5 "$TMP/packA.err"; overall=1; continue; }
-  cp "$TMP/$stack.dvmm" "$A"
-  "$BIN" build "$compose" -o "$TMP/$stack.dvmm" --cache-dir "$CACHE" >/dev/null 2>"$TMP/packB.err" || { echo "  FAIL: build B"; tail -5 "$TMP/packB.err"; overall=1; continue; }
-  cp "$TMP/$stack.dvmm" "$B"
+  "$BIN" build "$compose" -o "$TMP/$stack.tdvmm" --cache-dir "$CACHE" >/dev/null 2>"$TMP/packA.err" || { echo "  FAIL: build A"; tail -5 "$TMP/packA.err"; overall=1; continue; }
+  cp "$TMP/$stack.tdvmm" "$A"
+  "$BIN" build "$compose" -o "$TMP/$stack.tdvmm" --cache-dir "$CACHE" >/dev/null 2>"$TMP/packB.err" || { echo "  FAIL: build B"; tail -5 "$TMP/packB.err"; overall=1; continue; }
+  cp "$TMP/$stack.tdvmm" "$B"
   shA="$(sha256sum "$A" | awk '{print $1}')"; shB="$(sha256sum "$B" | awk '{print $1}')"
-  if [ "$shA" = "$shB" ]; then echo "  (1) BIT-REPRODUCIBLE OK: two builds -> identical .dvmm ($shA)"; else echo "  (1) FAIL: .dvmm differs ($shA != $shB)"; ok=0; fi
+  if [ "$shA" = "$shB" ]; then echo "  (1) BIT-REPRODUCIBLE OK: two builds -> identical .tdvmm ($shA)"; else echo "  (1) FAIL: .tdvmm differs ($shA != $shB)"; ok=0; fi
 
   # (2) inspect fast + valid JSON
   t0=$(date +%s.%N)
@@ -123,7 +123,7 @@ for stack in "${STACKS[@]}"; do
     first=0
 
     # (6) verify catches corruption + run refuses
-    C="$TMP/$stack-corrupt.dvmm"; cp "$A" "$C"
+    C="$TMP/$stack-corrupt.tdvmm"; cp "$A" "$C"
     python3 -c "
 import os
 p='$C'; sz=os.path.getsize(p); off=sz//2

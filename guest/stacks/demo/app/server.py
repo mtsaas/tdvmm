@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""dvmm demo stack — the api service (a real gRPC server).
+"""tdvmm demo stack — the api service (a real gRPC server).
 
 A genuine, interpreted microservice: it serves the OrderService gRPC contract
 (orders.proto) over the compose network and talks to two real backends by name —
@@ -17,7 +17,7 @@ reconnects transparently. Redis is incremented only AFTER the Postgres write
 commits, so the two stores stay consistent across a fault.
 
 Fast-forward friendly: an idle gRPC server parks on its sockets, so the guest
-HLTs between the client's once-per-virtual-hour calls and dvmm collapses the gap.
+HLTs between the client's once-per-virtual-hour calls and tdvmm collapses the gap.
 """
 import os
 import sys

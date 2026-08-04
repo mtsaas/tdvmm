@@ -1,4 +1,4 @@
-# dvmm e2e test manifest (goal-3a).
+# tdvmm e2e test manifest (goal-3a).
 #
 # The single source of truth for the tiered runner (scripts/test.sh). Each
 # [[test]] declares:
@@ -11,7 +11,7 @@
 #              perf-exclusive  -> wall-clock / per-hop assertions (load-sensitive)
 #                                 -> NEVER in the pool; run SERIALIZED in the quiet
 #                                 section after the pool drains.
-#              needs-bake      -> runs `dvmm build`, or writes a shared per-stack
+#              needs-bake      -> runs `tdvmm build`, or writes a shared per-stack
 #                                 artifact -> serialized (no shared-output races).
 #   timeout  wall-clock seconds; the runner wraps each test in `timeout`.
 #   requires (optional) space-separated repo-relative paths that must exist, else
@@ -46,9 +46,9 @@ name = "agent-deps"
 tier = "T1"
 tags = ["parallel-safe"]
 timeout = 90
-requires = "dvmm-agent/deps.allow"
+requires = "tdvmm-agent/deps.allow"
 cmd = "scripts/agent_deps_check.sh"
-desc = "FLOOR(agent minimalism): cargo tree -p dvmm-agent == committed allowlist (no heavy deps)"
+desc = "FLOOR(agent minimalism): cargo tree -p tdvmm-agent == committed allowlist (no heavy deps)"
 
 [[test]]
 name = "smoke-busybox"
@@ -57,7 +57,7 @@ tags = ["parallel-safe"]
 timeout = 90
 requires = "guest/initramfs/initramfs.cpio.gz guest/kernel/vmlinux-6.1.128"
 cmd = "scripts/smoke_test.sh 45"
-desc = "FLOOR(boot): busybox guest boots to the DVMM_BOOT_OK serial marker"
+desc = "FLOOR(boot): busybox guest boots to the TDVMM_BOOT_OK serial marker"
 
 [[test]]
 name = "interactive-exit"
@@ -80,11 +80,11 @@ desc = "FLOOR(bake-rejects): rejection corpus via static --validate-only (no VM/
 [[test]]
 name = "smoke-container"
 tier = "T1"
-tags = ["parallel-safe"]
-timeout = 180
-requires = "guest/initramfs-alpine/initramfs-alpine.cpio.gz guest/kernel/vmlinux-6.1.128"
+tags = ["needs-bake"]
+timeout = 300
+requires = "guest/stacks/spinner/compose.yml guest/kernel/vmlinux-6.1.128"
 cmd = "scripts/smoke_test_container.sh 120"
-desc = "cached base guest boots; podman runs a digest-pinned image offline"
+desc = "bake+run the minimal spinner stack; guest creates a podman bridge network and runs a digest-pinned image offline"
 
 # ============================ T2 — merge ===================================
 
@@ -136,18 +136,18 @@ name = "agent-size"
 tier = "T3"
 tags = ["needs-bake"]
 timeout = 300
-requires = "dvmm-agent/Cargo.toml dvmm-agent/images.lock"
+requires = "tdvmm-agent/Cargo.toml tdvmm-agent/images.lock"
 cmd = "scripts/agent_size_check.sh"
-desc = "FLOOR(agent minimalism): stripped musl dvmm-agent <= 3 MiB (pinned builder)"
+desc = "FLOOR(agent minimalism): stripped musl tdvmm-agent <= 3 MiB (pinned builder)"
 
 [[test]]
 name = "agent-repro"
 tier = "T3"
 tags = ["needs-bake"]
 timeout = 400
-requires = "dvmm-agent/Cargo.toml dvmm-agent/images.lock"
+requires = "tdvmm-agent/Cargo.toml tdvmm-agent/images.lock"
 cmd = "scripts/agent_double_build.sh"
-desc = "FLOOR(agent repro): two fresh-container builds of dvmm-agent are byte-identical"
+desc = "FLOOR(agent repro): two fresh-container builds of tdvmm-agent are byte-identical"
 
 [[test]]
 name = "corpus-full"
@@ -183,7 +183,7 @@ tags = ["perf-exclusive", "needs-bake"]
 timeout = 900
 requires = ""
 cmd = "scripts/artifact_test.sh insert-trim svcchain"
-desc = "FLOOR(artifact repro): .dvmm bit-identical, inspect/verify, run offline, run==boot"
+desc = "FLOOR(artifact repro): .tdvmm bit-identical, inspect/verify, run offline, run==boot"
 
 [[test]]
 name = "compare-stacks"
@@ -210,7 +210,7 @@ tags = ["needs-bake"]
 timeout = 500
 requires = ""
 cmd = "scripts/test_scenario.sh"
-desc = "TEST-1a: dvmm test verdict/exit-code contract (pass / wrong->1 / infra->2)"
+desc = "TEST-1a: tdvmm test verdict/exit-code contract (pass / wrong->1 / infra->2)"
 
 [[test]]
 name = "demo-scenario"
@@ -218,7 +218,7 @@ tier = "T3"
 tags = ["needs-bake"]
 timeout = 900
 requires = ""
-cmd = "mkdir -p .dvmm-test-results && ./target/release/dvmm build guest/stacks/demo/compose.yml -o .dvmm-test-results/demo.dvmm && ./target/release/dvmm test .dvmm-test-results/demo.dvmm --scenario guest/stacks/demo/demo.yml --wall-timeout 800 --logs-dir /tmp/demo-logs"
+cmd = "mkdir -p .tdvmm-test-results && ./target/release/tdvmm build guest/stacks/demo/compose.yml -o .tdvmm-test-results/demo.tdvmm && ./target/release/tdvmm test .tdvmm-test-results/demo.tdvmm --scenario guest/stacks/demo/demo.yml --wall-timeout 800 --logs-dir /tmp/demo-logs"
 desc = "flagship demo: full virtual day of the gRPC stack + fault/recovery -> PASS, per-service logs"
 
 [[test]]

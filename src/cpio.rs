@@ -1,9 +1,9 @@
-//! Deterministic newc (SVR4) cpio emitter for `dvmm build` (OP-1b).
+//! Deterministic newc (SVR4) cpio emitter for `tdvmm build` (OP-1b).
 //!
-//! Replaces the retired shell tail of `build_rootfs.sh`
+//! Replaces the removed shell tail of the bake pipeline
 //! (`gen_init_cpio` + `cpio --create --format=newc --reproducible` +
 //! `zero_cpio_inodes.py`), emitting the **combined initramfs cpio directly from
-//! Rust** with the EXACT same bytes so the initramfs — and thus the `.dvmm` — is
+//! Rust** with the EXACT same bytes so the initramfs — and thus the `.tdvmm` — is
 //! byte-identical to the old producer.
 //!
 //! The archive is two concatenated newc segments (the kernel initramfs unpacker
@@ -11,7 +11,7 @@
 //!
 //!   1. **device nodes** — `/dev`, `/dev/console`, `/dev/null`, `/dev/ttyS0`,
 //!      `/dev/ttyS1` + a trailer. Matches `gen_init_cpio -t <epoch>` with every
-//!      `c_ino` zeroed by `zero_cpio_inodes.py` (fixed fake device `3:1`).
+//!      `c_ino` zeroed (as the former `zero_cpio_inodes.py` did; fixed fake device `3:1`).
 //!   2. **the rootfs tree** — every path except `dev`/`dev/*`, in `LC_ALL=C`
 //!      byte-sorted order, with `--owner=0:0` (uid/gid 0), device numbers zeroed,
 //!      all mtimes pinned to the guest epoch, and `c_ino` **renumbered by
@@ -30,7 +30,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 /// The fixed guest wall-clock epoch (2026-08-01T00:00:00Z) — every archived
-/// entry's mtime, matching `build_rootfs.sh`'s `touch -h -d @$BUILD_EPOCH`.
+/// entry's mtime, matching the former shell builder's `touch -h -d @$BUILD_EPOCH`.
 pub const BUILD_EPOCH: u32 = 1785542400;
 
 // libc file-type bits (S_IFMT masking).
@@ -345,7 +345,7 @@ mod cpio_tests {
 
     #[test]
     fn rootfs_segment_matches_gnu_cpio_reproducible() {
-        let tmp = std::env::temp_dir().join(format!("dvmm-cpio-test-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("tdvmm-cpio-test-{}", std::process::id()));
         let root = tmp.join("root");
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(root.join("bin")).unwrap();

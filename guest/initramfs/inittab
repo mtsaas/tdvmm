@@ -1,4 +1,4 @@
-# busybox init table for the dvmm test guest.
+# busybox init table for the tdvmm test guest.
 #
 # Why busybox init (not a bare `exec sh`): a plain shell as PID 1 dies on `exit`
 # (kernel panic "Attempted to kill init!"), and it ignores the SIGUSR2/SIGTERM

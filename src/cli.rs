@@ -1,4 +1,4 @@
-//! CLI surface: the clap arg structs for every `dvmm` subcommand, plus
+//! CLI surface: the clap arg structs for every `tdvmm` subcommand, plus
 //! `EffectiveConfig` — the resolved run configuration (baked < scenario < flag)
 //! every boot path hands to the vCPU loop.
 
@@ -9,24 +9,24 @@ use crate::{DEFAULT_CMDLINE, DEFAULT_MAX_JUMP_SECS, DEFAULT_MEM_MIB};
 
 #[derive(Parser)]
 #[command(
-    name = "dvmm",
-    about = "fast-forward KVM VMM — run/inspect/verify a .dvmm stack, or boot raw artifacts",
+    name = "tdvmm",
+    about = "fast-forward KVM VMM — run/inspect/verify a .tdvmm stack, or boot raw artifacts",
     long_about = "A single-vCPU, fast-forwardable KVM VMM. `run` boots a self-contained \
-                  .dvmm stack artifact (baked defaults, overridable by flags); `boot` is \
+                  .tdvmm stack artifact (baked defaults, overridable by flags); `boot` is \
                   the low-level raw kernel+initramfs verb for VMM development.\n\n\
                   Durations (--max-virtual-time): a bare number is seconds, or use a \
                   suffix (ms, s, m, h), e.g. 500ms, 30s, 5m, 2h.",
     after_help = "Examples:\n  \
-                  dvmm build guest/stacks/insert-trim/compose.yml\n  \
-                  dvmm ls\n  \
-                  dvmm run insert-trim\n  \
-                  dvmm test insert-trim --scenario guest/stacks/insert-trim/insert-trim.yml",
+                  tdvmm build guest/stacks/insert-trim/compose.yml\n  \
+                  tdvmm ls\n  \
+                  tdvmm run insert-trim\n  \
+                  tdvmm test insert-trim --scenario guest/stacks/insert-trim/insert-trim.yml",
     version
 )]
 pub(crate) struct Cli {
     #[command(subcommand)]
     pub(crate) cmd: Cmd,
-    /// Disable the `dvmm build` progress spinner; emit plain `== step ==`
+    /// Disable the `tdvmm build` progress spinner; emit plain `== step ==`
     /// lines (also forced by a non-terminal stderr, `CI`, or `TERM=dumb`). No
     /// effect on any other subcommand.
     #[arg(long, global = true)]
@@ -35,10 +35,10 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand)]
 pub(crate) enum Cmd {
-    /// Bake a compose stack into a self-contained .dvmm (host tool: podman + network).
-    #[command(after_help = "Example:\n  dvmm build guest/stacks/insert-trim/compose.yml -o insert-trim.dvmm")]
+    /// Bake a compose stack into a self-contained .tdvmm (host tool: podman + network).
+    #[command(after_help = "Example:\n  tdvmm build guest/stacks/insert-trim/compose.yml -o insert-trim.tdvmm")]
     Build(BuildCliArgs),
-    /// Build the reproducible static-musl dvmm-agent standalone (pinned builder
+    /// Build the reproducible static-musl tdvmm-agent standalone (pinned builder
     /// container). Prints `<sha256>  <path>`. Used by the size / double-build gates.
     #[command(name = "build-agent")]
     BuildAgent(BuildAgentArgs),
@@ -49,30 +49,30 @@ pub(crate) enum Cmd {
     BuildKernel(BuildKernelArgs),
     /// Boot a raw kernel + initramfs (the low-level VMM-dev / smoke verb).
     Boot(BootArgs),
-    /// Run a .dvmm stack artifact: apply its baked run-defaults, then boot (offline).
-    #[command(after_help = "Example:\n  dvmm run insert-trim --ff on   (a store name, or a path to a .dvmm)")]
+    /// Run a .tdvmm stack artifact: apply its baked run-defaults, then boot (offline).
+    #[command(after_help = "Example:\n  tdvmm run insert-trim --ff on   (a store name, or a path to a .tdvmm)")]
     Run(RunArgs),
-    /// Test a .dvmm stack against a scenario: drive virtual time, assert, verdict.
+    /// Test a .tdvmm stack against a scenario: drive virtual time, assert, verdict.
     #[command(
-        long_about = "Test a .dvmm stack against a scenario: drive virtual time, assert, \
-                      verdict.\n\nExit codes (the shared dvmm 0-3 contract; `test` itself only \
+        long_about = "Test a .tdvmm stack against a scenario: drive virtual time, assert, \
+                      verdict.\n\nExit codes (the shared tdvmm 0-3 contract; `test` itself only \
                       ever produces 0/1/2 — 3 is `build`/`boot`/`run`'s REJECTED/horizon code):\n  \
                       0  PASS — every assertion held\n  \
                       1  FAIL — a scenario assertion failed\n  \
                       2  ERROR — test infrastructure fault: bad/rejected scenario (including \
                       static validation before boot), agent unreachable, wall-clock timeout, ...",
-        after_help = "Example:\n  dvmm test insert-trim.dvmm --scenario guest/stacks/insert-trim/insert-trim.yml"
+        after_help = "Example:\n  tdvmm test insert-trim.tdvmm --scenario guest/stacks/insert-trim/insert-trim.yml"
     )]
     Test(TestArgs),
-    /// Print a .dvmm artifact's manifest.json (reads ONLY the manifest member).
+    /// Print a .tdvmm artifact's manifest.json (reads ONLY the manifest member).
     Inspect(ArtifactArg),
-    /// Verify a .dvmm: recompute member hashes vs the manifest; print its sha256 identity.
+    /// Verify a .tdvmm: recompute member hashes vs the manifest; print its sha256 identity.
     Verify(ArtifactArg),
-    /// List the .dvmm artifacts in the local store (name, size, modified).
+    /// List the .tdvmm artifacts in the local store (name, size, modified).
     Ls(LsArgs),
     /// Print the effective guest clock/timer CPUID profile (the manifest artifact).
     DumpCpuid,
-    /// [internal] Build the seed store inside `podman unshare` (used by `dvmm build`).
+    /// [internal] Build the seed store inside `podman unshare` (used by `tdvmm build`).
     #[command(name = "__seed-build", hide = true)]
     SeedBuild {
         #[arg(long, value_name = "PATH")]
@@ -86,14 +86,14 @@ pub(crate) enum Cmd {
     },
 }
 
-/// `dvmm build` args (clap). Mirrors bake-stack.sh's flags.
+/// `tdvmm build` args (clap). Mirrors bake-stack.sh's flags.
 #[derive(Args)]
 pub(crate) struct BuildCliArgs {
     /// Path to the compose.yml to bake.
     #[arg(value_name = "compose.yml")]
     pub(crate) compose: String,
-    /// Output .dvmm path (default <cache-dir>/artifacts/<stack>.dvmm, where
-    /// <cache-dir> is --cache-dir > $DVMM_CACHE_DIR > $HOME/.dvmm).
+    /// Output .tdvmm path (default <cache-dir>/artifacts/<stack>.tdvmm, where
+    /// <cache-dir> is --cache-dir > $TDVMM_CACHE_DIR > $HOME/.tdvmm).
     #[arg(short, long, value_name = "PATH")]
     pub(crate) out: Option<String>,
     /// Stack name (default: the compose file's parent directory name).
@@ -117,28 +117,28 @@ pub(crate) struct BuildCliArgs {
     #[arg(long)]
     pub(crate) no_cache: bool,
     /// Cache directory (holds the bake cache, the shared base-runtime segment, and
-    /// the fetched/built kernel). Precedence: this flag > $DVMM_CACHE_DIR >
-    /// $HOME/.dvmm. The resolved dir is logged at build start.
+    /// the fetched/built kernel). Precedence: this flag > $TDVMM_CACHE_DIR >
+    /// $HOME/.tdvmm. The resolved dir is logged at build start.
     #[arg(long, value_name = "PATH")]
     pub(crate) cache_dir: Option<String>,
 }
 
-/// `dvmm build-agent` args.
+/// `tdvmm build-agent` args.
 #[derive(Args)]
 pub(crate) struct BuildAgentArgs {
     /// Output path for the built static-musl agent binary.
-    #[arg(short, long, value_name = "PATH", default_value = "dvmm-agent.bin")]
+    #[arg(short, long, value_name = "PATH", default_value = "tdvmm-agent.bin")]
     pub(crate) out: String,
 }
 
-/// `dvmm build-kernel` args.
+/// `tdvmm build-kernel` args.
 #[derive(Args)]
 pub(crate) struct BuildKernelArgs {
     /// Output path for the vmlinux (default: guest/kernel/vmlinux-<version>).
     #[arg(short, long, value_name = "PATH")]
     pub(crate) out: Option<String>,
     /// Cache directory (kernel source tarball + built kernel land here).
-    /// Precedence: this flag > $DVMM_CACHE_DIR > $HOME/.dvmm.
+    /// Precedence: this flag > $TDVMM_CACHE_DIR > $HOME/.tdvmm.
     #[arg(long, value_name = "PATH")]
     pub(crate) cache_dir: Option<String>,
     /// Force the reproducible container build even if a release asset is available
@@ -191,7 +191,7 @@ pub(crate) struct BootArgs {
 
 #[derive(Args)]
 pub(crate) struct RunArgs {
-    /// A store name (e.g. `tigerbeetle`) or a path to a .dvmm artifact.
+    /// A store name (e.g. `tigerbeetle`) or a path to a .tdvmm artifact.
     #[arg(value_name = "stack")]
     pub(crate) artifact: String,
     /// Skip the default-ON member-hash verification on load.
@@ -207,7 +207,7 @@ pub(crate) struct RunArgs {
 
 #[derive(Args)]
 pub(crate) struct TestArgs {
-    /// A store name (e.g. `tigerbeetle`) or a path to a .dvmm artifact.
+    /// A store name (e.g. `tigerbeetle`) or a path to a .tdvmm artifact.
     #[arg(value_name = "stack")]
     pub(crate) artifact: String,
     /// The scenario YAML (steps + assertions).
@@ -236,7 +236,7 @@ pub(crate) struct TestArgs {
 
 #[derive(Args)]
 pub(crate) struct ArtifactArg {
-    /// A store name (e.g. `tigerbeetle`) or a path to a .dvmm artifact.
+    /// A store name (e.g. `tigerbeetle`) or a path to a .tdvmm artifact.
     #[arg(value_name = "stack")]
     pub(crate) artifact: String,
 }
@@ -278,13 +278,13 @@ pub(crate) struct EffectiveConfig {
 }
 
 impl EffectiveConfig {
-    /// Resolve for `dvmm boot`: no baked defaults; each knob is a flag override of
+    /// Resolve for `tdvmm boot`: no baked defaults; each knob is a flag override of
     /// the binary default.
     pub(crate) fn from_boot(f: &CommonRunFlags) -> Result<EffectiveConfig, Box<dyn std::error::Error>> {
         Self::resolve(f, None, None)
     }
 
-    /// Resolve for `dvmm run`: the artifact's baked run-defaults, each overridable
+    /// Resolve for `tdvmm run`: the artifact's baked run-defaults, each overridable
     /// by the corresponding CLI flag (baked < flag).
     pub(crate) fn from_run(
         f: &CommonRunFlags,
@@ -293,7 +293,7 @@ impl EffectiveConfig {
         Self::resolve(f, Some(baked), None)
     }
 
-    /// Resolve for `dvmm test`: baked run-defaults, overridable by the scenario's
+    /// Resolve for `tdvmm test`: baked run-defaults, overridable by the scenario's
     /// `run:` block, overridable by CLI flags. Precedence: baked < scenario < flag.
     pub(crate) fn from_test(
         f: &CommonRunFlags,
@@ -363,7 +363,7 @@ impl EffectiveConfig {
         prov.push(format!("max-jump-secs={max_jump_secs} ({mj_src})"));
         // The control-channel wire schema (Fable §4): the effective-config
         // preamble records the proto version so a run log is self-describing.
-        prov.push(format!("proto-schema={} (built-in)", dvmm_proto::SCHEMA));
+        prov.push(format!("proto-schema={} (built-in)", tdvmm_proto::SCHEMA));
 
         Ok(EffectiveConfig {
             mem_mib,

@@ -1,6 +1,6 @@
-//! `dvmm build` orchestrator — resolves inputs, drives the bake cache, images,
+//! `tdvmm build` orchestrator — resolves inputs, drives the bake cache, images,
 //! seed store, compose.lock, base-runtime + initramfs assembly, stack.lock, and
-//! the `.dvmm` pack, then populates the cache + writes side diagnostics. The
+//! the `.tdvmm` pack, then populates the cache + writes side diagnostics. The
 //! byte-identity acceptance lives here: every step mirrors the retired scripts.
 
 use std::collections::HashMap;
@@ -17,10 +17,10 @@ use super::fsops::copy_tree;
 use super::images::{bake_one, build_one, squash_base_name, ImgRecord};
 use super::initramfs::AssembleConfig;
 use super::kernel::ensure_kernel;
-use super::pack::pack_dvmm;
+use super::pack::pack_tdvmm;
 use super::pins::{collect_builder_pins, fetch_verify, read_compose_lock, read_rootfs_builder_pin};
 use super::seed::{SeedConfig, SeedSquash};
-use super::stack_lock::{append_stack_lock_dvmm, write_stack_lock};
+use super::stack_lock::{append_stack_lock_tdvmm, write_stack_lock};
 use super::util::{self_here, sha256_file_hex, sweep_stale_scratch, utc_now_iso, ScratchDir};
 use super::ux::{capture, run, Ux};
 use super::{
@@ -43,13 +43,13 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
         .name
         .clone()
         .unwrap_or_else(|| compose_dir.file_name().unwrap().to_string_lossy().into_owned());
-    let project = format!("dvmm_{stack_name}");
+    let project = format!("tdvmm_{stack_name}");
 
     // --- parse + validate (the loud static gate) ---
     let doc_str = std::fs::read_to_string(&compose_path)?;
     let doc: serde_yaml::Value = serde_yaml::from_str(&doc_str)
         .map_err(|e| {
-            eprintln!("{}: could not parse {}: {e}", "DVMM_BAKE_ERROR", compose_path.display());
+            eprintln!("{}: could not parse {}: {e}", "TDVMM_BAKE_ERROR", compose_path.display());
             std::process::exit(2);
         })
         .unwrap();
@@ -59,7 +59,7 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
             if e.exit_code == 3 {
                 die_reject(&e.message);
             } else {
-                eprintln!("DVMM_BAKE_ERROR: {}", e.message);
+                eprintln!("TDVMM_BAKE_ERROR: {}", e.message);
                 std::process::exit(2);
             }
         }
@@ -109,11 +109,11 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     let mut diag = String::new();
 
     ux.progress.step(1, TOTAL_STEPS, "resolve inputs");
-    ux.progress.detail(format!("== dvmm build: stack={stack_name} project={project} mem={mem_mib}MiB =="));
+    ux.progress.detail(format!("== tdvmm build: stack={stack_name} project={project} mem={mem_mib}MiB =="));
     ux.progress.detail(format!("   compose: {}", compose_path.display()));
     diag.push_str(&format!("compose_path: {}\n", compose_path.display()));
 
-    // --- cache dir (Fable Part A): --cache-dir > $DVMM_CACHE_DIR > $HOME/.dvmm ---
+    // --- cache dir (Fable Part A): --cache-dir > $TDVMM_CACHE_DIR > $HOME/.tdvmm ---
     let (cache_dir, cache_src) = resolve_cache_dir(args.cache_dir.as_deref());
     ux.progress.detail(format!("   cache-dir: {} (source: {cache_src})", cache_dir.display()));
     diag.push_str(&format!("cache_dir: {} (source: {cache_src})\n", cache_dir.display()));
@@ -139,19 +139,19 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     // regardless of where they land.
     //
     // DEFAULT outputs land under the resolved cache root's `artifacts/` dir (NOT
-    // the source tree): an installed `dvmm` must not write build outputs into the
-    // repo. `-o <path>` still fully overrides the `.dvmm` destination. The
+    // the source tree): an installed `tdvmm` must not write build outputs into the
+    // repo. `-o <path>` still fully overrides the `.tdvmm` destination. The
     // intermediate cpio is build debris, not a deliverable, so it lands under
-    // `bake/` (beside the content-hash cache) — keeping `artifacts/` all `.dvmm`.
+    // `bake/` (beside the content-hash cache) — keeping `artifacts/` all `.tdvmm`.
     // Its basename is unchanged and stack.lock records only the basename, so the
-    // `.dvmm` bytes stay byte-identical.
+    // `.tdvmm` bytes stay byte-identical.
     let artifacts_dir = cache_dir.join("artifacts");
     std::fs::create_dir_all(&artifacts_dir)?;
     let bake_out_dir = cache_dir.join("bake");
     std::fs::create_dir_all(&bake_out_dir)?;
-    let out_dvmm = match &args.out {
+    let out_tdvmm = match &args.out {
         Some(o) => PathBuf::from(o),
-        None => artifacts_dir.join(format!("{stack_name}.dvmm")),
+        None => artifacts_dir.join(format!("{stack_name}.tdvmm")),
     };
     let out_initramfs = bake_out_dir.join(format!("initramfs-alpine-{stack_name}.cpio.gz"));
     let committed_lock = here.join("stacks").join(&stack_name).join("compose.lock.yml");
@@ -163,9 +163,9 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     // excluding this bake's own committed outputs), the kernel, the agent source,
     // the guest overlay tree, the pinned compose engine, the DECLARED builder-image
     // digests (Fable Part B — replacing the host-probed podman version, which is
-    // gone), the dvmm binary itself (all compiled-in pins + bake logic), and the
-    // sizing knobs. `dvmm build` is deterministic (artifact_test gate 1), so a hit
-    // reusing the prior `.dvmm` is byte-identical to a fresh bake.
+    // gone), the tdvmm binary itself (all compiled-in pins + bake logic), and the
+    // sizing knobs. `tdvmm build` is deterministic (artifact_test gate 1), so a hit
+    // reusing the prior `.tdvmm` is byte-identical to a fresh bake.
     ux.progress.step(2, TOTAL_STEPS, "bake cache");
     let cache = match compute_cache_key(
         &self_exe, &here, &alpine_dir, &compose_dir, &stack_name, mem_mib, working_set_mib,
@@ -184,16 +184,16 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
             diag.push_str("bake_cache_status: HIT (reused)\n");
             ux.progress.detail(format!("== BAKE CACHE HIT ==  key={}", &c.key[..16]));
             ux.progress.detail(format!("   reusing baked artifacts (skipped pull/squash/assemble): {}", c.dir.display()));
-            match cache_restore(c, &out_dvmm, &out_initramfs, &committed_lock, &stack_lock_path) {
-                Ok(dvmm_sha) => {
-                    ux.progress.detail(format!("   .dvmm:     {} (sha256 {dvmm_sha})", out_dvmm.display()));
-                    let size = std::fs::metadata(&out_dvmm).map(|m| m.len()).unwrap_or(0);
-                    ux.progress.print_summary(&out_dvmm, &dvmm_sha, size, progress.elapsed(), None);
+            match cache_restore(c, &out_tdvmm, &out_initramfs, &committed_lock, &stack_lock_path) {
+                Ok(tdvmm_sha) => {
+                    ux.progress.detail(format!("   .tdvmm:     {} (sha256 {tdvmm_sha})", out_tdvmm.display()));
+                    let size = std::fs::metadata(&out_tdvmm).map(|m| m.len()).unwrap_or(0);
+                    ux.progress.print_summary(&out_tdvmm, &tdvmm_sha, size, progress.elapsed(), None);
                     progress.finish();
-                    // stdout: the artifact identity line (parity with the old pack-dvmm.sh) —
+                    // stdout: the artifact identity line (parity with the old pack-tdvmm.sh) —
                     // `suspend` just runs the closure directly once the bar is finished; kept
                     // for symmetry with the other stdout site below.
-                    ux.progress.suspend(|| println!("{dvmm_sha}  {}", out_dvmm.display()));
+                    ux.progress.suspend(|| println!("{tdvmm_sha}  {}", out_tdvmm.display()));
                     return Ok(0);
                 }
                 Err(e) => {
@@ -225,7 +225,7 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     // Host-probed engine version — Fable guardrail §3: it must NOT enter the hashed
     // artifact bytes OR the cache key (it breaks cross-host byte-identity). It is
     // captured for DEBUGGING ONLY and written to a side diagnostics file under the
-    // (disposable) cache dir — never into the .dvmm, the manifest, or stack.lock.
+    // (disposable) cache dir — never into the .tdvmm, the manifest, or stack.lock.
     let host_podman_version = capture(engine::command().arg("--version"))
         .ok()
         .and_then(|s| s.split_whitespace().nth(2).map(|v| v.to_string()))
@@ -335,7 +335,7 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     for (k, pin) in &seedpins {
         digests.insert(k.clone(), pin.clone());
     }
-    let binds_base = "/var/lib/dvmm-stack/binds";
+    let binds_base = "/var/lib/tdvmm-stack/binds";
     let lock = compose::emit_lock(&doc, &compose_path, &digests, binds_base, &project)
         .map_err(|e| e.message)?;
     let lock_path = work.join("compose.lock.yml");
@@ -369,20 +369,20 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
         ux.progress.println(format!("{}: {mem_mib} MiB exceeds the {VMM_MAX_MEM_MIB} MiB (1 TiB) sanity cap — did you pass bytes instead of MiB?", compose::WARN));
     }
 
-    // --- 6. assemble the per-stack initramfs (build_rootfs, stack mode) ---
+    // --- 6. assemble the per-stack initramfs ---
     ux.progress.step(6, TOTAL_STEPS, "assemble initramfs");
     ux.progress.detail("== assemble initramfs (Rust rootfs + cpio) ==");
     // (out_initramfs computed early, above, for the cache path)
 
-    // build the dvmm-agent (static musl, reproducible) in the pinned builder
+    // build the tdvmm-agent (static musl, reproducible) in the pinned builder
     // container, before the unshare. Returns the embedded build hash (the compat
     // oracle reported by ping/hello); its file sha256 goes in the ledger + anchors.
-    let agent_bin = work.join("dvmm-agent");
+    let agent_bin = work.join("tdvmm-agent");
     let agent_build_hash = build_agent(&here, &agent_bin, &ux)?;
     let agent_sha = sha256_file_hex(&agent_bin)?;
     // TTY: deliberately NOT shown on the step line — it's diagnostic (relocated
     // to `diag` below), not routine build progress.
-    ux.progress.detail(format!("   dvmm-agent: sha256 {agent_sha}  build {agent_build_hash}"));
+    ux.progress.detail(format!("   tdvmm-agent: sha256 {agent_sha}  build {agent_build_hash}"));
     diag.push_str(&format!("agent_sha256: {agent_sha}\nagent_build_hash: {agent_build_hash}\n"));
 
     // fetch + verify the pinned minirootfs + compose binary (cached in alpine_dir).
@@ -496,34 +496,34 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     // stash the emitted lock next to the manifest.
     std::fs::copy(&lock_path, &committed_lock)?;
 
-    // --- 8. pack the single-file .dvmm artifact ---
-    ux.progress.detail("== pack .dvmm artifact ==");
-    let dvmm_bytes = pack_dvmm(&self_exe, &records, &compose_version, &compose_sha256, &stack_name, &project, mem_mib, est_mib, &builders, &agent_sha, &agent_build_hash, &kernel, &out_initramfs, &lock_path)?;
-    std::fs::write(&out_dvmm, &dvmm_bytes)?;
-    let dvmm_sha = artifact::sha256_hex(&dvmm_bytes);
+    // --- 8. pack the single-file .tdvmm artifact ---
+    ux.progress.detail("== pack .tdvmm artifact ==");
+    let tdvmm_bytes = pack_tdvmm(&self_exe, &records, &compose_version, &compose_sha256, &stack_name, &project, mem_mib, est_mib, &builders, &agent_sha, &agent_build_hash, &kernel, &out_initramfs, &lock_path)?;
+    std::fs::write(&out_tdvmm, &tdvmm_bytes)?;
+    let tdvmm_sha = artifact::sha256_hex(&tdvmm_bytes);
     // append the artifact identity to the ledger.
-    append_stack_lock_dvmm(&here, &stack_name, &dvmm_sha, &out_dvmm)?;
+    append_stack_lock_tdvmm(&here, &stack_name, &tdvmm_sha, &out_tdvmm)?;
     diag.push_str(&format!(
-        "initramfs: {} sha256={art_sha}\ndvmm: {} sha256={dvmm_sha}\n",
-        out_initramfs.display(), out_dvmm.display(),
+        "initramfs: {} sha256={art_sha}\ntdvmm: {} sha256={tdvmm_sha}\n",
+        out_initramfs.display(), out_tdvmm.display(),
     ));
 
     ux.progress.detail("");
-    ux.progress.detail("== dvmm build DONE ==");
+    ux.progress.detail("== tdvmm build DONE ==");
     ux.progress.detail(format!("   initramfs: {}", out_initramfs.display()));
     ux.progress.detail(format!("   sha256:    {art_sha}"));
-    ux.progress.detail(format!("   .dvmm:     {} (sha256 {dvmm_sha})", out_dvmm.display()));
-    // stdout: the artifact identity line (parity with the old pack-dvmm.sh) —
+    ux.progress.detail(format!("   .tdvmm:     {} (sha256 {tdvmm_sha})", out_tdvmm.display()));
+    // stdout: the artifact identity line (parity with the old pack-tdvmm.sh) —
     // UNCHANGED by the TTY redesign (progress/chrome is stderr-only). Routed
     // through `suspend` so a still-ticking step-7 spinner can't interleave
     // with this raw stdout write (the bar is cleared for the print, then
     // redrawn) — frozen/non-TTY: `suspend` just calls the closure directly.
-    ux.progress.suspend(|| println!("{dvmm_sha}  {}", out_dvmm.display()));
+    ux.progress.suspend(|| println!("{tdvmm_sha}  {}", out_tdvmm.display()));
 
     // --- 9. populate the bake cache (best-effort; never fails the build) ---
     ux.progress.step(8, TOTAL_STEPS, "cache");
     if let Some(c) = &cache {
-        match cache_store(c, &out_dvmm, &out_initramfs, &committed_lock, &stack_lock_path, &dvmm_sha) {
+        match cache_store(c, &out_tdvmm, &out_initramfs, &committed_lock, &stack_lock_path, &tdvmm_sha) {
             Ok(true) => {
                 ux.progress.detail(format!("   cached:    {} (key {})", c.dir.display(), &c.key[..16]));
                 diag.push_str(&format!("bake_cache_stored: {} (key {})\n", c.dir.display(), c.key));
@@ -543,13 +543,13 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     // the step counter deterministically reaches [8/8] with no stale spinner
     // frame). A no-op in frozen mode — the plain `DONE` block above already
     // covers it byte-for-byte.
-    ux.progress.print_summary(&out_dvmm, &dvmm_sha, dvmm_bytes.len() as u64, progress.elapsed(), diag_path.as_deref());
+    ux.progress.print_summary(&out_tdvmm, &tdvmm_sha, tdvmm_bytes.len() as u64, progress.elapsed(), diag_path.as_deref());
 
     Ok(0)
 }
 
 /// Write host-probed + relocated bake diagnostics to a side file under the
-/// (disposable) cache dir. NOTHING here enters the `.dvmm` bytes or the bake
+/// (disposable) cache dir. NOTHING here enters the `.tdvmm` bytes or the bake
 /// cache key. `extra` is the run's accumulated diagnostic detail (full digests,
 /// cache keys, the agent sha/build hash, absolute paths, …) — the ROUTINE
 /// detail that used to wall the TTY, now relocated here instead of lost
@@ -561,7 +561,7 @@ fn write_bake_diagnostics(cache_dir: &Path, stack: &str, podman_version: &str, b
         return None; // best-effort only
     }
     let body = format!(
-        "# dvmm bake diagnostics (host-probed + relocated detail; NOT in the artifact\n\
+        "# tdvmm bake diagnostics (host-probed + relocated detail; NOT in the artifact\n\
          # or cache key — see stack.lock for the compared, reproducible ledger).\n\
          stack: {stack}\n\
          host_podman_version: {podman_version}\n\

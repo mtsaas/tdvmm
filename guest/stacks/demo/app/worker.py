@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""dvmm demo stack — the rollup worker (a real Postgres client).
+"""tdvmm demo stack — the rollup worker (a real Postgres client).
 
 Once per virtual hour it does an incremental roll-up: it reads the orders that
 have not yet been summarized and writes one `summaries` row for the hour. It runs
@@ -13,7 +13,7 @@ back together). No fragile in-memory cursor.
 
 Resilience: if Postgres is unreachable it logs `pg unreachable, retrying`, retries
 briefly, skips the hour, and carries on — it never exits. Between hours it sleeps
-a full virtual hour, which dvmm fast-forwards.
+a full virtual hour, which tdvmm fast-forwards.
 """
 import os
 import sys

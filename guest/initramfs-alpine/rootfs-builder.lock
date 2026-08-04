@@ -1,14 +1,14 @@
-# dvmm base rootfs-builder image pin (Move 3 Step C).
+# tdvmm base rootfs-builder image pin (Move 3 Step C).
 #
 # The base Alpine rootfs (the pinned minirootfs + the apk package set in PKGS) is
 # assembled INSIDE this pinned container using `apk --root /rootfs` — NO chroot,
 # no host apk. The same image also serves as the fetch container (busybox `wget`
-# does HTTPS) for every pinned download; dvmm sha256-verifies each file in-process
+# does HTTPS) for every pinned download; tdvmm sha256-verifies each file in-process
 # after it lands (never trusting the transport).
 #
 # Pinned by DIGEST so the apk resolver + busybox are byte-stable across hosts.
 # Bumping it is a base-layer change: it is folded into the base-runtime cache key
-# (compute_base_key) AND the stack.lock / .dvmm builder-image anchors, so it MUST
+# (compute_base_key) AND the stack.lock / .tdvmm builder-image anchors, so it MUST
 # miss both caches and re-resolve the package set (packages.lock).
 BUILDER_IMAGE=docker.io/library/alpine:3.22
 BUILDER_DIGEST=sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce

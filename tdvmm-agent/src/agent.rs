@@ -8,7 +8,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use dvmm_proto::{ContainerInfo, ErrorKind, Reply, Request, MAX_LOGS_CHUNK_BYTES, SCHEMA};
+use tdvmm_proto::{ContainerInfo, ErrorKind, Reply, Request, MAX_LOGS_CHUNK_BYTES, SCHEMA};
 use serde::Deserialize;
 
 use crate::{AGENT_ID, BUILD};
@@ -332,17 +332,17 @@ impl Agent {
     /// explicit drop rules matter and all other traffic falls through to netavark.
     fn apply_partitions(&self) -> Result<(), String> {
         let mut b = String::new();
-        b.push_str("add table inet dvmm_faults\n");
-        b.push_str("delete table inet dvmm_faults\n");
-        b.push_str("add table inet dvmm_faults\n");
-        b.push_str("add chain inet dvmm_faults partition { type filter hook forward priority -300 ; policy accept ; }\n");
+        b.push_str("add table inet tdvmm_faults\n");
+        b.push_str("delete table inet tdvmm_faults\n");
+        b.push_str("add table inet tdvmm_faults\n");
+        b.push_str("add chain inet tdvmm_faults partition { type filter hook forward priority -300 ; policy accept ; }\n");
         for ips in self.partitions.values() {
             b.push_str(&format!(
-                "add rule inet dvmm_faults partition ip saddr {} ip daddr {} drop\n",
+                "add rule inet tdvmm_faults partition ip saddr {} ip daddr {} drop\n",
                 ips[0], ips[1]
             ));
             b.push_str(&format!(
-                "add rule inet dvmm_faults partition ip saddr {} ip daddr {} drop\n",
+                "add rule inet tdvmm_faults partition ip saddr {} ip daddr {} drop\n",
                 ips[1], ips[0]
             ));
         }

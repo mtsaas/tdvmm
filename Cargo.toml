@@ -1,22 +1,22 @@
 [package]
-name = "dvmm"
+name = "tdvmm"
 version = "0.1.0"
 edition = "2021"
 description = "A single-vCPU KVM VMM that fast-forwards idle time — runs compose-style service stacks through hours of virtual time in seconds."
 license = "Apache-2.0"
 
-# Cargo WORKSPACE (Fable §1): three members — this root VMM package (`dvmm`), the
-# protocol-only `dvmm-proto` lib, and the guest `dvmm-agent` bin. Single-crate-
+# Cargo WORKSPACE (Fable §1): three members — this root VMM package (`tdvmm`), the
+# protocol-only `tdvmm-proto` lib, and the guest `tdvmm-agent` bin. Single-crate-
 # two-bins was REJECTED; the agent is its own crate with a minimal dep tree.
 [workspace]
-members = ["dvmm-proto", "dvmm-agent"]
+members = ["tdvmm-proto", "tdvmm-agent"]
 # All three build/test by default so `cargo build --release` and the T0
 # `cargo test --release` gate cover the proto goldens + the agent, not just the VMM.
-default-members = [".", "dvmm-proto", "dvmm-agent"]
+default-members = [".", "tdvmm-proto", "tdvmm-agent"]
 resolver = "2"
 
 [[bin]]
-name = "dvmm"
+name = "tdvmm"
 path = "src/main.rs"
 
 [dependencies]
@@ -27,7 +27,7 @@ linux-loader = "0.14"
 vmm-sys-util = "0.15"
 vm-superio = "0.8"
 libc = "0.2"
-# OP-1a: the .dvmm single-file artifact (format v1). clap = the run/inspect/verify/
+# OP-1a: the .tdvmm single-file artifact (format v1). clap = the run/inspect/verify/
 # boot subcommand CLI; serde/serde_json = the manifest (de)serialize; sha2 = member
 # hashing + the whole-file identity. The canonical (deterministic) tar encode/decode
 # is hand-rolled in `artifact.rs` — full control over byte layout for the
@@ -44,20 +44,20 @@ regex = "1.13.1"
 # (verified via `cargo tree`). `tar` is pure-Rust archive read (extraction only).
 flate2 = "=1.1.5"
 tar = "=0.4.44"
-# `dvmm build`'s single stepped progress spinner (Fable CLI-UX ruling). Root
-# `dvmm` ONLY — FORBIDDEN in dvmm-agent/dvmm-proto (their dep trees are
+# `tdvmm build`'s single stepped progress spinner (Fable CLI-UX ruling). Root
+# `tdvmm` ONLY — FORBIDDEN in tdvmm-agent/tdvmm-proto (their dep trees are
 # Fable-locked). Pinned to an exact version.
 indicatif = "=0.18.6"
-# The line-JSON control-channel wire types, shared with the guest dvmm-agent.
-dvmm-proto = { path = "dvmm-proto" }
+# The line-JSON control-channel wire types, shared with the guest tdvmm-agent.
+tdvmm-proto = { path = "tdvmm-proto" }
 
 [profile.release]
 debug = true
 
-# The reproducible + size-optimized profile for the guest dvmm-agent (Fable §2).
+# The reproducible + size-optimized profile for the guest tdvmm-agent (Fable §2).
 # Profiles are workspace-global, so the agent gets its own custom profile rather
 # than mutating [profile.release] (which the VMM needs with debug=true). Built via
-# `cargo build -p dvmm-agent --profile agent-release --target x86_64-unknown-linux-musl`
+# `cargo build -p tdvmm-agent --profile agent-release --target x86_64-unknown-linux-musl`
 # inside the pinned musl builder container.
 [profile.agent-release]
 inherits = "release"

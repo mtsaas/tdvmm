@@ -1,5 +1,5 @@
 #!/bin/sh
-# dvmm TigerBeetle stack -- replica bootstrap (closed world).
+# tdvmm TigerBeetle stack -- replica bootstrap (closed world).
 #
 # ADDRESSING (the main unknown, SOLVED):
 #   TigerBeetle's --addresses accepts ONLY IPv4/IPv6 literals -- passing compose

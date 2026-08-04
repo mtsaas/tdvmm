@@ -1,4 +1,4 @@
-# dvmm demo — the shared application image (a build: context).
+# tdvmm demo — the shared application image (a build: context).
 #
 # ONE image, three entrypoints (server.py / client.py / worker.py). The three
 # Python services (api, client, worker) all run from this image, selected by each

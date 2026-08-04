@@ -80,7 +80,7 @@ impl Write for ConsoleOut {
                 if !self.overflowed {
                     self.overflowed = true;
                     crate::log_line(format_args!(
-                        "[dvmm][WARN] console tee exceeded {CONSOLE_TEE_CAP} bytes \
+                        "[tdvmm][WARN] console tee exceeded {CONSOLE_TEE_CAP} bytes \
                          between drains — dropping backlog"
                     ));
                 }
@@ -173,7 +173,7 @@ pub struct RawTerminal {
 impl RawTerminal {
     /// Whether raw mode is actually in effect (i.e. `enable` found a tty and
     /// applied `cfmakeraw`). `false` when stdin is not a tty, so nothing was
-    /// changed. dvmm's own log lines key their CRLF handling off this (see
+    /// changed. tdvmm's own log lines key their CRLF handling off this (see
     /// `main.rs` `log_line`): raw mode turns OFF the terminal's ONLCR, so a bare
     /// "\n" would staircase our lines.
     pub fn is_raw(&self) -> bool {

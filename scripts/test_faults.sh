@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# dvmm TEST-1b acceptance + negative gates for FAULT INJECTION.
+# tdvmm TEST-1b acceptance + negative gates for FAULT INJECTION.
 #
 # The MVP fault set (kill/stop/start + partition/heal), delivered as scheduled
 # (vtsc, ScenarioStep) queue entries, exercised end-to-end against the faultlab
@@ -16,18 +16,18 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-BIN="$ROOT/target/release/dvmm"
-# Self-contained: bake into a gitignored test dir (NOT the repo / ~/.dvmm/artifacts).
-OUTDIR="${DVMM_OUT_DIR:-$ROOT/.dvmm-test-results}"; mkdir -p "$OUTDIR"
-DVMM="${DVMM_FAULT_ARTIFACT:-$OUTDIR/faultlab.dvmm}"
+BIN="$ROOT/target/release/tdvmm"
+# Self-contained: bake into a gitignored test dir (NOT the repo / ~/.tdvmm/artifacts).
+OUTDIR="${TDVMM_OUT_DIR:-$ROOT/.tdvmm-test-results}"; mkdir -p "$OUTDIR"
+TDVMM="${TDVMM_FAULT_ARTIFACT:-$OUTDIR/faultlab.tdvmm}"
 SDIR="$ROOT/guest/stacks/faultlab"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-[ -x "$BIN" ] || { echo "building dvmm..."; ( cd "$ROOT" && cargo build --release ) || exit 3; }
-if [ ! -f "$DVMM" ]; then
-  echo "== faultlab.dvmm missing — baking it (dvmm build -> $DVMM) =="
-  "$BIN" build "$SDIR/compose.yml" -o "$DVMM" || {
+[ -x "$BIN" ] || { echo "building tdvmm..."; ( cd "$ROOT" && cargo build --release ) || exit 3; }
+if [ ! -f "$TDVMM" ]; then
+  echo "== faultlab.tdvmm missing — baking it (tdvmm build -> $TDVMM) =="
+  "$BIN" build "$SDIR/compose.yml" -o "$TDVMM" || {
     echo "FATAL: bake failed" >&2; exit 3; }
 fi
 
@@ -38,10 +38,10 @@ bad() { echo "  FAIL: $*"; FAIL=$((FAIL+1)); }
 # ---- Gate 1: kill + recover -> exit 0 --------------------------------------
 echo "== Gate 1: kill + recover (expect PASS, exit 0) =="
 KR="$TMP/kr.jsonl"; KRR="$TMP/kr.report.json"
-"$BIN" test "$DVMM" --scenario "$SDIR/kill-recover.yml" --jsonl "$KR" --report "$KRR" \
+"$BIN" test "$TDVMM" --scenario "$SDIR/kill-recover.yml" --jsonl "$KR" --report "$KRR" \
   --wall-timeout 360 >"$TMP/g1.out" 2>&1
 code=$?
-sed 's/\r//g' "$TMP/g1.out" | sed -n '/==== dvmm test/,/VERDICT/p' | sed 's/^/    /'
+sed 's/\r//g' "$TMP/g1.out" | sed -n '/==== tdvmm test/,/VERDICT/p' | sed 's/^/    /'
 [ "$code" -eq 0 ] && ok "kill+recover exit 0" || bad "expected exit 0, got $code"
 grep -q '"verdict": "pass"' "$KRR" 2>/dev/null && ok "report verdict=pass" || bad "report not pass"
 # the kill and start faults were applied ok
@@ -51,10 +51,10 @@ grep -q '"stdout":"start db' "$KR" && ok "start applied (recovery)" || bad "no s
 # ---- Gate 2: partition + heal -> exit 0 ------------------------------------
 echo "== Gate 2: partition + heal (expect PASS, exit 0) =="
 PH="$TMP/ph.jsonl"; PHR="$TMP/ph.report.json"
-"$BIN" test "$DVMM" --scenario "$SDIR/partition-heal.yml" --jsonl "$PH" --report "$PHR" \
+"$BIN" test "$TDVMM" --scenario "$SDIR/partition-heal.yml" --jsonl "$PH" --report "$PHR" \
   --wall-timeout 360 >"$TMP/g2.out" 2>&1
 code=$?
-sed 's/\r//g' "$TMP/g2.out" | sed -n '/==== dvmm test/,/VERDICT/p' | sed 's/^/    /'
+sed 's/\r//g' "$TMP/g2.out" | sed -n '/==== tdvmm test/,/VERDICT/p' | sed 's/^/    /'
 [ "$code" -eq 0 ] && ok "partition+heal exit 0" || bad "expected exit 0, got $code"
 grep -q '"verdict": "pass"' "$PHR" 2>/dev/null && ok "report verdict=pass" || bad "report not pass"
 grep -q '"stdout":"partition ' "$PH" && ok "partition applied (nft drop rules)" || bad "no partition result"
@@ -63,7 +63,7 @@ grep -q '"stdout":"heal ' "$PH" && ok "heal applied (rules removed)" || bad "no 
 # ---- Gate 3: an UNEXPECTED death -> exit 1 ---------------------------------
 echo "== Gate 3: unexpected death (expect FAIL, exit 1) =="
 UD="$TMP/ud.jsonl"; UDR="$TMP/ud.report.json"
-"$BIN" test "$DVMM" --scenario "$SDIR/unexpected-death.yml" --jsonl "$UD" --report "$UDR" \
+"$BIN" test "$TDVMM" --scenario "$SDIR/unexpected-death.yml" --jsonl "$UD" --report "$UDR" \
   --wall-timeout 300 >"$TMP/g3.out" 2>&1
 code=$?
 sed 's/\r//g' "$TMP/g3.out" | grep -aE 'VERDICT|FAILURE' | sed 's/^/    /'
@@ -98,7 +98,7 @@ steps:
     kill: nonexistent-service
 YML
 t0=$(date +%s.%N)
-"$BIN" test "$DVMM" --scenario "$TMP/badfault.yml" >"$TMP/g5.out" 2>&1
+"$BIN" test "$TDVMM" --scenario "$TMP/badfault.yml" >"$TMP/g5.out" 2>&1
 code=$?
 t1=$(date +%s.%N)
 dt=$(awk "BEGIN{printf \"%.2f\", $t1-$t0}")

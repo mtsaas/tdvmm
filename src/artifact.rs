@@ -1,4 +1,4 @@
-//! The `.dvmm` single-file artifact (format v1) — the OP-1a deliverable.
+//! The `.tdvmm` single-file artifact (format v1) — the OP-1a deliverable.
 //!
 //! A baked stack is ONE self-contained file: a plain, **uncompressed** outer TAR
 //! whose members are, in this canonical order,
@@ -13,7 +13,7 @@
 //! A custom sectioned container was rejected (Fable-locked): a standard tar is
 //! debuggable with `tar tvf` / `tar xf`. We hand-roll a **deterministic** USTAR
 //! writer rather than pull a tar crate, for two reasons: (1) total control over
-//! the byte layout, so identical inputs produce a **byte-identical** `.dvmm`
+//! the byte layout, so identical inputs produce a **byte-identical** `.tdvmm`
 //! (fixed `mtime=0`, `uid=0`, `gid=0`, fixed mode, fixed member order, no PAX/GNU
 //! extensions, no volatile fields); and (2) cheap single-member access — `inspect`
 //! reads only the first member (`manifest.json`) and stops, never touching the big
@@ -113,7 +113,7 @@ pub struct Toolchain {
 pub struct Anchors {
     /// sha256 of the `cpuid_profile` text below (matches `guest/manifest.txt`).
     pub cpuid_sha256: String,
-    /// The effective guest clock/timer CPUID profile (`dvmm dump-cpuid` output).
+    /// The effective guest clock/timer CPUID profile (`tdvmm dump-cpuid` output).
     pub cpuid_profile: String,
     pub compose_engine: ComposeEngine,
     #[serde(default)]
@@ -122,7 +122,7 @@ pub struct Anchors {
     pub toolchain: Toolchain,
     /// The bake's guest-RAM estimate (MiB).
     pub ram_estimate_mib: u64,
-    /// sha256 of the baked static `dvmm-agent` binary (Fable §2). `default` so
+    /// sha256 of the baked static `tdvmm-agent` binary (Fable §2). `default` so
     /// pre-agent-anchor artifacts still deserialize.
     #[serde(default)]
     pub agent_sha256: String,
@@ -132,7 +132,7 @@ pub struct Anchors {
     pub agent_build_hash: String,
 }
 
-/// The baked run-defaults: the config `dvmm run` applies unless a CLI flag
+/// The baked run-defaults: the config `tdvmm run` applies unless a CLI flag
 /// overrides it (baked < flag — see `main.rs`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RunDefaults {
@@ -166,7 +166,7 @@ impl Manifest {
 
     /// Serialize to **canonical** manifest bytes: pretty JSON, struct field order
     /// fixed by the type, trailing newline. Deterministic for identical data —
-    /// this is what makes the `.dvmm` bit-reproducible.
+    /// this is what makes the `.tdvmm` bit-reproducible.
     pub fn to_canonical_json(&self) -> Result<Vec<u8>, ArtifactError> {
         let mut v = serde_json::to_vec_pretty(self)
             .map_err(|e| ArtifactError(format!("serializing manifest.json: {e}")))?;
@@ -208,7 +208,7 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     hex(&h.finalize())
 }
 
-/// Hex-encoded sha256 of a whole file, streamed (the `.dvmm` identity).
+/// Hex-encoded sha256 of a whole file, streamed (the `.tdvmm` identity).
 pub fn file_sha256_hex(path: &str) -> Result<String, ArtifactError> {
     let mut f = std::fs::File::open(path).map_err(|e| ioerr(&format!("opening {path}"), e))?;
     let mut h = Sha256::new();
@@ -237,22 +237,22 @@ fn hex(bytes: &[u8]) -> String {
 // ============================================================================
 
 /// The artifact store directory: `<cache>/artifacts`, where `<cache>` is
-/// `$DVMM_CACHE_DIR` (if set and non-empty) else `$HOME/.dvmm`. This mirrors
-/// `dvmm build`'s cache resolution minus the `--cache-dir` flag (which the
+/// `$TDVMM_CACHE_DIR` (if set and non-empty) else `$HOME/.tdvmm`. This mirrors
+/// `tdvmm build`'s cache resolution minus the `--cache-dir` flag (which the
 /// run/test/inspect/verify verbs do not expose), so `build` writes name-keyed
 /// artifacts exactly where `run <name>` looks for them.
 pub fn store_dir() -> PathBuf {
-    let cache = match std::env::var("DVMM_CACHE_DIR") {
+    let cache = match std::env::var("TDVMM_CACHE_DIR") {
         Ok(d) if !d.is_empty() => PathBuf::from(d),
         _ => {
             let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            PathBuf::from(home).join(".dvmm")
+            PathBuf::from(home).join(".tdvmm")
         }
     };
     cache.join("artifacts")
 }
 
-/// One `.dvmm` in the store: short name (filename minus `.dvmm`), path, size, mtime.
+/// One `.tdvmm` in the store: short name (filename minus `.tdvmm`), path, size, mtime.
 pub struct StoreEntry {
     pub name: String,
     pub path: PathBuf,
@@ -260,7 +260,7 @@ pub struct StoreEntry {
     pub modified: SystemTime,
 }
 
-/// Enumerate the `*.dvmm` artifacts in the store, sorted by name. A missing store
+/// Enumerate the `*.tdvmm` artifacts in the store, sorted by name. A missing store
 /// directory is not an error — it just means nothing has been built yet.
 pub fn list_store() -> Result<Vec<StoreEntry>, ArtifactError> {
     list_in(&store_dir())
@@ -277,7 +277,7 @@ fn list_in(store: &Path) -> Result<Vec<StoreEntry>, ArtifactError> {
         let de = de.map_err(|e| ioerr("reading store entry", e))?;
         let path = de.path();
         let name = match path.file_name().and_then(|s| s.to_str()).and_then(|f| {
-            f.strip_suffix(".dvmm").map(str::to_string)
+            f.strip_suffix(".tdvmm").map(str::to_string)
         }) {
             Some(n) => n,
             None => continue,
@@ -305,13 +305,13 @@ pub fn resolve(arg: &str) -> Result<PathBuf, ArtifactError> {
 }
 
 /// Core of [`resolve`], parameterized on the store dir so it is testable without
-/// touching `$HOME` / `$DVMM_CACHE_DIR`. Name-first (Docker-like), in order:
+/// touching `$HOME` / `$TDVMM_CACHE_DIR`. Name-first (Docker-like), in order:
 ///   1. `arg` looks like a path (has a `/`)  → it is a path, never a name: use it
 ///      if the file exists, else error `no such artifact file`. A bare name never
 ///      shadows or is shadowed by a CWD file — to point at a file on disk, write a
-///      path (`./x.dvmm` or an absolute path).
-///   2. otherwise `arg` is a store name      → `<store>/<name>.dvmm` (a trailing
-///      `.dvmm` on the name is accepted), erroring with the list of available
+///      path (`./x.tdvmm` or an absolute path).
+///   2. otherwise `arg` is a store name      → `<store>/<name>.tdvmm` (a trailing
+///      `.tdvmm` on the name is accepted), erroring with the list of available
 ///      names on a miss.
 pub fn resolve_in(store: &Path, arg: &str) -> Result<PathBuf, ArtifactError> {
     if arg.contains('/') {
@@ -320,8 +320,8 @@ pub fn resolve_in(store: &Path, arg: &str) -> Result<PathBuf, ArtifactError> {
         }
         return Err(ArtifactError(format!("no such artifact file: {arg}")));
     }
-    let name = arg.strip_suffix(".dvmm").unwrap_or(arg);
-    let candidate = store.join(format!("{name}.dvmm"));
+    let name = arg.strip_suffix(".tdvmm").unwrap_or(arg);
+    let candidate = store.join(format!("{name}.tdvmm"));
     if candidate.is_file() {
         return Ok(candidate);
     }
@@ -529,7 +529,7 @@ pub fn read_manifest(path: &str) -> Result<Manifest, ArtifactError> {
         skip_content(&mut f, e.size)?;
     }
     Err(ArtifactError(format!(
-        "{path}: no {MEMBER_MANIFEST} member (not a .dvmm artifact?)"
+        "{path}: no {MEMBER_MANIFEST} member (not a .tdvmm artifact?)"
     )))
 }
 
@@ -634,15 +634,15 @@ pub fn verify(path: &str) -> Result<VerifyReport, ArtifactError> {
 }
 
 // ============================================================================
-// packing (used by `dvmm build` — see build.rs::pack_dvmm)
+// packing (used by `tdvmm build` — see build.rs::pack_tdvmm)
 // ============================================================================
 
-/// Assemble a `.dvmm` from its parts. `manifest_in` is a (possibly partial)
+/// Assemble a `.tdvmm` from its parts. `manifest_in` is a (possibly partial)
 /// manifest JSON produced by the bake script; this function fills in
 /// `format_version` and the per-member hash records from the ACTUAL bytes, then
 /// re-serializes the manifest **canonically** — so the producer's key order /
 /// whitespace never affects the output, and identical inputs give a byte-identical
-/// `.dvmm`.
+/// `.tdvmm`.
 pub fn pack(
     manifest_in: &[u8],
     kernel: &[u8],
@@ -703,7 +703,7 @@ mod tests {
         Manifest {
             format_version: FORMAT_VERSION,
             stack: "dogfood".into(),
-            project: "dvmm_dogfood".into(),
+            project: "tdvmm_dogfood".into(),
             members: vec![],
             anchors: Anchors {
                 cpuid_sha256: "abc".into(),
@@ -714,7 +714,7 @@ mod tests {
                 },
                 images: vec![ImagePin {
                     upstream: "docker.io/library/postgres@sha256:57c7".into(),
-                    pinned: "localhost/dvmm-postgres@sha256:cbf2".into(),
+                    pinned: "localhost/tdvmm-postgres@sha256:cbf2".into(),
                     policy: "squash".into(),
                     content_id: "sha256:af5b".into(),
                     size_mib: 283,
@@ -733,7 +733,7 @@ mod tests {
             },
             run_defaults: RunDefaults {
                 mem_mib: 3072,
-                cmdline: "console=ttyS0 dvmm.stack=1".into(),
+                cmdline: "console=ttyS0 tdvmm.stack=1".into(),
                 fast_forward: true,
                 max_virtual_time: None,
             },
@@ -764,7 +764,7 @@ mod tests {
         let min = m.to_canonical_json().unwrap();
         let kernel = b"\x7fELF fake kernel bytes".to_vec();
         let initramfs = b"\x1f\x8b fake gzip initramfs".to_vec();
-        let lock = b"name: dvmm_dogfood\n".to_vec();
+        let lock = b"name: tdvmm_dogfood\n".to_vec();
 
         let a = pack(&min, &kernel, &initramfs, &lock).unwrap();
         let b = pack(&min, &kernel, &initramfs, &lock).unwrap();
@@ -777,7 +777,7 @@ mod tests {
 
         // Round-trip via the readers.
         std::fs::create_dir_all("target/test-artifacts").ok();
-        let p = "target/test-artifacts/roundtrip.dvmm";
+        let p = "target/test-artifacts/roundtrip.tdvmm";
         std::fs::write(p, &a).unwrap();
 
         let man = read_manifest(p).unwrap();
@@ -813,7 +813,7 @@ mod tests {
         a[pos + 3] ^= 0xff;
 
         std::fs::create_dir_all("target/test-artifacts").ok();
-        let p = "target/test-artifacts/corrupt.dvmm";
+        let p = "target/test-artifacts/corrupt.tdvmm";
         std::fs::write(p, &a).unwrap();
 
         let report = verify(p).unwrap();
@@ -874,12 +874,12 @@ mod tests {
         let store = std::path::PathBuf::from("target/test-artifacts/resolve-test");
         let _ = std::fs::remove_dir_all(&store);
         std::fs::create_dir_all(&store).unwrap();
-        std::fs::write(store.join("alpha.dvmm"), b"x").unwrap();
-        std::fs::write(store.join("beta.dvmm"), b"x").unwrap();
+        std::fs::write(store.join("alpha.tdvmm"), b"x").unwrap();
+        std::fs::write(store.join("beta.tdvmm"), b"x").unwrap();
 
-        // name hit — bare and with the `.dvmm` suffix both resolve to the store.
-        assert_eq!(resolve_in(&store, "alpha").unwrap(), store.join("alpha.dvmm"));
-        assert_eq!(resolve_in(&store, "alpha.dvmm").unwrap(), store.join("alpha.dvmm"));
+        // name hit — bare and with the `.tdvmm` suffix both resolve to the store.
+        assert_eq!(resolve_in(&store, "alpha").unwrap(), store.join("alpha.tdvmm"));
+        assert_eq!(resolve_in(&store, "alpha.tdvmm").unwrap(), store.join("alpha.tdvmm"));
 
         // name miss lists the available names.
         let e = resolve_in(&store, "nope").unwrap_err().to_string();
@@ -887,24 +887,24 @@ mod tests {
 
         // a path-like arg (contains `/`) that does not exist is a file error, not
         // a name lookup.
-        let e = resolve_in(&store, "some/dir/x.dvmm").unwrap_err().to_string();
+        let e = resolve_in(&store, "some/dir/x.tdvmm").unwrap_err().to_string();
         assert!(e.contains("no such artifact file"), "got: {e}");
 
         // a path (contains `/`) that exists resolves as a file — this is the only
         // way to point at a file on disk.
-        let loose = store.join("loose-file.dvmm");
+        let loose = store.join("loose-file.tdvmm");
         std::fs::write(&loose, b"y").unwrap();
         assert_eq!(resolve_in(&store, loose.to_str().unwrap()).unwrap(), loose);
 
-        // NAME-FIRST, no shadowing: a bare name maps strictly to `<store>/<name>.dvmm`
-        // and never to a same-named file. `gamma` (a plain file, no `.dvmm`) sitting in
-        // the store does NOT satisfy the bare name `gamma`; only `gamma.dvmm` would.
+        // NAME-FIRST, no shadowing: a bare name maps strictly to `<store>/<name>.tdvmm`
+        // and never to a same-named file. `gamma` (a plain file, no `.tdvmm`) sitting in
+        // the store does NOT satisfy the bare name `gamma`; only `gamma.tdvmm` would.
         std::fs::write(store.join("gamma"), b"z").unwrap();
         let e = resolve_in(&store, "gamma").unwrap_err().to_string();
         assert!(e.contains("no artifact named"), "bare name must not pick up a same-named file: {e}");
 
         // NAME-FIRST, no shadowing from the CURRENT DIRECTORY (regression guard): a
-        // `<name>.dvmm` in the CWD must NEVER be picked up — a bare arg resolves
+        // `<name>.tdvmm` in the CWD must NEVER be picked up — a bare arg resolves
         // strictly against the store. This is the case that flips RED if a file-wins
         // `if Path::new(arg).is_file()` branch is ever reintroduced ahead of the store
         // lookup. Cargo runs tests from the crate root, so the file lands there; the
@@ -915,19 +915,19 @@ mod tests {
                 let _ = std::fs::remove_file(&self.0);
             }
         }
-        let _guard = CwdFileGuard(std::path::PathBuf::from("resolve-shadow-guard.dvmm"));
-        std::fs::write("resolve-shadow-guard.dvmm", b"cwd").unwrap();
+        let _guard = CwdFileGuard(std::path::PathBuf::from("resolve-shadow-guard.tdvmm"));
+        std::fs::write("resolve-shadow-guard.tdvmm", b"cwd").unwrap();
 
         // store HAS the name -> resolves to the STORE copy, not the CWD file.
-        std::fs::write(store.join("resolve-shadow-guard.dvmm"), b"store").unwrap();
+        std::fs::write(store.join("resolve-shadow-guard.tdvmm"), b"store").unwrap();
         assert_eq!(
-            resolve_in(&store, "resolve-shadow-guard.dvmm").unwrap(),
-            store.join("resolve-shadow-guard.dvmm"),
+            resolve_in(&store, "resolve-shadow-guard.tdvmm").unwrap(),
+            store.join("resolve-shadow-guard.tdvmm"),
             "bare name must resolve to the store, never the CWD file"
         );
         assert_eq!(
             resolve_in(&store, "resolve-shadow-guard").unwrap(),
-            store.join("resolve-shadow-guard.dvmm"),
+            store.join("resolve-shadow-guard.tdvmm"),
         );
 
         // store LACKS the name -> miss ERROR, not the CWD file. THIS is the assertion
@@ -936,7 +936,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&empty);
         std::fs::create_dir_all(&empty).unwrap();
         assert!(
-            resolve_in(&empty, "resolve-shadow-guard.dvmm").is_err(),
+            resolve_in(&empty, "resolve-shadow-guard.tdvmm").is_err(),
             "a CWD file must not satisfy a bare-name store lookup"
         );
         assert!(resolve_in(&empty, "resolve-shadow-guard").is_err());
@@ -947,8 +947,8 @@ mod tests {
         let store = std::path::PathBuf::from("target/test-artifacts/list-test");
         let _ = std::fs::remove_dir_all(&store);
         std::fs::create_dir_all(&store).unwrap();
-        std::fs::write(store.join("zeta.dvmm"), b"12345").unwrap();
-        std::fs::write(store.join("alpha.dvmm"), b"1").unwrap();
+        std::fs::write(store.join("zeta.tdvmm"), b"12345").unwrap();
+        std::fs::write(store.join("alpha.tdvmm"), b"1").unwrap();
         std::fs::write(store.join("notes.txt"), b"ignore me").unwrap();
         let got = list_in(&store).unwrap();
         let names: Vec<_> = got.iter().map(|e| e.name.as_str()).collect();

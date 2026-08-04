@@ -79,7 +79,7 @@ pub(super) fn compute_base_key(
     let overlay_tree = tree_hash(&alpine_dir.join("overlay"), &[]).unwrap_or_default();
     let pkgs = PKGS.join(",");
     let manifest = format!(
-        "dvmm-base-runtime v{CACHE_VERSION}\n\
+        "tdvmm-base-runtime v{CACHE_VERSION}\n\
          alpine:     {ALPINE_VER}\n\
          minirootfs: {MINIROOTFS_SHA256}\n\
          epoch:      {BUILD_EPOCH}\n\

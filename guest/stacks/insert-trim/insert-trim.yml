@@ -1,6 +1,6 @@
-# dvmm TEST-1a — the insert-trim stack expressed as a test scenario.
+# tdvmm TEST-1a — the insert-trim stack expressed as a test scenario.
 #
-#   dvmm test insert-trim.dvmm --scenario insert-trim.yml   ->   PASS, exit 0
+#   tdvmm test insert-trim.tdvmm --scenario insert-trim.yml   ->   PASS, exit 0
 #
 # The platform testing itself: wait for Postgres to be ready, fast-forward through
 # virtual hours, and assert (via psql, over the bridge, by name) that the events
@@ -9,7 +9,7 @@
 # The workload inserts one row every INTERVAL_SECONDS of *guest* time and trims to
 # MAX_ROWS. This scenario runs it at interval=3600s (1 virtual hour) and, so the
 # cap is observable in a handful of jumps, MAX_ROWS=5 (via `run.cmdline`, which
-# overrides the artifact's baked `dvmm.maxrows`). With inserts at ~0h,1h,2h,...:
+# overrides the artifact's baked `tdvmm.maxrows`). With inserts at ~0h,1h,2h,...:
 #   * by 2.5h  the count has grown but not yet capped  ->  1..4
 #   * by 6.5h  ~7 inserts have happened, trimmed to 5  ->  exactly 5 (the cap)
 # Fast-forward collapses the 6.5 virtual hours into seconds of wall time.
@@ -19,7 +19,7 @@ name: insert-trim-accrual-and-cap
 run:
   # Override the baked cmdline: 1-hour interval, cap of 5 (so the cap shows fast).
   # console stays on ttyS0 — ttyS1 is the control channel, owned by the agent.
-  cmdline: "console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable dvmm.stack=1 dvmm.interval=3600 dvmm.maxrows=5 dvmm.hc_tick=2"
+  cmdline: "console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable tdvmm.stack=1 tdvmm.interval=3600 tdvmm.maxrows=5 tdvmm.hc_tick=2"
 
 steps:
   # 1. Readiness: poll pg_isready (in the service container, reaching postgres by

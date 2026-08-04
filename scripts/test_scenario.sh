@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# dvmm TEST-1a acceptance + negative gates for `dvmm test`.
+# tdvmm TEST-1a acceptance + negative gates for `tdvmm test`.
 #
 # Runs the insert-trim-as-scenario acceptance and the exit-code contract:
-#   - insert-trim.dvmm + insert-trim.yml    -> PASS, exit 0 (JSONL + report produced)
+#   - insert-trim.tdvmm + insert-trim.yml    -> PASS, exit 0 (JSONL + report produced)
 #   - a deliberately WRONG assertion         -> exit 1 (assertion failure)
 #   - static validation (unknown service /   -> exit 2, sub-second, BEFORE boot
 #     unknown key / bad duration)
@@ -13,18 +13,18 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-BIN="$ROOT/target/release/dvmm"
-# Self-contained: bake into a gitignored test dir (NOT the repo / ~/.dvmm/artifacts).
-OUTDIR="${DVMM_OUT_DIR:-$ROOT/.dvmm-test-results}"; mkdir -p "$OUTDIR"
-DVMM="${DVMM_ARTIFACT:-$OUTDIR/insert-trim.dvmm}"
+BIN="$ROOT/target/release/tdvmm"
+# Self-contained: bake into a gitignored test dir (NOT the repo / ~/.tdvmm/artifacts).
+OUTDIR="${TDVMM_OUT_DIR:-$ROOT/.tdvmm-test-results}"; mkdir -p "$OUTDIR"
+TDVMM="${TDVMM_ARTIFACT:-$OUTDIR/insert-trim.tdvmm}"
 SCN="$ROOT/guest/stacks/insert-trim/insert-trim.yml"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-[ -x "$BIN" ] || { echo "building dvmm..."; ( cd "$ROOT" && cargo build --release ) || exit 3; }
-if [ ! -f "$DVMM" ]; then
-  echo "== insert-trim.dvmm missing — baking it (dvmm build -> $DVMM) =="
-  "$BIN" build "$ROOT/guest/stacks/insert-trim/compose.yml" -o "$DVMM" || {
+[ -x "$BIN" ] || { echo "building tdvmm..."; ( cd "$ROOT" && cargo build --release ) || exit 3; }
+if [ ! -f "$TDVMM" ]; then
+  echo "== insert-trim.tdvmm missing — baking it (tdvmm build -> $TDVMM) =="
+  "$BIN" build "$ROOT/guest/stacks/insert-trim/compose.yml" -o "$TDVMM" || {
     echo "FATAL: bake failed" >&2; exit 3; }
 fi
 
@@ -35,7 +35,7 @@ bad()  { echo "  FAIL: $*"; FAIL=$((FAIL+1)); }
 # ---- Gate 1: insert-trim acceptance -> PASS, exit 0 ------------------------
 echo "== Gate 1: insert-trim-as-scenario (expect PASS, exit 0) =="
 JSONL="$TMP/insert-trim.jsonl"; REPORT="$TMP/insert-trim.report.json"
-"$BIN" test "$DVMM" --scenario "$SCN" --jsonl "$JSONL" --report "$REPORT" \
+"$BIN" test "$TDVMM" --scenario "$SCN" --jsonl "$JSONL" --report "$REPORT" \
   --wall-timeout 300 >"$TMP/g1.out" 2>&1
 code=$?
 sed 's/^/    /' "$TMP/g1.out" | grep -E 'VERDICT|steps:|assertion|rowcount|ready|effective-config|FAST-FORWARD SUMMARY' | tail -20
@@ -49,7 +49,7 @@ echo "== Gate 2: wrong assertion (expect exit 1) =="
 cat > "$TMP/wrong.yml" <<'YML'
 name: wrong-on-purpose
 run:
-  cmdline: "console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable dvmm.stack=1 dvmm.interval=3600 dvmm.maxrows=5 dvmm.hc_tick=2"
+  cmdline: "console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable tdvmm.stack=1 tdvmm.interval=3600 tdvmm.maxrows=5 tdvmm.hc_tick=2"
 steps:
   - at: 0s
     wait_for:
@@ -62,7 +62,7 @@ steps:
     exec: { container: service, cmd: "psql -tAc 'select count(*) from events;'" }
     expect: { exit: 0, output_matches: '^9999$' }
 YML
-"$BIN" test "$DVMM" --scenario "$TMP/wrong.yml" --jsonl "$TMP/w.jsonl" \
+"$BIN" test "$TDVMM" --scenario "$TMP/wrong.yml" --jsonl "$TMP/w.jsonl" \
   --report "$TMP/w.report.json" --wall-timeout 200 >"$TMP/g2.out" 2>&1
 code=$?
 grep -E 'VERDICT|assertion' "$TMP/g2.out" | tail -4 | sed 's/^/    /'
@@ -84,7 +84,7 @@ mk baddur.yml 'steps:
     exec: { container: service, cmd: "true" }'
 for f in badsvc.yml badkey.yml baddur.yml; do
   t0=$(date +%s.%N)
-  "$BIN" test "$DVMM" --scenario "$TMP/$f" >"$TMP/$f.out" 2>&1
+  "$BIN" test "$TDVMM" --scenario "$TMP/$f" >"$TMP/$f.out" 2>&1
   code=$?
   t1=$(date +%s.%N)
   dt=$(awk "BEGIN{printf \"%.2f\", $t1-$t0}")
@@ -98,15 +98,15 @@ echo "== Gate 4: runtime infra error, agent absent (expect exit 2) =="
 cat > "$TMP/infra.yml" <<'YML'
 name: agent-absent
 run:
-  # dvmm.noagent=1 tells guest init NOT to start the control agent, so no agent
+  # tdvmm.noagent=1 tells guest init NOT to start the control agent, so no agent
   # ever reports ready -> the harness cannot reach the control channel -> infra.
-  cmdline: "console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable dvmm.stack=1 dvmm.noagent=1"
+  cmdline: "console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable tdvmm.stack=1 tdvmm.noagent=1"
 steps:
   - at: 0s
     exec: { container: service, cmd: "true" }
     expect: { exit: 0 }
 YML
-"$BIN" test "$DVMM" --scenario "$TMP/infra.yml" --jsonl "$TMP/i.jsonl" \
+"$BIN" test "$TDVMM" --scenario "$TMP/infra.yml" --jsonl "$TMP/i.jsonl" \
   --report "$TMP/i.report.json" --wall-timeout 200 >"$TMP/g4.out" 2>&1
 code=$?
 grep -E 'VERDICT|FAILURE|agent' "$TMP/g4.out" | tail -4 | sed 's/^/    /'

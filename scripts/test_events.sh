@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# dvmm — Phase-C guest-assertion bridge, end-to-end gate.
+# tdvmm — Phase-C guest-assertion bridge, end-to-end gate.
 #
 # Proves the full path: a workload container writes a JSON event to the guest
 # FIFO -> the agent forwards it over ttyS1 -> the host records a vtsc-stamped
@@ -13,11 +13,11 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-BIN="$ROOT/target/release/dvmm"
+BIN="$ROOT/target/release/tdvmm"
 PASS_SCN="$ROOT/guest/stacks/insert-trim/events.yml"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 
-[ -x "$BIN" ] || { echo "building dvmm..."; ( cd "$ROOT" && cargo build --release ) || exit 3; }
+[ -x "$BIN" ] || { echo "building tdvmm..."; ( cd "$ROOT" && cargo build --release ) || exit 3; }
 
 # Bake insert-trim into the store under its canonical name (the bake rebuilds the
 # agent with the poll/FIFO loop and embeds the FIFO volume). A canonical name keeps
@@ -46,7 +46,7 @@ echo "== Gate 2: failing assertion (expect FAIL, exit 1) =="
 cat > "$TMP/fail.yml" <<'YML'
 name: bridge-roundtrip-fail
 run:
-  cmdline: "console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable dvmm.stack=1 dvmm.interval=3600 dvmm.maxrows=5 dvmm.hc_tick=2"
+  cmdline: "console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable tdvmm.stack=1 tdvmm.interval=3600 tdvmm.maxrows=5 tdvmm.hc_tick=2"
   until: done
 steps:
   - at: 0s
@@ -60,8 +60,8 @@ steps:
     exec:
       container: service
       cmd: |
-        echo '{"kind":"always","name":"inv","ok":false}' > /run/dvmm/events
-        echo '{"kind":"done"}' > /run/dvmm/events
+        echo '{"kind":"always","name":"inv","ok":false}' > /run/tdvmm/events
+        echo '{"kind":"done"}' > /run/tdvmm/events
     expect: { exit: 0 }
 YML
 J2="$TMP/fail.jsonl"; R2="$TMP/fail.report.json"

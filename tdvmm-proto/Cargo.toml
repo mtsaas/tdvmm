@@ -1,9 +1,9 @@
 [package]
-name = "dvmm-proto"
+name = "tdvmm-proto"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-description = "Line-delimited-JSON control-channel wire protocol shared by the dvmm host and the guest dvmm-agent (one source of truth)."
+description = "Line-delimited-JSON control-channel wire protocol shared by the tdvmm host and the guest tdvmm-agent (one source of truth)."
 
 # DEP ALLOWLIST (Fable §1): serde + serde_json ONLY. No business logic, no
 # anyhow/chrono, no I/O engine. This crate is protocol-only: types, the SCHEMA

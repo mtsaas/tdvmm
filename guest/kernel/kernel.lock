@@ -1,11 +1,11 @@
-# dvmm guest kernel pin (Fable Part C).
+# tdvmm guest kernel pin (Fable Part C).
 #
 # The guest vmlinux is acquired EITHER by fetching the pinned GitHub release
 # asset (PRIMARY, verified against KERNEL_SHA256) OR by a reproducible build in
 # the pinned builder container (FALLBACK, also verified). Both paths yield the
 # byte-identical kernel recorded here. No host kernel toolchain is required.
 #
-# Regenerate with:  dvmm build-kernel --record
+# Regenerate with:  tdvmm build-kernel --record
 KERNEL_VERSION=6.1.128
 KERNEL_SHA256=98d75369b464dcc0093f0a7d43182c0e040c1b7262fcd826019f9e502637e5a5
 KERNEL_CONFIG_SHA256=837ecdf5a01e1c3c347f4aab79c93ad34ed8f68f08b8226b12342ee8f0fbf110
@@ -13,5 +13,5 @@ KERNEL_SOURCE_URL=https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.1.128.tar
 KERNEL_SOURCE_SHA256=874d67d3181570e69ac6b33853f0448f05fc90d4cf3e4baaadc4a9cede7c50f3
 BUILDER_IMAGE=docker.io/library/debian:bookworm-slim
 BUILDER_DIGEST=sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e
-RELEASE_ASSET_URL=https://github.com/clarkmcc/dvmm/releases/download/kernel-6.1.128/vmlinux-6.1.128
+RELEASE_ASSET_URL=https://github.com/clarkmcc/tdvmm/releases/download/kernel-6.1.128/vmlinux-6.1.128
 RELEASE_ASSET_NAME=vmlinux-6.1.128

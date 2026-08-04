@@ -1,6 +1,6 @@
 # Architecture, from first principles
 
-This document explains what `dvmm` is, how it works, and why it is
+This document explains what `tdvmm` is, how it works, and why it is
 built the way it is — starting from zero. It assumes you can read code but does
 **not** assume you know anything about hypervisors, KVM, or how a CPU keeps time.
 Every piece of jargon is defined the first time it appears; there is also a
@@ -13,7 +13,7 @@ conceptual map: the *ideas*, the *techniques*, and the *challenges*.
 
 ## 1. What this is, in one paragraph
 
-`dvmm` is a small **hypervisor** — a program that runs a whole other
+`tdvmm` is a small **hypervisor** — a program that runs a whole other
 computer (a "virtual machine") inside itself. It's about 4,500 lines of Rust. It
 boots one Linux virtual machine, runs a real workload inside it (a PostgreSQL
 database plus a little service container that writes a row every hour), and — the
@@ -28,7 +28,7 @@ into one self-contained file and runs it in a single Linux VM, fast-forwarding
 virtual time whenever the guest is idle — so a multi-service test spanning hours
 of service time finishes in seconds to minutes of real time. The guest lives in a
 **closed world** (no network uplink, no disk, fixed start time), and that
-closedness is what lets dvmm collapse the idle stretches safely.
+closedness is what lets tdvmm collapse the idle stretches safely.
 
 ---
 
@@ -78,7 +78,7 @@ them straight:
                      ▲  │ ioctl()
                      │  ▼
   ┌──────────────────────────────────────────────┐
-  │  dvmm  — THIS program (a normal userspace     │   decides the machine's shape:
+  │  tdvmm  — THIS program (a normal userspace     │   decides the machine's shape:
   │  process). The "VMM" / hypervisor.            │   memory, devices, interrupts,
   │                                               │   and — crucially — the clock
   └──────────────────────────────────────────────┘
@@ -87,7 +87,7 @@ them straight:
 - **KVM** (Kernel-based Virtual Machine) is a module already in the Linux kernel.
   It talks to the VT-x hardware. You use it by opening `/dev/kvm` and issuing
   `ioctl()` calls. We do **not** patch it.
-- **dvmm** is this project: a plain userspace program — the **VMM** (Virtual
+- **tdvmm** is this project: a plain userspace program — the **VMM** (Virtual
   Machine Monitor), a.k.a. the hypervisor. It asks KVM to create a VM and a
   virtual CPU, hands the VM some memory, and then runs the loop. When the guest
   exits, KVM returns control to *us*, and we decide what happens.
@@ -194,7 +194,7 @@ between `KVM_RUN`s — never while the guest is running.
 ## 5. The architecture — the pieces and how they fit
 
 ```
-                         dvmm process (one vCPU thread)
+                         tdvmm process (one vCPU thread)
   ┌───────────────────────────────────────────────────────────────────────┐
   │                                                                         │
   │   vCPU run loop  (main.rs):   service_timers();  KVM_RUN;  handle_exit  │
@@ -541,7 +541,7 @@ time (~950× on the demo).
 **How virtual time advances.** Fast-forward skips *idle* time: when the guest
 halts, the clock jumps straight to the next armed event. While the guest is
 actually running, virtual time advances with real host cycles at 1:1
-(`vtsc = host_tsc + offset`) — execution runs at real wall-clock rate. dvmm
+(`vtsc = host_tsc + offset`) — execution runs at real wall-clock rate. tdvmm
 compresses the gaps between work, not the work itself.
 
 Two mechanisms couple execution to real host time. Driving virtual time from
@@ -630,10 +630,10 @@ FF=off scripts/smoke_test_workload.sh 240
 # environment), but fast-forward at a console races the guest clock and pins a
 # host core, so run.sh is the one place that picks real time (it passes
 # `--ff off`). On startup the VMM always prints a one-line mode statement — the
-# FF state and how it was chosen, e.g. `[dvmm] fast-forward: OFF (--ff off)` —
+# FF state and how it was chosen, e.g. `[tdvmm] fast-forward: OFF (--ff off)` —
 # and, at a tty, a quit hint. Leave the guest with `poweroff` or `reboot`;
 # `exit` just gives a fresh prompt (the shell is respawned by init). Override
-# the mode with `FF=on ./run.sh`, or pass `--ff on` through.
+# the FF mode by passing `--ff on` through (`./run.sh --ff on`).
 ./run.sh
 ```
 

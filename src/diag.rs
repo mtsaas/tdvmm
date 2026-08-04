@@ -1,4 +1,4 @@
-//! Wedge observability (opt-in via `DVMM_WEDGE_SECS=<n>`).
+//! Wedge observability (opt-in via `TDVMM_WEDGE_SECS=<n>`).
 //!
 //! A guest can hard-wedge with the vCPU making no forward progress: no console
 //! output, no HLT (so fast-forward can't collapse it), just a spinning core. This
@@ -18,7 +18,7 @@
 //! read ON the vCPU thread — the single-writer invariant is preserved (no KVM
 //! ioctl is ever issued off-thread).
 //!
-//! Entirely off unless `DVMM_WEDGE_SECS` is set: `record`/`note_*` early-return,
+//! Entirely off unless `TDVMM_WEDGE_SECS` is set: `record`/`note_*` early-return,
 //! no watchdog thread, no signal handler installed.
 
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
@@ -88,10 +88,10 @@ pub struct Diag {
 }
 
 impl Diag {
-    /// Build from `DVMM_WEDGE_SECS`. When set (and > 0) the watchdog is armed and
+    /// Build from `TDVMM_WEDGE_SECS`. When set (and > 0) the watchdog is armed and
     /// the SIGUSR1 handler installed; otherwise every method is a no-op.
     pub fn from_env() -> Arc<Diag> {
-        let secs = std::env::var("DVMM_WEDGE_SECS")
+        let secs = std::env::var("TDVMM_WEDGE_SECS")
             .ok()
             .and_then(|s| s.trim().parse::<u64>().ok())
             .filter(|&n| n > 0);
@@ -110,8 +110,8 @@ impl Diag {
         if enabled {
             crate::util::install_signal_handler(libc::SIGUSR1, on_sigusr1);
             crate::log_line(format_args!(
-                "[dvmm][diag] wedge watchdog ARMED: will dump vCPU state after {}s \
-                 with no console/HLT progress (DVMM_WEDGE_SECS)",
+                "[tdvmm][diag] wedge watchdog ARMED: will dump vCPU state after {}s \
+                 with no console/HLT progress (TDVMM_WEDGE_SECS)",
                 d.watchdog_secs
             ));
         }
@@ -193,7 +193,7 @@ impl Diag {
         let (rip, rsp, rflags) = match vcpu.get_regs() {
             Ok(r) => (r.rip, r.rsp, r.rflags),
             Err(e) => {
-                crate::log_line(format_args!("[dvmm][diag] get_regs failed: {e}"));
+                crate::log_line(format_args!("[tdvmm][diag] get_regs failed: {e}"));
                 (0, 0, 0)
             }
         };
@@ -202,7 +202,7 @@ impl Diag {
             Err(_) => (0, 0),
         };
         crate::log_line(format_args!(
-            "[dvmm][diag] guest @wedge: RIP={rip:#018x} RSP={rsp:#018x} RFLAGS={rflags:#x} \
+            "[tdvmm][diag] guest @wedge: RIP={rip:#018x} RSP={rsp:#018x} RFLAGS={rflags:#x} \
              CR2={cr2:#x} CR3={cr3:#x} | if_flag={if_flag} ready_inj={ready} cr8={cr8}"
         ));
         let when = match next_deadline {
@@ -213,10 +213,10 @@ impl Diag {
             None => " (none armed)".into(),
         };
         crate::log_line(format_args!(
-            "[dvmm][diag]   vtsc_now={now_vtsc} next_deadline={next_deadline:?}{when}"
+            "[tdvmm][diag]   vtsc_now={now_vtsc} next_deadline={next_deadline:?}{when}"
         ));
-        crate::log_line(format_args!("[dvmm][diag]   {lapic_diag}"));
-        crate::log_line(format_args!("[dvmm][diag]   {ioapic_diag}"));
+        crate::log_line(format_args!("[tdvmm][diag]   {lapic_diag}"));
+        crate::log_line(format_args!("[tdvmm][diag]   {ioapic_diag}"));
     }
 
     /// Tell the watchdog the vCPU loop has ended: post-run capture/finalize is
@@ -273,7 +273,7 @@ impl Diag {
                     "in-guest SPIN (blocked inside KVM_RUN — 0 exits during the stall)"
                 };
                 crate::log_line(format_args!(
-                    "[dvmm][diag] WEDGE #{dumps}: {stalled}s with no console/HLT progress — \
+                    "[tdvmm][diag] WEDGE #{dumps}: {stalled}s with no console/HLT progress — \
                      {shape}; exits advanced {delta} during the stall (~{}/s)",
                     delta / stalled.max(1)
                 ));
@@ -303,7 +303,7 @@ impl Diag {
             }
         }
         crate::log_line(format_args!(
-            "[dvmm][diag]   exit histogram (cumulative): {}",
+            "[tdvmm][diag]   exit histogram (cumulative): {}",
             s.trim_end()
         ));
     }
@@ -321,7 +321,7 @@ impl Diag {
             let _ = write!(s, "{}@{:#x} ", kind.name(), v & ADDR_MASK);
         }
         crate::log_line(format_args!(
-            "[dvmm][diag]   last {n} exits (oldest->newest): {}",
+            "[tdvmm][diag]   last {n} exits (oldest->newest): {}",
             s.trim_end()
         ));
     }

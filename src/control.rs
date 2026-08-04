@@ -1,7 +1,7 @@
 //! The modeled control channel: a second 16550 UART (COM2 / ttyS1).
 //!
 //! TEST-1a adds a control channel between the VMM (host) and a small guest-side
-//! `dvmm-agent`, so a developer can drive virtual time, probe guest state, and
+//! `tdvmm-agent`, so a developer can drive virtual time, probe guest state, and
 //! assert on it. Fable locked the transport: **reuse the serial model, second
 //! port**. This is that second UART.
 //!
@@ -88,8 +88,8 @@ impl ControlChannel {
     }
 
     /// Queue one already-framed command line (VMM -> guest). The bytes must be a
-    /// complete `dvmm_proto`-framed line (JSON + trailing `\n`, via
-    /// [`dvmm_proto::encode_line`]) — this crate no longer owns framing; the wire
+    /// complete `tdvmm_proto`-framed line (JSON + trailing `\n`, via
+    /// [`tdvmm_proto::encode_line`]) — this crate no longer owns framing; the wire
     /// contract does. Does NOT touch the FIFO or raise an IRQ — call
     /// [`pump`](Self::pump) for that.
     pub fn send_frame(&mut self, framed: &[u8]) {

@@ -1,29 +1,30 @@
 #!/usr/bin/env bash
-# Build (release) and boot the VM interactively on the serial console.
+# Build (release) and boot a guest interactively on the serial console.
 # Ctrl-A is passed to the guest; leave the guest with `poweroff` or `reboot`
-# (or stop the VMM from another terminal, e.g. `pkill dvmm`).
+# (or stop the VMM from another terminal, e.g. `pkill tdvmm`).
 #
-# Defaults to the Step 2a Alpine container guest (RAM-only rootfs with podman)
-# and 2 GiB of RAM. Override for the minimal busybox clock guest, e.g.:
-#   INITRD=guest/initramfs/initramfs.cpio.gz MEM=256 ./run.sh
+# Boots a baked stack (default: spinner) via `tdvmm run`. Override the stack:
+#   STACK=webstack ./run.sh
+# For the minimal busybox clock guest instead:
+#   ./target/release/tdvmm boot --kernel guest/kernel/vmlinux-6.1.128 \
+#     --initrd guest/initramfs/initramfs.cpio.gz --mem 256 --ff off
 #
-# Fast-forward is FORCED OFF here (FF=off) because this is the human entry point:
-# at an interactive console fast-forward races the guest clock and pins a host
-# core. The BINARY default stays FF-on (see main.rs); run.sh is the one place
-# that picks real-time for a console. Override with `FF=on ./run.sh`, or pass
-# `--ff on` through (extra args are forwarded and win over the default).
+# Fast-forward is FORCED OFF here because this is the human entry point: at an
+# interactive console fast-forward races the guest clock and pins a host core.
+# The BINARY default stays FF-on (see main.rs); run.sh is the one place that
+# picks real-time for a console. Pass `--ff on` through to override (extra args
+# are forwarded and win over the flags below). The cmdline omits `tdvmm.stack=1`,
+# so the guest runs the container self-test + a respawning serial shell rather
+# than the baked compose.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-KERNEL="${KERNEL:-$ROOT/guest/kernel/vmlinux-6.1.128}"
-INITRD="${INITRD:-$ROOT/guest/initramfs-alpine/initramfs-alpine.cpio.gz}"
-MEM="${MEM:-2048}"
-FF="${FF:-off}"
+STACK="${STACK:-spinner}"
 
 cargo build --release --manifest-path "$ROOT/Cargo.toml"
-exec "$ROOT/target/release/dvmm" boot \
-  --kernel "$KERNEL" \
-  --initrd "$INITRD" \
-  --mem "$MEM" \
-  --ff "$FF" \
+"$ROOT/target/release/tdvmm" build "$ROOT/guest/stacks/$STACK/compose.yml"
+exec "$ROOT/target/release/tdvmm" run "$STACK" \
+  --ff off \
+  --cmdline "console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable" \
+  ${MEM:+--mem "$MEM"} \
   "$@"

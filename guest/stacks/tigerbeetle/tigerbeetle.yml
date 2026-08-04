@@ -1,6 +1,6 @@
-# dvmm -- TigerBeetle cluster scenario (3-replica fault tolerance).
+# tdvmm -- TigerBeetle cluster scenario (3-replica fault tolerance).
 #
-#   dvmm test tigerbeetle.dvmm --scenario tigerbeetle.yml --mem 12288 --logs-dir /tmp/tb-logs
+#   tdvmm test tigerbeetle.tdvmm --scenario tigerbeetle.yml --mem 12288 --logs-dir /tmp/tb-logs
 #
 # The consensus story: a 3-replica cluster tolerates losing one replica. We prove
 # double-entry always balances (A.debits_posted == B.credits_posted), KILL a
@@ -33,7 +33,7 @@ run:
   mem: 6144
   # ~20 s client cadence so several accounting cycles (and post-fault growth)
   # play out quickly; fast-forward collapses the idle between them.
-  cmdline: "console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable dvmm.stack=1 dvmm.interval=20"
+  cmdline: "console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable tdvmm.stack=1 tdvmm.interval=20"
 
 steps:
   # 1. Readiness: the client container is up (=> its depends_on replicas started).

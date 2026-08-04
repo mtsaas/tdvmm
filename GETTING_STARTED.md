@@ -1,50 +1,50 @@
-# Getting started with dvmm
+# Getting started with tdvmm
 
 This takes you from zero to testing a real service stack: build it, run it, read its
 logs, and write a test that drives it through time and injects faults. It assumes a
-terminal; it does not assume you know how dvmm works inside.
+terminal; it does not assume you know how tdvmm works inside.
 
 ## The idea, in three sentences
 
-dvmm runs a Docker Compose stack inside one small Linux VM. When the guest goes idle
-(a service sleeping until its next timer), dvmm **fast-forwards** virtual time straight
+tdvmm runs a Docker Compose stack inside one small Linux VM. When the guest goes idle
+(a service sleeping until its next timer), tdvmm **fast-forwards** virtual time straight
 to the next thing that happens — so a job that runs "every hour" plays out in seconds.
 A whole stack — kernel, container images, and all — bakes into a single self-contained
-file (a `.dvmm`) that runs offline.
+file (a `.tdvmm`) that runs offline.
 
 Three commands do everything:
 
 | command      | what it does                                              |
 |--------------|----------------------------------------------------------|
-| `dvmm build` | bake a `compose.yml` into a `.dvmm`                       |
-| `dvmm run`   | boot a `.dvmm` and watch it                               |
-| `dvmm test`  | drive a `.dvmm` through a scenario, get a pass/fail verdict |
+| `tdvmm build` | bake a `compose.yml` into a `.tdvmm`                       |
+| `tdvmm run`   | boot a `.tdvmm` and watch it                               |
+| `tdvmm test`  | drive a `.tdvmm` through a scenario, get a pass/fail verdict |
 
 ## Requirements
 
-- Linux on x86_64 with `/dev/kvm` — that's all you need to *run* a `.dvmm`.
+- Linux on x86_64 with `/dev/kvm` — that's all you need to *run* a `.tdvmm`.
 - `podman` to *build* one (it pulls the images and bakes the guest in pinned containers).
-- dvmm itself: `cargo build --release` (or `mise run install`) → the `dvmm` binary.
+- tdvmm itself: `cargo build --release` (or `mise run install`) → the `tdvmm` binary.
 
 ## 1. Build a stack
 
-Point `dvmm build` at any supported `compose.yml`. We'll use the bundled demo (Postgres
+Point `tdvmm build` at any supported `compose.yml`. We'll use the bundled demo (Postgres
 + Redis + a small gRPC api/worker/client):
 
 ```sh
-dvmm build guest/stacks/demo/compose.yml
-# -> ~/.dvmm/artifacts/demo.dvmm
+tdvmm build guest/stacks/demo/compose.yml
+# -> ~/.tdvmm/artifacts/demo.tdvmm
 ```
 
 That resolves each image to a digest, pulls and packs it, bakes a kernel and an in-RAM
-root filesystem, and writes one file under `~/.dvmm/artifacts/`. Same inputs always
-produce the same bytes. (`-o path.dvmm` writes it wherever you want.)
+root filesystem, and writes one file under `~/.tdvmm/artifacts/`. Same inputs always
+produce the same bytes. (`-o path.tdvmm` writes it wherever you want.)
 
-See everything you've built with `dvmm ls`:
+See everything you've built with `tdvmm ls`:
 
 ```sh
-dvmm ls            # name, size, and when each artifact was built (times are UTC)
-dvmm ls --digest   # also print each one's sha256 identity (reads the files)
+tdvmm ls            # name, size, and when each artifact was built (times are UTC)
+tdvmm ls --digest   # also print each one's sha256 identity (reads the files)
 ```
 
 If your compose file needs something the closed world can't do — host networking, an
@@ -53,10 +53,10 @@ find out now, not at runtime.
 
 ### Building on macOS
 
-`dvmm build` runs only on Linux (it bakes the guest inside Linux containers). But if you
+`tdvmm build` runs only on Linux (it bakes the guest inside Linux containers). But if you
 develop on a Mac, `scripts/macos-build.sh` runs the bake for you inside the Linux VM that
-`podman machine` already provides, and drops the finished `.dvmm` straight into your Mac's
-`~/.dvmm/artifacts/`:
+`podman machine` already provides, and drops the finished `.tdvmm` straight into your Mac's
+`~/.tdvmm/artifacts/`:
 
 ```sh
 scripts/macos-build.sh guest/stacks/demo/compose.yml
@@ -64,18 +64,18 @@ scripts/macos-build.sh guest/stacks/demo/compose.yml
 
 The boundary: **macOS can bake, but only Linux with `/dev/kvm` can run.** Because the
 build is byte-reproducible, a Mac-baked artifact is identical to a Linux-baked one — run
-`dvmm verify` to confirm.
+`tdvmm verify` to confirm.
 
 ## 2. Run it and watch
 
 ```sh
-dvmm run demo --max-virtual-time 1h \
-  --cmdline "console=ttyS0 dvmm.stack=1 dvmm.interval=180 dvmm.hc_tick=30"
+tdvmm run demo --max-virtual-time 1h \
+  --cmdline "console=ttyS0 tdvmm.stack=1 tdvmm.interval=180 tdvmm.hc_tick=30"
 ```
 
-`demo` is the stack **name** — `dvmm run`/`test`/`inspect`/`verify` resolve a bare name
-from `~/.dvmm/artifacts/`. To run a `.dvmm` file on disk instead, give a path with a `/`
-(`./demo.dvmm` or an absolute path); a bare name is always a store name.
+`demo` is the stack **name** — `tdvmm run`/`test`/`inspect`/`verify` resolve a bare name
+from `~/.tdvmm/artifacts/`. To run a `.tdvmm` file on disk instead, give a path with a `/`
+(`./demo.tdvmm` or an absolute path); a bare name is always a store name.
 
 It boots, brings the stack up, and streams every container's output to your terminal,
 prefixed by service name. Idle time fast-forwards, so an hour of the workload runs in
@@ -91,21 +91,21 @@ tens of seconds. Two flags you'll reach for constantly:
 seconds instead of its baked hourly default — so you see it iterate several times.
 Most stacks don't need it.)
 
-The run ends when it reaches `--max-virtual-time`. To stop sooner, `pkill dvmm` from
-another terminal (`Ctrl-C` goes to the guest, not to dvmm).
+The run ends when it reaches `--max-virtual-time`. To stop sooner, `pkill tdvmm` from
+another terminal (`Ctrl-C` goes to the guest, not to tdvmm).
 
 ## 3. See each service's logs
 
 The terminal stream interleaves everything. For a clean per-service log, add `--logs-dir`:
 
 ```sh
-dvmm run demo --max-virtual-time 1h --logs-dir ./logs \
-  --cmdline "console=ttyS0 dvmm.stack=1 dvmm.interval=180 dvmm.hc_tick=30"
+tdvmm run demo --max-virtual-time 1h --logs-dir ./logs \
+  --cmdline "console=ttyS0 tdvmm.stack=1 tdvmm.interval=180 tdvmm.hc_tick=30"
 # -> ./logs/postgres.log, ./logs/redis.log, ./logs/api.log, ./logs/worker.log, ...
 ```
 
 Each file is one service's output with RFC3339 timestamps and `stdout`/`stderr` tags.
-`--logs-dir` works on `dvmm test` too — it's how you get a post-mortem of a test run.
+`--logs-dir` works on `tdvmm test` too — it's how you get a post-mortem of a test run.
 
 ## 4. Test a service against a scenario
 
@@ -114,7 +114,7 @@ each virtual time, do something — wait for readiness, run a command and check 
 or inject a fault. Run one against the demo:
 
 ```sh
-dvmm test demo \
+tdvmm test demo \
   --scenario guest/stacks/demo/demo.yml --logs-dir ./logs
 ```
 
@@ -167,7 +167,7 @@ The pieces:
 - **`exec` + `expect`** — run a command in a container and require an `exit:` code and/or
   an `output_matches:` regex.
 
-Save it and `dvmm test <artifact> --scenario my-first-test.yml`.
+Save it and `tdvmm test <artifact> --scenario my-first-test.yml`.
 
 ## 5. Design a fault
 
@@ -246,13 +246,13 @@ to crib from.
 ## Looking at an artifact
 
 ```sh
-dvmm inspect demo   # what's inside: images, sizes, the manifest
-dvmm verify  demo   # check nothing changed; print its sha256
+tdvmm inspect demo   # what's inside: images, sizes, the manifest
+tdvmm verify  demo   # check nothing changed; print its sha256
 ```
 
 ## Good to know
 
-- **The closed world.** dvmm runs a *subset* of Compose — the part that fits one offline
+- **The closed world.** tdvmm runs a *subset* of Compose — the part that fits one offline
   machine: `image:` and `build:` services, service-name networking, healthchecks and
   `depends_on`, relative bind mounts, and named volumes. Anything needing the outside
   world is rejected at build time.
@@ -267,4 +267,4 @@ dvmm verify  demo   # check nothing changed; print its sha256
 - `guest/stacks/` — worked examples: `demo` (the full gRPC stack), `insert-trim`
   (minimal), `faultlab` (faults), `webstack`, `svcchain`.
 - `CONTRIBUTING.md` — how the code is laid out and where to change things.
-- `ARCHITECTURE.md` — how dvmm works inside.
+- `ARCHITECTURE.md` — how tdvmm works inside.

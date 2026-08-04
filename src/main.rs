@@ -1,4 +1,4 @@
-//! dvmm — fast-forward virtual time on idle.
+//! tdvmm — fast-forward virtual time on idle.
 //!
 //! A single-vCPU, Firecracker-shaped KVM VMM. The guest runs on a **userspace**
 //! interrupt controller we own: no in-kernel irqchip, no in-kernel PIT. The
@@ -88,9 +88,9 @@ use crate::vtsc::VirtualClock;
 const KVMIO: u32 = 0xAE;
 ioctl_iow_nr!(KVM_INTERRUPT, KVMIO, 0x86, kvm_interrupt);
 
-// ---- dvmm's own stderr logging (raw-tty aware) -----------------------------
+// ---- tdvmm's own stderr logging (raw-tty aware) -----------------------------
 //
-// At an interactive console dvmm puts the tty in RAW mode (see
+// At an interactive console tdvmm puts the tty in RAW mode (see
 // `serial::RawTerminal`) so the GUEST owns the byte stream verbatim — which also
 // turns OFF the terminal's newline->CRLF translation (ONLCR). A bare "\n" on OUR
 // OWN log lines would then only drop down a row, not return to column 0, so our
@@ -98,14 +98,14 @@ ioctl_iow_nr!(KVM_INTERRUPT, KVMIO, 0x86, kvm_interrupt);
 // raw mode is active we therefore terminate our log lines with CRLF and prepend a
 // CR to snap to column 0 (embedded newlines get the same treatment). In cooked
 // mode the terminal itself adds the CR, so a plain "\n" is already correct. This
-// changes ONLY dvmm's own log lines — the guest's byte stream is untouched.
+// changes ONLY tdvmm's own log lines — the guest's byte stream is untouched.
 //
 // The flag starts false and is set true only once `RawTerminal::enable` has put
 // the tty in raw mode (see `run`), so lines emitted during cooked-mode boot setup
 // still use a plain "\n".
 static RAW_TTY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Emit one dvmm log line to stderr with raw-tty-aware line endings (see the
+/// Emit one tdvmm log line to stderr with raw-tty-aware line endings (see the
 /// module note above). Used via the [`dlog!`] macro (and directly by the device
 /// modules); not for guest output.
 pub(crate) fn log_line(args: std::fmt::Arguments) {
@@ -122,8 +122,8 @@ pub(crate) fn log_line(args: std::fmt::Arguments) {
     let _ = h.flush();
 }
 
-/// dvmm's own stderr log line, raw-tty aware (see [`log_line`]). A drop-in for
-/// `eprintln!` for dvmm's OWN diagnostics — never for guest console bytes.
+/// tdvmm's own stderr log line, raw-tty aware (see [`log_line`]). A drop-in for
+/// `eprintln!` for tdvmm's OWN diagnostics — never for guest console bytes.
 macro_rules! dlog {
     ($($arg:tt)*) => { crate::log_line(format_args!($($arg)*)) };
 }
@@ -149,7 +149,7 @@ pub(crate) const DEFAULT_MEM_MIB: u64 = 2048;
 /// produces (this is a config threshold, not a timer/vtsc conversion).
 pub(crate) const DEFAULT_MAX_JUMP_SECS: f64 = 300.0;
 
-/// Everything `dvmm test` needs to run a scenario, built before boot and handed
+/// Everything `tdvmm test` needs to run a scenario, built before boot and handed
 /// to the vCPU loop (which builds the engine once the virtual clock exists).
 struct ScenarioSetup {
     scenario: scenario::Scenario,
@@ -162,7 +162,7 @@ struct LogsCapture {
     dir: std::path::PathBuf,
     /// Compose service names, sorted for a deterministic per-service file order.
     services: Vec<String>,
-    /// The compose project (`dvmm_<stack>`), for mapping `<project>-<service>-<n>`
+    /// The compose project (`tdvmm_<stack>`), for mapping `<project>-<service>-<n>`
     /// container-log prefixes back to services in the console scanner.
     project: String,
 }
@@ -175,7 +175,7 @@ struct LogsCapture {
 fn prepare_logs_dir(dir: &str) -> Result<std::path::PathBuf, String> {
     let path = std::path::PathBuf::from(dir);
     std::fs::create_dir_all(&path).map_err(|e| format!("creating --logs-dir {dir}: {e}"))?;
-    let probe = path.join(".dvmm-logs-probe");
+    let probe = path.join(".tdvmm-logs-probe");
     std::fs::write(&probe, b"ok").map_err(|e| format!("--logs-dir {dir} is not writable: {e}"))?;
     let _ = std::fs::remove_file(&probe);
     Ok(path)
@@ -240,7 +240,7 @@ fn main() {
     match dispatch() {
         Ok(code) => std::process::exit(code),
         Err(err) => {
-            dlog!("dvmm: fatal: {err}");
+            dlog!("tdvmm: fatal: {err}");
             std::process::exit(1);
         }
     }
@@ -285,7 +285,7 @@ fn dispatch() -> Result<i32, Box<dyn std::error::Error>> {
     }
 }
 
-// ---- `dvmm boot`: raw kernel + initramfs (low-level dev verb) ---------------
+// ---- `tdvmm boot`: raw kernel + initramfs (low-level dev verb) ---------------
 
 fn cmd_boot(args: BootArgs) -> Result<i32, Box<dyn std::error::Error>> {
     let eff = EffectiveConfig::from_boot(&args.common)?;
@@ -294,7 +294,7 @@ fn cmd_boot(args: BootArgs) -> Result<i32, Box<dyn std::error::Error>> {
     let initrd = std::fs::read(&args.initrd)
         .map_err(|e| format!("opening initrd {}: {e}", args.initrd))?;
     dlog!(
-        "[dvmm] boot: kernel={} initrd={}",
+        "[tdvmm] boot: kernel={} initrd={}",
         args.kernel,
         args.initrd
     );
@@ -302,7 +302,7 @@ fn cmd_boot(args: BootArgs) -> Result<i32, Box<dyn std::error::Error>> {
     Ok(out.exit_code)
 }
 
-// ---- `dvmm run`: a .dvmm stack artifact (baked defaults + overrides) --------
+// ---- `tdvmm run`: a .tdvmm stack artifact (baked defaults + overrides) --------
 
 fn cmd_run(args: RunArgs) -> Result<i32, Box<dyn std::error::Error>> {
     // Resolve a store NAME (e.g. `tigerbeetle`) or a path to a concrete file.
@@ -319,11 +319,11 @@ fn cmd_run(args: RunArgs) -> Result<i32, Box<dyn std::error::Error>> {
     // each payload member's sha256 and compare to the manifest, so a corrupted or
     // tampered artifact is caught before we boot it.
     if args.no_verify {
-        dlog!("[dvmm] run: member-hash verify SKIPPED (--no-verify)");
+        dlog!("[tdvmm] run: member-hash verify SKIPPED (--no-verify)");
     } else {
         verify_payload_or_bail(artifact_path, &payload)?;
         dlog!(
-            "[dvmm] run: {} member hashes verified against manifest (identity {})",
+            "[tdvmm] run: {} member hashes verified against manifest (identity {})",
             payload.manifest.members.len(),
             &artifact::file_sha256_hex(artifact_path)?[..16],
         );
@@ -331,7 +331,7 @@ fn cmd_run(args: RunArgs) -> Result<i32, Box<dyn std::error::Error>> {
 
     let eff = EffectiveConfig::from_run(&args.common, &payload.manifest.run_defaults)?;
     dlog!(
-        "[dvmm] run: stack={} project={} (format v{})",
+        "[tdvmm] run: stack={} project={} (format v{})",
         payload.manifest.stack,
         payload.manifest.project,
         payload.manifest.format_version,
@@ -345,7 +345,7 @@ fn cmd_run(args: RunArgs) -> Result<i32, Box<dyn std::error::Error>> {
             let path = match prepare_logs_dir(dir) {
                 Ok(p) => p,
                 Err(e) => {
-                    dlog!("[dvmm] run: {e}");
+                    dlog!("[tdvmm] run: {e}");
                     return Ok(EXIT_TEST_INFRA);
                 }
             };
@@ -366,7 +366,7 @@ fn cmd_run(args: RunArgs) -> Result<i32, Box<dyn std::error::Error>> {
     Ok(out.exit_code)
 }
 
-// ---- `dvmm test`: drive a .dvmm stack against a scenario (verdict) ----------
+// ---- `tdvmm test`: drive a .tdvmm stack against a scenario (verdict) ----------
 
 fn cmd_test(args: TestArgs) -> Result<i32, Box<dyn std::error::Error>> {
     // Resolve a store NAME or a path; a resolution miss is an infra error (exit 2),
@@ -375,12 +375,12 @@ fn cmd_test(args: TestArgs) -> Result<i32, Box<dyn std::error::Error>> {
         Ok(p) => match p.to_str() {
             Some(s) => s.to_string(),
             None => {
-                dlog!("[dvmm][test] infrastructure error: artifact path is not valid UTF-8");
+                dlog!("[tdvmm][test] infrastructure error: artifact path is not valid UTF-8");
                 return Ok(EXIT_TEST_INFRA);
             }
         },
         Err(e) => {
-            dlog!("[dvmm][test] infrastructure error: {e}");
+            dlog!("[tdvmm][test] infrastructure error: {e}");
             return Ok(EXIT_TEST_INFRA);
         }
     };
@@ -389,13 +389,13 @@ fn cmd_test(args: TestArgs) -> Result<i32, Box<dyn std::error::Error>> {
     let payload = match artifact::read_for_run(&artifact_path) {
         Ok(p) => p,
         Err(e) => {
-            dlog!("[dvmm][test] infrastructure error: {e}");
+            dlog!("[tdvmm][test] infrastructure error: {e}");
             return Ok(EXIT_TEST_INFRA);
         }
     };
     if !args.no_verify {
         if let Err(e) = verify_payload_or_bail(&artifact_path, &payload) {
-            dlog!("[dvmm][test] infrastructure error: {e}");
+            dlog!("[tdvmm][test] infrastructure error: {e}");
             return Ok(EXIT_TEST_INFRA);
         }
     }
@@ -406,14 +406,14 @@ fn cmd_test(args: TestArgs) -> Result<i32, Box<dyn std::error::Error>> {
     let services = match scenario::service_names(&payload.compose_lock) {
         Ok(s) => s,
         Err(e) => {
-            dlog!("[dvmm][test] scenario rejected: {e}");
+            dlog!("[tdvmm][test] scenario rejected: {e}");
             return Ok(EXIT_TEST_INFRA);
         }
     };
     let scn = match scenario::Scenario::load_and_validate(&args.scenario, &services) {
         Ok(s) => s,
         Err(e) => {
-            dlog!("[dvmm][test] scenario rejected (static validation): {e}");
+            dlog!("[tdvmm][test] scenario rejected (static validation): {e}");
             return Ok(EXIT_TEST_INFRA);
         }
     };
@@ -426,7 +426,7 @@ fn cmd_test(args: TestArgs) -> Result<i32, Box<dyn std::error::Error>> {
         let h = scn.implicit_horizon_secs();
         eff.max_virtual_time_secs = Some(h);
         dlog!(
-            "[dvmm][test] implicit end-horizon: {:.0}s of virtual time (last step + slack)",
+            "[tdvmm][test] implicit end-horizon: {:.0}s of virtual time (last step + slack)",
             h
         );
     }
@@ -444,7 +444,7 @@ fn cmd_test(args: TestArgs) -> Result<i32, Box<dyn std::error::Error>> {
         .unwrap_or_else(|| format!("{}.report.json", payload.manifest.stack));
 
     dlog!(
-        "[dvmm][test] stack={} scenario={} ({} steps) artifact-sha256={}",
+        "[tdvmm][test] stack={} scenario={} ({} steps) artifact-sha256={}",
         payload.manifest.stack,
         scn.source_path,
         scn.steps.len(),
@@ -466,7 +466,7 @@ fn cmd_test(args: TestArgs) -> Result<i32, Box<dyn std::error::Error>> {
             let path = match prepare_logs_dir(dir) {
                 Ok(p) => p,
                 Err(e) => {
-                    dlog!("[dvmm][test] {e}");
+                    dlog!("[tdvmm][test] {e}");
                     return Ok(EXIT_TEST_INFRA);
                 }
             };
@@ -502,7 +502,7 @@ fn cmd_test(args: TestArgs) -> Result<i32, Box<dyn std::error::Error>> {
             }
             if !done.load(std::sync::atomic::Ordering::Relaxed) {
                 crate::log_line(format_args!(
-                    "[dvmm][test] WALL-CLOCK TIMEOUT after {wall_timeout}s — aborting (exit 2)"
+                    "[tdvmm][test] WALL-CLOCK TIMEOUT after {wall_timeout}s — aborting (exit 2)"
                 ));
                 std::process::exit(EXIT_TEST_INFRA);
             }
@@ -543,7 +543,7 @@ fn verify_payload_or_bail(
     Ok(())
 }
 
-// ---- `dvmm inspect`: print manifest.json (manifest member only) -------------
+// ---- `tdvmm inspect`: print manifest.json (manifest member only) -------------
 
 fn cmd_inspect(path: &str) -> Result<i32, Box<dyn std::error::Error>> {
     let resolved = artifact::resolve(path)?;
@@ -557,14 +557,14 @@ fn cmd_inspect(path: &str) -> Result<i32, Box<dyn std::error::Error>> {
     Ok(0)
 }
 
-// ---- `dvmm verify`: member hashes vs manifest + the file identity -----------
+// ---- `tdvmm verify`: member hashes vs manifest + the file identity -----------
 
 fn cmd_verify(path: &str) -> Result<i32, Box<dyn std::error::Error>> {
     let resolved = artifact::resolve(path)?;
     let path = resolved.to_str().ok_or("artifact path is not valid UTF-8")?;
     let report = artifact::verify(path)?;
     // Identity first (always printed, even on failure — it names the file checked).
-    println!("dvmm-artifact: {path}");
+    println!("tdvmm-artifact: {path}");
     println!("sha256 (identity): {}", report.file_sha256);
     for c in &report.checks {
         println!(
@@ -590,13 +590,13 @@ fn cmd_verify(path: &str) -> Result<i32, Box<dyn std::error::Error>> {
     }
 }
 
-// ---- `dvmm ls`: list the local artifact store -------------------------------
+// ---- `tdvmm ls`: list the local artifact store -------------------------------
 
 fn cmd_ls(args: LsArgs) -> Result<i32, Box<dyn std::error::Error>> {
     let entries = artifact::list_store()?;
     if entries.is_empty() {
         println!(
-            "no artifacts in {} (build one with `dvmm build <compose.yml>`)",
+            "no artifacts in {} (build one with `tdvmm build <compose.yml>`)",
             artifact::store_dir().display()
         );
         return Ok(0);
@@ -683,15 +683,15 @@ fn boot_and_run(
         let mode = ff_mode_statement(eff.fast_forward, eff.ff_explicit);
         if tty {
             dlog!(
-                "[dvmm] {mode} — quit the guest with `poweroff` or `reboot` \
+                "[tdvmm] {mode} — quit the guest with `poweroff` or `reboot` \
                  (`exit` now gives a fresh shell)"
             );
         } else {
-            dlog!("[dvmm] {mode}");
+            dlog!("[tdvmm] {mode}");
         }
         if eff.fast_forward && tty {
             dlog!(
-                "[dvmm][WARN] fast-forward is ON at an interactive console — it \
+                "[tdvmm][WARN] fast-forward is ON at an interactive console — it \
                  races the guest clock and pins a host core; pass `--ff off` for \
                  real-time."
             );
@@ -701,7 +701,7 @@ fn boot_and_run(
     // The EFFECTIVE-CONFIG line (spec item 3): the resolved knobs with per-knob
     // provenance (baked < flag). This is the future record-log preamble — every
     // run emits it, so a harness/log can reconstruct exactly what was run and why.
-    dlog!("[dvmm] effective-config: {}", eff.provenance);
+    dlog!("[tdvmm] effective-config: {}", eff.provenance);
 
     // --- VM ---
     let vm = kvm.create_vm()?;
@@ -737,7 +737,7 @@ fn boot_and_run(
         let b = clock.vtsc_now();
         assert!(b >= a, "vtsc went backwards ({a} -> {b}) — clock is not sane");
         dlog!(
-            "[dvmm] virtual clock: tsc_khz={} (~{} MHz) tsc_offset={} vtsc_now={}",
+            "[tdvmm] virtual clock: tsc_khz={} (~{} MHz) tsc_offset={} vtsc_now={}",
             clock.freq().khz(),
             clock.freq().hz() / 1_000_000,
             clock.tsc_offset(),
@@ -749,7 +749,7 @@ fn boot_and_run(
     let entry = boot::load_kernel(&guest_mem, kernel)?;
     let initrd_cfg = boot::load_initrd(&guest_mem, initrd, mem_size)?;
     dlog!(
-        "[dvmm] vmlinux entry {:#x}, initramfs {} bytes @ {:#x}",
+        "[tdvmm] vmlinux entry {:#x}, initramfs {} bytes @ {:#x}",
         entry.0, initrd_cfg.size, initrd_cfg.address
     );
 
@@ -833,7 +833,7 @@ fn run_user_backend(
     let apic_bus_hz = apic_bus_hz_from_cpuid();
     let (ratio_num, ratio_den) = apic_timer_tsc_ratio(clock.freq().hz());
     dlog!(
-        "[dvmm] userspace LAPIC timer: {ratio_num}/{ratio_den} TSC cycles/count \
+        "[tdvmm] userspace LAPIC timer: {ratio_num}/{ratio_den} TSC cycles/count \
          (CPUID 0x15 EBX/EAX), crystal ~{} MHz",
         apic_bus_hz / 1_000_000
     );
@@ -853,7 +853,7 @@ fn run_user_backend(
     // Test control channel: the 2nd 16550 (COM2 / ttyS1). Always present so the
     // guest agent's ttyS1 always works; the scenario engine is what is optional.
     let mut com2 = control::ControlChannel::new()?;
-    // The scenario engine (only for `dvmm test`). Built here so it has the virtual
+    // The scenario engine (only for `tdvmm test`). Built here so it has the virtual
     // clock's frequency for its cycles<->duration math.
     let mut engine: Option<scenario::ScenarioEngine> = match scenario_setup {
         Some(s) => Some(scenario::ScenarioEngine::new(s.scenario, clock.freq(), s.meta)?),
@@ -920,7 +920,7 @@ fn run_user_backend(
     });
     if let Some(h) = horizon_vtsc {
         dlog!(
-            "[dvmm] max-virtual-time horizon: {:.3}s of virtual time \
+            "[tdvmm] max-virtual-time horizon: {:.3}s of virtual time \
              (vtsc {vtsc_start} -> {h}), as a (vtsc, StopRun) queue event",
             max_virtual_time_secs.unwrap(),
         );
@@ -931,7 +931,7 @@ fn run_user_backend(
     let stop_reason: StopReason;
 
     dlog!(
-        "[dvmm] starting vCPU on the USERSPACE irqchip, fast-forward {} \
+        "[tdvmm] starting vCPU on the USERSPACE irqchip, fast-forward {} \
          (Ctrl-A is passed to the guest; kill from another terminal to stop)\n",
         if fast_forward { "ON" } else { "OFF" }
     );
@@ -941,7 +941,7 @@ fn run_user_backend(
         e.start(vtsc_start);
     }
 
-    // Wedge observability (opt-in: DVMM_WEDGE_SECS): a watchdog that dumps the
+    // Wedge observability (opt-in: TDVMM_WEDGE_SECS): a watchdog that dumps the
     // vCPU's exit histogram + guest RIP/interrupt state when the guest makes no
     // console/HLT progress — the tool for a guest that hard-spins with no output.
     let diag = diag::Diag::from_env();
@@ -951,7 +951,7 @@ fn run_user_backend(
     // Tick doorbell: lets an armed virtual-time deadline preempt an exit-free
     // KVM_RUN — Fable's fix for the container-start wedge (armed timers must be
     // able to interrupt a guest that runs a full tick with no exit). ON by
-    // default; DVMM_NO_DOORBELL=1 disables it for A/B.
+    // default; TDVMM_NO_DOORBELL=1 disables it for A/B.
     let mut doorbell = doorbell::Doorbell::new(&mut vcpu);
 
     loop {
@@ -1074,7 +1074,7 @@ fn run_user_backend(
             }
         };
 
-        // Wedge observability: bucket every exit (a no-op unless DVMM_WEDGE_SECS).
+        // Wedge observability: bucket every exit (a no-op unless TDVMM_WEDGE_SECS).
         diag.record(&exit);
 
         // (5) Handle the exit.
@@ -1174,7 +1174,7 @@ fn run_user_backend(
                 // timer. Checked here, before the park, in BOTH FF modes.
                 if vcpu.get_kvm_run().if_flag == 0 {
                     dlog!(
-                        "\n[dvmm] STOP: guest halted (power off) — HLT with \
+                        "\n[tdvmm] STOP: guest halted (power off) — HLT with \
                          interrupts disabled (IF=0), a terminal halt that can \
                          never wake."
                     );
@@ -1188,14 +1188,14 @@ fn run_user_backend(
                     let win = last_report.elapsed().as_secs_f64();
                     let n = hlt_count - last_report_hlts;
                     dlog!(
-                        "[dvmm] HLT-exit rate: {:.1}/s ({n} in {win:.0}s; {hlt_count} total)",
+                        "[tdvmm] HLT-exit rate: {:.1}/s ({n} in {win:.0}s; {hlt_count} total)",
                         n as f64 / win
                     );
                     if let Some(ff) = ff_state.as_ref() {
                         let virt_s = ff.virtual_secs_since(vtsc_start, clock.vtsc_now());
                         let real_s = start.elapsed().as_secs_f64().max(1e-9);
                         dlog!(
-                            "[dvmm] fast-forward: {} jumps, {:.0} virtual-s in {:.1} real-s \
+                            "[tdvmm] fast-forward: {} jumps, {:.0} virtual-s in {:.1} real-s \
                              = {:.0}x; per-hop mean {:.1}us max {:.1}us; max Δ {:.3}s",
                             ff.jumps,
                             virt_s,
@@ -1250,7 +1250,7 @@ fn run_user_backend(
                 // platform wants "guest panicked/rebooted" as a first-class
                 // outcome (see StopReason -> exit code).
                 dlog!(
-                    "\n[dvmm] STOP: guest-initiated shutdown/reboot \
+                    "\n[tdvmm] STOP: guest-initiated shutdown/reboot \
                      (KVM_EXIT_SHUTDOWN, triple fault — e.g. panic+reboot or `reboot -f`)."
                 );
                 stop_reason = StopReason::GuestShutdown;
@@ -1259,7 +1259,7 @@ fn run_user_backend(
             VcpuExit::SystemEvent(type_, _) => {
                 // Guest-initiated reset/shutdown/crash via a system event.
                 dlog!(
-                    "\n[dvmm] STOP: guest-initiated system event \
+                    "\n[tdvmm] STOP: guest-initiated system event \
                      (reset/shutdown/crash, type {type_})."
                 );
                 stop_reason = StopReason::GuestSystemEvent;
@@ -1272,7 +1272,7 @@ fn run_user_backend(
             }
             VcpuExit::InternalError => return Err("KVM_EXIT_INTERNAL_ERROR".into()),
             other => {
-                dlog!("[dvmm] unhandled KVM exit: {other:?}");
+                dlog!("[tdvmm] unhandled KVM exit: {other:?}");
             }
         }
     }
@@ -1285,7 +1285,7 @@ fn run_user_backend(
 
     let secs = start.elapsed().as_secs_f64();
     dlog!(
-        "[dvmm] userspace backend stopped: {hlt_count} HLT exits over {secs:.1}s \
+        "[tdvmm] userspace backend stopped: {hlt_count} HLT exits over {secs:.1}s \
          ({:.1}/s)",
         hlt_count as f64 / secs.max(0.001)
     );
@@ -1293,7 +1293,7 @@ fn run_user_backend(
         let virt_s = ff.virtual_secs_since(vtsc_start, clock.vtsc_now());
         let real_s = secs.max(1e-9);
         dlog!(
-            "[dvmm] FAST-FORWARD SUMMARY: {} jumps; virtual {:.1}s in real {:.1}s = \
+            "[tdvmm] FAST-FORWARD SUMMARY: {} jumps; virtual {:.1}s in real {:.1}s = \
              {:.1}x speedup; per-hop cost mean {:.1}us / max {:.1}us; \
              largest single jump Δ = {:.3}s (bound {}s)",
             ff.jumps,
@@ -1305,9 +1305,9 @@ fn run_user_backend(
             ff.max_delta_secs(),
             ff.max_jump_secs,
         );
-        dlog!("[dvmm] {}", ff.hist.summary());
+        dlog!("[tdvmm] {}", ff.hist.summary());
         dlog!(
-            "[dvmm] per-hop cost p99 {:.1}us; real-vs-virtual: {:.1}% executing / \
+            "[tdvmm] per-hop cost p99 {:.1}us; real-vs-virtual: {:.1}% executing / \
              {:.3}% jumping ({:.1} real-exec ms per virtual-hour — busy-wait tripwire)",
             ff.hop_p99_ns() as f64 / 1000.0,
             {
@@ -1327,8 +1327,8 @@ fn run_user_backend(
             let report =
                 ff.metrics_report(stop_reason, vtsc_start, clock.vtsc_now(), secs, hlt_count);
             match std::fs::write(path, &report) {
-                Ok(()) => dlog!("[dvmm] wrote per-run metrics to {path}"),
-                Err(e) => dlog!("[dvmm][WARN] could not write --metrics-out {path}: {e}"),
+                Ok(()) => dlog!("[tdvmm] wrote per-run metrics to {path}"),
+                Err(e) => dlog!("[tdvmm][WARN] could not write --metrics-out {path}: {e}"),
             }
         }
     } else if let Some(path) = metrics_out.as_deref() {
@@ -1337,7 +1337,7 @@ fn run_user_backend(
         let _ = std::fs::write(
             path,
             format!(
-                "# dvmm per-run metrics (fast-forward OFF — no jump accounting)\n\
+                "# tdvmm per-run metrics (fast-forward OFF — no jump accounting)\n\
                  schema 1\nstop_reason {}\nfast_forward off\n",
                 stop_reason.as_str()
             ),
@@ -1392,7 +1392,7 @@ fn run_user_backend(
             );
         } else {
             dlog!(
-                "[dvmm][WARN] --logs-dir: guest stopped ({}) before logs could be \
+                "[tdvmm][WARN] --logs-dir: guest stopped ({}) before logs could be \
                  pulled — skipping log capture",
                 stop_reason.as_str()
             );
@@ -1440,13 +1440,13 @@ fn run_user_backend(
 /// signature). Distinguishes this VMM policy stop from a guest-initiated one.
 fn report_horizon(ff: Option<&FfState>, start: std::time::Instant) {
     dlog!(
-        "\n[dvmm] STOP: --max-virtual-time horizon reached — VMM virtual-time budget \
+        "\n[tdvmm] STOP: --max-virtual-time horizon reached — VMM virtual-time budget \
          (a deterministic (vtsc, StopRun) queue event, NOT a guest-initiated stop)."
     );
     if let Some(ff) = ff {
         let real_s = start.elapsed().as_secs_f64().max(1e-9);
         dlog!(
-            "[dvmm] HORIZON DIAGNOSTIC: {} jumps in {:.2}s real = {:.0} jumps/s; \
+            "[tdvmm] HORIZON DIAGNOSTIC: {} jumps in {:.2}s real = {:.0} jumps/s; \
              max single Δ {:.3}s; {}",
             ff.jumps,
             real_s,
@@ -1908,7 +1908,7 @@ fn capture_logs(
     com2: &mut control::ControlChannel,
     cap: &LogsCapture,
 ) {
-    use dvmm_proto::{encode_line, Request, MAX_LOGS_CHUNK_BYTES};
+    use tdvmm_proto::{encode_line, Request, MAX_LOGS_CHUNK_BYTES};
 
     let wall_deadline =
         std::time::Instant::now() + std::time::Duration::from_secs(CAPTURE_WALL_BUDGET_S);
@@ -1939,7 +1939,7 @@ fn capture_logs(
             Some(s) if s >= 2 => {}
             other => {
                 dlog!(
-                    "[dvmm][WARN] --logs-dir: agent proto schema {} < 2 (old artifact) — the \
+                    "[tdvmm][WARN] --logs-dir: agent proto schema {} < 2 (old artifact) — the \
                      `logs` op is unavailable; skipping log capture",
                     other.map(|v| v.to_string()).unwrap_or_else(|| "?".into())
                 );
@@ -1947,11 +1947,11 @@ fn capture_logs(
             }
         },
         Ok(None) => {
-            dlog!("[dvmm][WARN] --logs-dir: agent did not answer a schema ping — skipping log capture");
+            dlog!("[tdvmm][WARN] --logs-dir: agent did not answer a schema ping — skipping log capture");
             return;
         }
         Err(()) => {
-            dlog!("[dvmm][WARN] --logs-dir: guest became unresponsive — skipping log capture");
+            dlog!("[tdvmm][WARN] --logs-dir: guest became unresponsive — skipping log capture");
             return;
         }
     }
@@ -1960,7 +1960,7 @@ fn capture_logs(
         let fname = match sanitize_service_filename(service) {
             Some(f) => f,
             None => {
-                dlog!("[dvmm][WARN] --logs-dir: refusing unsafe service name {service:?} — skipping");
+                dlog!("[tdvmm][WARN] --logs-dir: refusing unsafe service name {service:?} — skipping");
                 continue;
             }
         };
@@ -1985,7 +1985,7 @@ fn capture_logs(
                 Ok(Some(rep)) => {
                     if rep.ok != Some(true) {
                         dlog!(
-                            "[dvmm][WARN] --logs-dir: agent could not read {service} log: {} — \
+                            "[tdvmm][WARN] --logs-dir: agent could not read {service} log: {} — \
                              writing what was captured",
                             rep.error.as_deref().unwrap_or("unknown error")
                         );
@@ -2003,13 +2003,13 @@ fn capture_logs(
                 }
                 Ok(None) => {
                     dlog!(
-                        "[dvmm][WARN] --logs-dir: timed out pulling {service} log — writing what \
+                        "[tdvmm][WARN] --logs-dir: timed out pulling {service} log — writing what \
                          was captured"
                     );
                     break;
                 }
                 Err(()) => {
-                    dlog!("[dvmm][WARN] --logs-dir: guest became unresponsive during capture — stopping");
+                    dlog!("[tdvmm][WARN] --logs-dir: guest became unresponsive during capture — stopping");
                     aborted = true;
                     break;
                 }
@@ -2018,8 +2018,8 @@ fn capture_logs(
         let formatted = format_k8s_logs(&raw);
         let path = cap.dir.join(format!("{fname}.log"));
         match std::fs::write(&path, formatted.as_bytes()) {
-            Ok(()) => dlog!("[dvmm] --logs-dir: wrote {}", path.display()),
-            Err(e) => dlog!("[dvmm][WARN] --logs-dir: could not write {}: {e}", path.display()),
+            Ok(()) => dlog!("[tdvmm] --logs-dir: wrote {}", path.display()),
+            Err(e) => dlog!("[tdvmm][WARN] --logs-dir: could not write {}: {e}", path.display()),
         }
         if aborted {
             return;
@@ -2054,7 +2054,7 @@ fn drive_until_reply(
     want_id: u64,
     horizon: u64,
     wall_deadline: std::time::Instant,
-) -> Result<Option<dvmm_proto::Reply>, ()> {
+) -> Result<Option<tdvmm_proto::Reply>, ()> {
     // Drop any stale reply still buffered from the run, then queue our request.
     while com2.poll_line().is_some() {}
     com2.send_frame(framed);
@@ -2077,7 +2077,7 @@ fn drive_until_reply(
         // Stream any in-flight command bytes, then drain replies looking for ours.
         com2.pump(lapic, ioapic);
         while let Some(line) = com2.poll_line() {
-            if let Ok(rep) = dvmm_proto::decode_line::<dvmm_proto::Reply>(&line) {
+            if let Ok(rep) = tdvmm_proto::decode_line::<tdvmm_proto::Reply>(&line) {
                 if rep.id == Some(want_id) {
                     return Ok(Some(rep));
                 }

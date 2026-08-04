@@ -1,4 +1,4 @@
-# dvmm guest compose engine pin.
+# tdvmm guest compose engine pin.
 #
 # The GENUINE Docker Compose v2 CLI (a static Go binary) is baked into the guest
 # and driven against `podman system service`'s Docker-compatible API socket
@@ -7,6 +7,6 @@
 # leaving only conmon + the workload containers (no resident engine).
 #
 # Pinned release + sha256 of the linux-x86_64 asset (verified at bake time by
-# build_rootfs.sh). Source: github.com/docker/compose/releases.
+# `tdvmm build`). Source: github.com/docker/compose/releases.
 COMPOSE_VERSION=v5.3.1
 COMPOSE_SHA256=f9ebc6ebdb19d769b793c245a736caaeb198c62587f13b25c660c13b4987f959

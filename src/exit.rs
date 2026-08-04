@@ -14,7 +14,7 @@ pub(crate) const EXIT_GUEST_STOP: i32 = 0;
 /// guest-initiated stop so a harness can tell "the guest ended" from "we cut it
 /// off at the virtual-time budget".
 pub(crate) const EXIT_HORIZON: i32 = 3;
-/// Infrastructure-error exit code for `dvmm test` (the CI contract): 0 = all
+/// Infrastructure-error exit code for `tdvmm test` (the CI contract): 0 = all
 /// assertions passed, 1 = an assertion / readiness failure (from the scenario
 /// verdict), 2 = an infrastructure error (bad scenario, or a boot/bake/agent
 /// failure — the tool broke, not your stack).

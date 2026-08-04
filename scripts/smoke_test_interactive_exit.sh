@@ -40,7 +40,7 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-BIN="$ROOT/target/release/dvmm"
+BIN="$ROOT/target/release/tdvmm"
 KERNEL="${KERNEL:-$ROOT/guest/kernel/vmlinux-6.1.128}"
 INITRD="${INITRD:-$ROOT/guest/initramfs/initramfs.cpio.gz}"
 MEM="${MEM:-256}"
@@ -49,9 +49,9 @@ MEM="${MEM:-256}"
 # sent. A wedge (reboot=k without a horizon) never exits, so it is detected as
 # "still alive at the deadline". Kept small because a clean stop happens in ~1-4s.
 DEADLINE="${1:-20}"
-BOOT_MARKER="DVMM_BOOT_OK"
-RESPAWN_MARKER="DVMM_RESPAWN_OK"
-MODE_LINE_RE='\[dvmm\] fast-forward:'
+BOOT_MARKER="TDVMM_BOOT_OK"
+RESPAWN_MARKER="TDVMM_RESPAWN_OK"
+MODE_LINE_RE='\[tdvmm\] fast-forward:'
 # Total wall budget per case = boot allowance + self-exit deadline.
 BOOT_ALLOWANCE="${BOOT_ALLOWANCE:-30}"
 TOTAL=$(( BOOT_ALLOWANCE + DEADLINE ))

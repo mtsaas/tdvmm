@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""dvmm demo stack — the load client (a real gRPC client).
+"""tdvmm demo stack — the load client (a real gRPC client).
 
 Drives the api's OrderService over the compose network, by name, once per virtual
 hour: it submits a deterministic batch of orders and then reads the stats back.
-Between hours it genuinely sleeps for a virtual hour, so the guest HLTs and dvmm
+Between hours it genuinely sleeps for a virtual hour, so the guest HLTs and tdvmm
 fast-forwards the idle gap — a whole virtual day of traffic runs in seconds.
 
 A fresh channel is opened per cycle (and closed after), so no client-side gRPC

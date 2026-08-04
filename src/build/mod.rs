@@ -1,6 +1,6 @@
-//! `dvmm build <compose.yml>` (OP-1b) — the whole bake pipeline, folded into the
-//! binary. This replaces the retired `guest/bake-stack.sh` (orchestrator),
-//! `guest/bake_compose.py` (→ [`crate::compose`]), `guest/pack-dvmm.sh` (→
+//! `tdvmm build <compose.yml>` (OP-1b) — the whole bake pipeline, folded into the
+//! binary. It replaced the now-removed `guest/bake-stack.sh` (orchestrator),
+//! `guest/bake_compose.py` (→ [`crate::compose`]), `guest/pack-tdvmm.sh` (→
 //! [`crate::artifact::pack`]), and `guest/initramfs-alpine/{build_rootfs.sh,
 //! prebake_images.sh,zero_cpio_inodes.py}` (→ [`crate::cpio`] + this module).
 //!
@@ -12,14 +12,14 @@
 //!     client is reimplemented);
 //!   * the initramfs cpio is emitted **directly from Rust** ([`crate::cpio`])
 //!     with the exact deterministic normalization;
-//!   * the `.dvmm` is packed via the existing [`crate::artifact`] encoder.
+//!   * the `.tdvmm` is packed via the existing [`crate::artifact`] encoder.
 //!
 //! Two hidden helper subcommands run inside `podman unshare` (a user namespace)
 //! where the assembled rootfs files are readable as uid 0: `__seed-build`
 //! (assemble the seed store) and `__assemble-initramfs` (build the Alpine rootfs
-//! and emit the cpio). `dvmm build` re-execs itself into them.
+//! and emit the cpio). `tdvmm build` re-execs itself into them.
 //!
-//! The OP-1b acceptance is a **byte-identical** `.dvmm` versus the old scripts on
+//! The OP-1b acceptance is a **byte-identical** `.tdvmm` versus the old scripts on
 //! the corpus, so every command and file operation below mirrors them exactly.
 
 mod agent;
@@ -44,7 +44,7 @@ pub use kernel::cmd_build_kernel;
 pub use seed::cmd_seed_build;
 pub(crate) use util::civil_from_days;
 
-// ---- pins (mirror bake-stack.sh + build_rootfs.sh) -------------------------
+// ---- pins (from the retired shell bake pipeline) ---------------------------
 
 const BUILD_EPOCH: &str = "1785542400";
 const BUSYBOX_REF: &str = "docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616";
@@ -58,7 +58,7 @@ const DEFAULT_MEM_MIB: u64 = 3072;
 const DEFAULT_WORKING_SET_MIB: u64 = 512;
 const DEFAULT_SQUASH_THRESHOLD_MIB: u64 = 100;
 
-/// The `dvmm build` progress bar's step count (Fable CLI-UX ruling): resolve
+/// The `tdvmm build` progress bar's step count (Fable CLI-UX ruling): resolve
 /// inputs, bake cache, squash images, seed store, compose.lock + binds,
 /// assemble initramfs, pack artifact, cache + diagnostics.
 const TOTAL_STEPS: u32 = 8;
@@ -69,8 +69,8 @@ const MINIROOTFS: &str = "alpine-minirootfs-3.22.5-x86_64.tar.gz";
 const MINIROOTFS_SHA256: &str = "4b4daa9fe2fc696c4919c4412a4c3d3e770d8fb70292a004a2c72f5096175282";
 const DEFAULT_MIRROR: &str = "https://dl-cdn.alpinelinux.org/alpine";
 
-/// Top-level pinned packages (transitive deps float within the branch), mirroring
-/// `build_rootfs.sh`'s `PKGS`.
+/// Top-level pinned packages (transitive deps float within the branch); the sole
+/// source of truth now that the shell rootfs builder is gone.
 const PKGS: &[&str] = &[
     "podman=5.6.2-r3",
     "crun=1.23.1-r0",
@@ -84,9 +84,9 @@ const PKGS: &[&str] = &[
     "fuse-overlayfs=1.15-r0",
 ];
 
-/// The baked run-defaults (mirror `pack-dvmm.sh`). Fixed for the corpus (env can
-/// override in the scripts; `dvmm build` keeps the same defaults).
-const DEFAULT_CMDLINE: &str = "console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable dvmm.stack=1 dvmm.interval=3600 dvmm.maxrows=1000 dvmm.hc_tick=2";
+/// The baked run-defaults (mirror `pack-tdvmm.sh`). Fixed for the corpus (env can
+/// override in the scripts; `tdvmm build` keeps the same defaults).
+const DEFAULT_CMDLINE: &str = "console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable tdvmm.stack=1 tdvmm.interval=3600 tdvmm.maxrows=1000 tdvmm.hc_tick=2";
 
 // ============================================================================
 // CLI args
@@ -103,15 +103,15 @@ pub struct BuildArgs {
     /// Bypass the content-hash bake cache: force a full rebuild (still stores the
     /// result so later cached runs can hit). Nightly `bake_repeat` uses this.
     pub no_cache: bool,
-    /// Cache directory override (Fable Part A). Precedence: this > `DVMM_CACHE_DIR`
-    /// > `$HOME/.dvmm`. `None` falls through to env/default.
+    /// Cache directory override (Fable Part A). Precedence: this > `TDVMM_CACHE_DIR`
+    /// > `$HOME/.tdvmm`. `None` falls through to env/default.
     pub cache_dir: Option<String>,
     /// Disable the progress spinner (Fable CLI-UX ruling): `--no-progress`, or
     /// implied by a non-terminal stderr / `CI` / `TERM=dumb` (decided in `ui`).
     pub no_progress: bool,
 }
 
-/// `dvmm build-kernel` args.
+/// `tdvmm build-kernel` args.
 pub struct BuildKernelArgs {
     pub out: Option<String>,
     pub cache_dir: Option<String>,

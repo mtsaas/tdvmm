@@ -11,9 +11,9 @@ use super::util::{self_here, sha256_file_hex, ScratchDir};
 use super::ux::{run, Ux};
 
 /// Read the pinned rust+musl builder image ref + digest from
-/// `dvmm-agent/images.lock` (Fable §2). Returns `(image, digest)`.
+/// `tdvmm-agent/images.lock` (Fable §2). Returns `(image, digest)`.
 pub(super) fn read_builder_pin(repo_root: &Path) -> Result<(String, String), Box<dyn std::error::Error>> {
-    let lock = repo_root.join("dvmm-agent/images.lock");
+    let lock = repo_root.join("tdvmm-agent/images.lock");
     let text =
         std::fs::read_to_string(&lock).map_err(|e| format!("reading {}: {e}", lock.display()))?;
     let mut image = String::new();
@@ -27,7 +27,7 @@ pub(super) fn read_builder_pin(repo_root: &Path) -> Result<(String, String), Box
         }
     }
     if image.is_empty() || digest.is_empty() {
-        return Err("dvmm-agent/images.lock missing BUILDER_IMAGE / BUILDER_DIGEST".into());
+        return Err("tdvmm-agent/images.lock missing BUILDER_IMAGE / BUILDER_DIGEST".into());
     }
     Ok((image, digest))
 }
@@ -117,7 +117,7 @@ pub(super) fn read_compose_lock(alpine_dir: &Path) -> Result<(String, String), B
 }
 
 /// The pinned builder-image refs (`image@sha256`) for the guest binaries: the
-/// musl agent builder (`dvmm-agent/images.lock`) + the kernel builder
+/// musl agent builder (`tdvmm-agent/images.lock`) + the kernel builder
 /// (`guest/kernel/kernel.lock`). Sorted.
 pub(super) fn collect_builder_pins(
     repo_root: &Path,
@@ -127,7 +127,7 @@ pub(super) fn collect_builder_pins(
     let kl = read_kernel_lock(here)?;
     if kl.builder_digest.is_empty() {
         return Err(
-            "kernel.lock has no BUILDER_DIGEST; run `dvmm build-kernel --record` first".into(),
+            "kernel.lock has no BUILDER_DIGEST; run `tdvmm build-kernel --record` first".into(),
         );
     }
     let (rimg, rdig) = read_rootfs_builder_pin(here)?;

@@ -1,4 +1,4 @@
-# busybox init table for the dvmm Alpine container guest.
+# busybox init table for the tdvmm Alpine container guest.
 #
 # This OVERRIDES Alpine's stock /etc/inittab (which drives OpenRC + getty on
 # tty1-6 — neither of which this minimal RAM-only serial guest uses). Our /init

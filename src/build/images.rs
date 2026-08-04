@@ -72,7 +72,7 @@ pub(super) fn bake_one(
     // squash: reproducible single-FROM repackage + config-equivalence gate.
     let base = squash_base_name(reff);
     let short = squash_short(reff);
-    let tag = format!("localhost/dvmm-{base}-{short}:baked");
+    let tag = format!("localhost/tdvmm-{base}-{short}:baked");
     let ctx = work.join(format!("ctx-{}", squash_tars.len()));
     std::fs::create_dir_all(&ctx)?;
     std::fs::write(ctx.join("Containerfile"), format!("FROM {reff}\n"))?;

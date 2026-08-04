@@ -1,5 +1,5 @@
 #!/bin/sh
-# dvmm Step 2a container self-test.
+# tdvmm Step 2a container self-test.
 #
 # Proves the guest is container-capable, fully offline (closed world):
 #   1. create a podman bridge network ("appnet") via netavark, and
@@ -7,19 +7,19 @@
 #      capture its stdout over the serial console.
 #
 # Prints machine-greppable markers so the host smoke test can assert success:
-#   DVMM_NET_CREATE_OK / DVMM_NET_CREATE_FAIL
-#   DVMM_PODMAN_RUN_OK / DVMM_PODMAN_RUN_FAIL
-#   DVMM_CONTAINER_HELLO   (the container's own output)
-#   DVMM_SELFTEST_PASS / DVMM_SELFTEST_FAIL
+#   TDVMM_NET_CREATE_OK / TDVMM_NET_CREATE_FAIL
+#   TDVMM_PODMAN_RUN_OK / TDVMM_PODMAN_RUN_FAIL
+#   TDVMM_CONTAINER_HELLO   (the container's own output)
+#   TDVMM_SELFTEST_PASS / TDVMM_SELFTEST_FAIL
 #
 # The image reference (by digest) is baked in at build time.
 
 set -u
-IMAGE="$(cat /etc/dvmm-image-ref 2>/dev/null)"
+IMAGE="$(cat /etc/tdvmm-image-ref 2>/dev/null)"
 NET=appnet
-HELLO=DVMM_CONTAINER_HELLO
+HELLO=TDVMM_CONTAINER_HELLO
 
-fail() { echo "DVMM_SELFTEST_FAIL: $*"; exit 1; }
+fail() { echo "TDVMM_SELFTEST_FAIL: $*"; exit 1; }
 
 echo "[selftest] podman version:"
 podman version 2>&1 | sed 's/^/[selftest] /' | head -6
@@ -31,10 +31,10 @@ echo "[selftest] baked image: $IMAGE"
 echo "[selftest] creating podman network '$NET' (netavark)"
 if podman network create "$NET" > /tmp/net.out 2>&1; then
   sed 's/^/[selftest][net] /' /tmp/net.out
-  echo "DVMM_NET_CREATE_OK"
+  echo "TDVMM_NET_CREATE_OK"
 else
   sed 's/^/[selftest][net] /' /tmp/net.out
-  echo "DVMM_NET_CREATE_FAIL"
+  echo "TDVMM_NET_CREATE_FAIL"
   fail "podman network create"
 fi
 
@@ -47,12 +47,12 @@ sed 's/^/[selftest][run-stderr] /' /tmp/selftest.err 2>/dev/null
 
 if [ $RC -eq 0 ] && [ "$OUT" = "$HELLO" ]; then
   echo "$OUT"
-  echo "DVMM_PODMAN_RUN_OK"
+  echo "TDVMM_PODMAN_RUN_OK"
 else
   echo "podman run rc=$RC out=[$OUT]"
-  echo "DVMM_PODMAN_RUN_FAIL"
+  echo "TDVMM_PODMAN_RUN_FAIL"
   fail "podman run"
 fi
 
-echo "DVMM_SELFTEST_PASS"
+echo "TDVMM_SELFTEST_PASS"
 exit 0

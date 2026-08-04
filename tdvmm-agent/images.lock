@@ -1,8 +1,8 @@
-# Pinned rust+musl BUILDER image for the reproducible dvmm-agent build (Fable §2).
+# Pinned rust+musl BUILDER image for the reproducible tdvmm-agent build (Fable §2).
 #
 # The agent is cross-compiled to a static x86_64-unknown-linux-musl binary INSIDE
-# this container (invoked by `dvmm build` / `dvmm build-agent` via podman), NOT on
-# the host — host rustc drift would change the bytes and thus the `.dvmm` hash.
+# this container (invoked by `tdvmm build` / `tdvmm build-agent` via podman), NOT on
+# the host — host rustc drift would change the bytes and thus the `.tdvmm` hash.
 # This image is Alpine-hosted, so `x86_64-unknown-linux-musl` is its NATIVE target
 # (no `rustup target add`); the build uses `rust-lld` + self-contained linking, so
 # no external C toolchain is needed for the pure-Rust agent.

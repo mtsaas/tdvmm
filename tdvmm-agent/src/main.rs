@@ -1,9 +1,9 @@
-//! `dvmm-agent` — the guest-side control-channel executor (Rust rewrite of the
+//! `tdvmm-agent` — the guest-side control-channel executor (Rust rewrite of the
 //! former `guest/agent/main.go`, ported behavior-for-behavior).
 //!
-//! A tiny STATIC (musl) binary baked into every `.dvmm`, running OUTSIDE the
+//! A tiny STATIC (musl) binary baked into every `.tdvmm`, running OUTSIDE the
 //! workload containers. It is the guest end of the modeled control channel: the
-//! 2nd 16550 (COM2 / ttyS1). Protocol: line-delimited JSON ([`dvmm_proto`]), one
+//! 2nd 16550 (COM2 / ttyS1). Protocol: line-delimited JSON ([`tdvmm_proto`]), one
 //! request per line in, one reply per line out.
 //!
 //! **Fast-forward transparency is the whole point of the transport:** the agent
@@ -20,14 +20,14 @@
 //! cursor — never a follow/tail (`-f` would defeat host fast-forward) — so the
 //! agent blocks again immediately after replying, exactly like every other op.
 //!
-//! Deps: `dvmm-proto` + `serde_json` (+ `serde` derive, already transitive) +
+//! Deps: `tdvmm-proto` + `serde_json` (+ `serde` derive, already transitive) +
 //! `std` ONLY. Raw-mode termios is done with a std-only inline-asm `ioctl`
 //! syscall — no `libc`.
 
 use std::fs::OpenOptions;
 use std::os::fd::AsRawFd;
 
-use dvmm_proto::Reply;
+use tdvmm_proto::Reply;
 
 mod agent;
 mod bridge;
@@ -36,11 +36,11 @@ mod sys;
 use agent::Agent;
 use bridge::{run_loop, write_line};
 
-pub(crate) const AGENT_ID: &str = "dvmm-agent/1";
+pub(crate) const AGENT_ID: &str = "tdvmm-agent/1";
 
 /// Build hash embedded at compile time by the reproducible builder (the compat-
 /// ibility oracle reported in the hello + `ping`). `dev` for plain host builds.
-pub(crate) const BUILD: &str = match option_env!("DVMM_AGENT_BUILD") {
+pub(crate) const BUILD: &str = match option_env!("TDVMM_AGENT_BUILD") {
     Some(s) => s,
     None => "dev",
 };
@@ -48,12 +48,12 @@ pub(crate) const BUILD: &str = match option_env!("DVMM_AGENT_BUILD") {
 fn main() {
     // The control channel is ttyS1. Open read+write; the VMM captures our TX and
     // feeds our RX at scheduled virtual times.
-    let dev = std::env::var("DVMM_AGENT_TTY").unwrap_or_else(|_| "/dev/ttyS1".to_string());
+    let dev = std::env::var("TDVMM_AGENT_TTY").unwrap_or_else(|_| "/dev/ttyS1".to_string());
     let file = match OpenOptions::new().read(true).write(true).open(&dev) {
         Ok(f) => f,
         Err(e) => {
             // No control channel: nothing to do. Exit quietly (no wakes).
-            eprintln!("dvmm-agent: cannot open {dev}: {e}");
+            eprintln!("tdvmm-agent: cannot open {dev}: {e}");
             return;
         }
     };
@@ -65,13 +65,13 @@ fn main() {
     // on the wire are exactly what each side wrote. VMIN=1/VTIME=0 => a read
     // blocks until >=1 byte (no timer armed => fast-forward-transparent).
     if let Err(e) = sys::set_raw(file.as_raw_fd()) {
-        eprintln!("dvmm-agent: setRaw({dev}): errno {e}");
+        eprintln!("tdvmm-agent: setRaw({dev}): errno {e}");
     }
 
     let mut writer = match file.try_clone() {
         Ok(w) => w,
         Err(e) => {
-            eprintln!("dvmm-agent: dup {dev}: {e}");
+            eprintln!("tdvmm-agent: dup {dev}: {e}");
             return;
         }
     };
@@ -79,12 +79,12 @@ fn main() {
     // events to. O_RDWR is load-bearing — the agent's open never blocks, a container
     // `echo > fifo` never blocks, and poll never storms POLLHUP (the agent is always
     // a writer). An absent FIFO degrades to control-only, byte-for-byte the old path.
-    let fifo_path = std::env::var("DVMM_AGENT_FIFO")
-        .unwrap_or_else(|_| dvmm_proto::EVENT_FIFO_PATH.to_string());
+    let fifo_path = std::env::var("TDVMM_AGENT_FIFO")
+        .unwrap_or_else(|_| tdvmm_proto::EVENT_FIFO_PATH.to_string());
     let fifo = match OpenOptions::new().read(true).write(true).open(&fifo_path) {
         Ok(f) => Some(f),
         Err(e) => {
-            eprintln!("dvmm-agent: no event FIFO at {fifo_path} ({e}); control-only");
+            eprintln!("tdvmm-agent: no event FIFO at {fifo_path} ({e}); control-only");
             None
         }
     };
@@ -110,13 +110,13 @@ mod tests {
     use crate::agent::{pair_key, read_log_chunk, Agent};
     use crate::bridge::{parse_event, LineReader, RX_LINE_CAP};
     use crate::AGENT_ID;
-    use dvmm_proto::{decode_line, encode_line, Reply, Request, SCHEMA};
+    use tdvmm_proto::{decode_line, encode_line, Reply, Request, SCHEMA};
     use serde_json::Value;
     use std::io::{self, Read};
     use std::path::PathBuf;
 
     fn goldens_dir() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../dvmm-proto/goldens")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tdvmm-proto/goldens")
     }
 
     /// The agent's own code path: every REQUEST golden decodes via the same
@@ -184,7 +184,7 @@ mod tests {
         // last (short) read flags EOF. next_cursor tracks RAW bytes, so paging is
         // byte-exact.
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("dvmm-agent-logtest-{}.log", std::process::id()));
+        let path = dir.join(format!("tdvmm-agent-logtest-{}.log", std::process::id()));
         let body: Vec<u8> = (0..25_000u32).map(|i| b'a' + (i % 26) as u8).collect();
         std::fs::write(&path, &body).unwrap();
         let p = path.to_str().unwrap();
@@ -213,7 +213,7 @@ mod tests {
 
     #[test]
     fn read_log_chunk_missing_file_is_empty_eof() {
-        let (d, n, eof) = read_log_chunk("/no/such/dvmm/log/file", 0, 4096).unwrap();
+        let (d, n, eof) = read_log_chunk("/no/such/tdvmm/log/file", 0, 4096).unwrap();
         assert!(d.is_empty() && n == 0 && eof);
     }
 

@@ -72,11 +72,11 @@ fn assemble_base_tree(cfg: &AssembleConfig, rootfs: &Path) -> Result<(), Box<dyn
     // 4b. bake the genuine Docker Compose v2 CLI.
     install_file(&cfg.compose_cache, &rootfs.join("usr/local/bin/docker-compose"), 0o755)?;
     // 4c. bake the control-channel agent.
-    install_file(&cfg.agent_bin, &rootfs.join("usr/local/bin/dvmm-agent"), 0o755)?;
+    install_file(&cfg.agent_bin, &rootfs.join("usr/local/bin/tdvmm-agent"), 0o755)?;
 
     // 5. fixed clock epoch + self-test image ref (both stack-independent = base).
-    std::fs::write(rootfs.join("etc/dvmm-build-epoch"), format!("{}\n", cfg.build_epoch))?;
-    std::fs::write(rootfs.join("etc/dvmm-image-ref"), format!("{}\n", cfg.selftest_image_ref))?;
+    std::fs::write(rootfs.join("etc/tdvmm-build-epoch"), format!("{}\n", cfg.build_epoch))?;
+    std::fs::write(rootfs.join("etc/tdvmm-image-ref"), format!("{}\n", cfg.selftest_image_ref))?;
 
     // 7. trim install-time cruft that would only bloat RAM (base part).
     let _ = remove_glob(&rootfs.join("var/cache/apk"));
@@ -99,21 +99,21 @@ fn assemble_stack_tree(cfg: &AssembleConfig, rootfs: &Path) -> Result<(), Box<dy
     std::fs::create_dir_all(rootfs)?;
 
     // Scaffolding dirs (explicit 0755 so modes never vary with the ambient umask).
-    for d in ["var", "var/lib", "etc", "var/lib/dvmm-stack", "var/lib/dvmm-stack/binds", "var/lib/containers-seed"] {
+    for d in ["var", "var/lib", "etc", "var/lib/tdvmm-stack", "var/lib/tdvmm-stack/binds", "var/lib/containers-seed"] {
         std::fs::create_dir_all(rootfs.join(d))?;
         set_mode(&rootfs.join(d), 0o755)?;
     }
 
     // compose.lock + materialized binds + pinned project.
-    std::fs::copy(&cfg.stack_lock, rootfs.join("var/lib/dvmm-stack/compose.lock.yml"))?;
-    set_mode(&rootfs.join("var/lib/dvmm-stack/compose.lock.yml"), 0o644)?;
+    std::fs::copy(&cfg.stack_lock, rootfs.join("var/lib/tdvmm-stack/compose.lock.yml"))?;
+    set_mode(&rootfs.join("var/lib/tdvmm-stack/compose.lock.yml"), 0o644)?;
     if cfg.stack_binds.is_dir() {
         // cp -a "$STACK_BINDS/." binds/  (may be empty; ignore failure like the script)
-        let _ = copy_dir_contents(&cfg.stack_binds, &rootfs.join("var/lib/dvmm-stack/binds"));
+        let _ = copy_dir_contents(&cfg.stack_binds, &rootfs.join("var/lib/tdvmm-stack/binds"));
     }
-    std::fs::write(rootfs.join("etc/dvmm-stack-name"), format!("{}\n", cfg.stack_name))?;
-    std::fs::write(rootfs.join("etc/dvmm-stack-project"), format!("{}\n", cfg.stack_project))?;
-    std::fs::write(rootfs.join("etc/dvmm-stack-mem"), format!("{}\n", cfg.stack_mem))?;
+    std::fs::write(rootfs.join("etc/tdvmm-stack-name"), format!("{}\n", cfg.stack_name))?;
+    std::fs::write(rootfs.join("etc/tdvmm-stack-project"), format!("{}\n", cfg.stack_project))?;
+    std::fs::write(rootfs.join("etc/tdvmm-stack-mem"), format!("{}\n", cfg.stack_mem))?;
 
     // the seed store: the pre-baked image graph the guest copies into its tmpfs.
     copy_tree(&cfg.seed_storage, &rootfs.join("var/lib/containers-seed/storage"))?;
@@ -151,7 +151,7 @@ pub fn cmd_assemble_initramfs(config: &str) -> Result<i32, Box<dyn std::error::E
     let stack_seg = cpio::rootfs_segment(&stack_root)?;
 
     // --- assemble: nodes + base + stack, then gzip -9 -n (Fable guardrail §4:
-    //     the bytes come ONLY from dvmm's own normalizing cpio emitter) ---
+    //     the bytes come ONLY from tdvmm's own normalizing cpio emitter) ---
     let mut combined = cpio::nodes_segment();
     combined.extend_from_slice(&base_seg);
     combined.extend_from_slice(&stack_seg);
@@ -163,7 +163,7 @@ pub fn cmd_assemble_initramfs(config: &str) -> Result<i32, Box<dyn std::error::E
         std::fs::copy(&pl, &cfg.packages_lock_out)?;
     }
 
-    // artifact sha sidecar (build_rootfs.sh parity).
+    // artifact sha sidecar (parity with the former shell builder).
     let art_sha = sha256_file_hex(&cfg.out)?;
     std::fs::write(
         format!("{}.sha256", cfg.out.display()),

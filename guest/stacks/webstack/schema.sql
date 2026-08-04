@@ -1,4 +1,4 @@
--- dvmm corpus (webstack): Postgres first-start schema.
+-- tdvmm corpus (webstack): Postgres first-start schema.
 --
 -- Baked into the guest and bind-mounted read-only into the postgres container at
 -- /docker-entrypoint-initdb.d/10-schema.sql, so the official postgres entrypoint

@@ -49,7 +49,7 @@ pub struct InitrdConfig {
 /// Load an uncompressed ELF `vmlinux` into guest memory, returning the entry
 /// point. The kernel is parsed straight from a byte buffer (`linux-loader` reads
 /// the ELF via `Read + Seek`) — the same path whether it came from a file
-/// (`dvmm boot`) or from a `.dvmm` member read into memory (`dvmm run`). No temp
+/// (`tdvmm boot`) or from a `.tdvmm` member read into memory (`tdvmm run`). No temp
 /// files, no extraction.
 pub fn load_kernel(mem: &GuestMemoryMmap, kernel: &[u8]) -> Result<GuestAddress, BootError> {
     let mut cursor = Cursor::new(kernel);

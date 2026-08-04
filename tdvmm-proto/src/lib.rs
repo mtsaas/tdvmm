@@ -1,6 +1,6 @@
-//! `dvmm-proto` — the control-channel wire protocol, the ONE source of truth for
+//! `tdvmm-proto` — the control-channel wire protocol, the ONE source of truth for
 //! the line-delimited JSON spoken over COM2/ttyS1 between the VMM host and the
-//! guest-side `dvmm-agent`.
+//! guest-side `tdvmm-agent`.
 //!
 //! Fable LOCKED this crate to be **protocol-only**: the request/response types
 //! (serde), the [`SCHEMA`] version constant, the error taxonomy as plain data
@@ -49,7 +49,7 @@ pub const MAX_LOGS_CHUNK_BYTES: u64 = 128 * 1024;
 /// The guest-side event-bridge FIFO path (schema 3). The single source of truth
 /// shared by the host (compose bind injection) and the agent (its read fd); the
 /// boot script's `mkfifo` literal must match this string.
-pub const EVENT_FIFO_PATH: &str = "/run/dvmm/events";
+pub const EVENT_FIFO_PATH: &str = "/run/tdvmm/events";
 
 // ============================================================================
 // Messages
@@ -336,7 +336,7 @@ mod tests {
     /// typed message and re-encode it; the JSON must be **semantically** identical
     /// (field order-independent). Any proto change that drops/renames a field
     /// makes a fixture mismatch — forcing a SCHEMA bump + golden regen in the same
-    /// commit. Set `DVMM_REGEN_GOLDENS=1` to rewrite the fixtures from the types.
+    /// commit. Set `TDVMM_REGEN_GOLDENS=1` to rewrite the fixtures from the types.
     #[test]
     fn goldens_roundtrip_and_carry_current_schema() {
         let dir = goldens_dir();
@@ -348,7 +348,7 @@ mod tests {
         entries.sort();
         assert!(!entries.is_empty(), "no golden fixtures in {}", dir.display());
 
-        let regen = std::env::var("DVMM_REGEN_GOLDENS").is_ok();
+        let regen = std::env::var("TDVMM_REGEN_GOLDENS").is_ok();
         for path in entries {
             let name = path.file_name().unwrap().to_string_lossy().into_owned();
             let raw = std::fs::read(&path).unwrap();
@@ -391,13 +391,13 @@ mod tests {
 
     #[test]
     fn hello_is_distinguishable_from_ping_reply() {
-        let hello = Reply::hello("dvmm-agent/1", "abc123");
+        let hello = Reply::hello("tdvmm-agent/1", "abc123");
         assert!(hello.is_hello());
         let ping = Reply {
             id: Some(1),
             ok: Some(true),
             op: Some("ping".into()),
-            agent: Some("dvmm-agent/1".into()),
+            agent: Some("tdvmm-agent/1".into()),
             schema: Some(SCHEMA),
             build: Some("abc123".into()),
             ..Default::default()

@@ -1,5 +1,5 @@
 #!/bin/sh
-# PID 1 for the dvmm Alpine container guest (Step 2a).
+# PID 1 for the tdvmm Alpine container guest (Step 2a).
 #
 # The whole rootfs lives in RAM. This init brings up just enough of a system to
 # run rootful podman with a bridge network, entirely offline (closed world),
@@ -77,14 +77,14 @@ mkdir -p /sys/fs/cgroup
 mount -t cgroup2 cgroup2 /sys/fs/cgroup 2>/dev/null || log "WARNING: cgroup2 mount failed"
 
 # fixed wall clock (no RTC)
-if [ -r /etc/dvmm-build-epoch ]; then
-  EPOCH="$(cat /etc/dvmm-build-epoch)"
+if [ -r /etc/tdvmm-build-epoch ]; then
+  EPOCH="$(cat /etc/tdvmm-build-epoch)"
   date -s "@$EPOCH" >/dev/null 2>&1 || true
 fi
 
 # loopback + hostname
 ip link set lo up 2>/dev/null || true
-hostname dvmm-guest 2>/dev/null || true
+hostname tdvmm-guest 2>/dev/null || true
 
 # container storage: size-capped tmpfs seeded from the baked image store. Holds
 # each container's overlay upper (its writable layer, including any data files a
@@ -107,38 +107,38 @@ fi
 mkdir -p /run/containers /run/podman
 
 echo
-echo "DVMM_ALPINE_BOOT_OK reached userspace"
+echo "TDVMM_ALPINE_BOOT_OK reached userspace"
 echo "kernel: $(uname -sr)   date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 echo
 
 # Event bridge (schema 3): the FIFO that workload containers write assertion events
 # to; the agent tails it (below) and forwards each over ttyS1. Created on the /run
 # tmpfs each boot, BEFORE the agent starts so its O_RDWR open finds it, and
-# unconditionally (even with dvmm.noagent=1) so every service's read-write bind-mount
+# unconditionally (even with tdvmm.noagent=1) so every service's read-write bind-mount
 # of this path resolves. 0666 so containers write as their own uid.
-mkdir -p /run/dvmm
-mkfifo -m 0666 /run/dvmm/events 2>/dev/null || true
+mkdir -p /run/tdvmm
+mkfifo -m 0666 /run/tdvmm/events 2>/dev/null || true
 
 # TEST-1a control-channel agent: a static Rust (musl) binary that BLOCKS reading /dev/ttyS1
 # (COM2). A blocked read arms no timer -> no wakes -> fast-forward-transparent. It
-# runs OUTSIDE the containers and services `dvmm test` control commands (exec /
-# container census via podman) and forwards guest events from /run/dvmm/events.
+# runs OUTSIDE the containers and services `tdvmm test` control commands (exec /
+# container census via podman) and forwards guest events from /run/tdvmm/events.
 # Started in the background so it survives the `exec` into compose-up.sh below.
-# Skipped with `dvmm.noagent=1` (the A/B knob for the FF-transparency gate). podman
+# Skipped with `tdvmm.noagent=1` (the A/B knob for the FF-transparency gate). podman
 # need not be up yet; the agent reports "no_container" and the host wait_for retries.
-if ! grep -q 'dvmm.noagent=1' /proc/cmdline 2>/dev/null; then
-  if [ -x /usr/local/bin/dvmm-agent ] && [ -c /dev/ttyS1 ]; then
-    echo "[init] starting dvmm-agent on /dev/ttyS1 (control channel)"
-    /usr/local/bin/dvmm-agent >/tmp/dvmm-agent.log 2>&1 &
+if ! grep -q 'tdvmm.noagent=1' /proc/cmdline 2>/dev/null; then
+  if [ -x /usr/local/bin/tdvmm-agent ] && [ -c /dev/ttyS1 ]; then
+    echo "[init] starting tdvmm-agent on /dev/ttyS1 (control channel)"
+    /usr/local/bin/tdvmm-agent >/tmp/tdvmm-agent.log 2>&1 &
   fi
 fi
 
 # Stack mode (Phase 2a): launch the baked docker-compose stack via the generic
 # compose path (never powers off; the host acceptance test watches serial and
-# stops the VMM). `dvmm.workload=1` is accepted as a back-compat alias.
-if grep -qE 'dvmm\.(stack|workload)=1' /proc/cmdline 2>/dev/null; then
-  echo "[init] launching compose stack: $(cat /etc/dvmm-stack-name 2>/dev/null)"
-  if [ -x /usr/local/bin/compose-up.sh ] && [ -f /var/lib/dvmm-stack/compose.lock.yml ]; then
+# stops the VMM). `tdvmm.workload=1` is accepted as a back-compat alias.
+if grep -qE 'tdvmm\.(stack|workload)=1' /proc/cmdline 2>/dev/null; then
+  echo "[init] launching compose stack: $(cat /etc/tdvmm-stack-name 2>/dev/null)"
+  if [ -x /usr/local/bin/compose-up.sh ] && [ -f /var/lib/tdvmm-stack/compose.lock.yml ]; then
     exec /usr/local/bin/compose-up.sh
   fi
   echo "[init] ERROR: stack mode requested but no baked stack present"
@@ -152,7 +152,7 @@ fi
 # In automated smoke mode, stop the machine so the VMM exits; otherwise hand
 # off to an interactive serial shell. A reboot (with reboot=t on the cmdline)
 # triple-faults, which the VMM reports as KVM_EXIT_SHUTDOWN and exits cleanly.
-if grep -q 'dvmm.autotest=1' /proc/cmdline 2>/dev/null; then
+if grep -q 'tdvmm.autotest=1' /proc/cmdline 2>/dev/null; then
   echo "[init] autotest complete; stopping the machine"
   sync
   reboot -f

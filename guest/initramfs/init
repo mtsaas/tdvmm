@@ -1,5 +1,5 @@
 #!/bin/busybox sh
-# PID 1 for the dvmm test guest.
+# PID 1 for the tdvmm test guest.
 # Permanent fixture: the minimal guest used for later clock/fast-forward work.
 
 /bin/busybox mkdir -p /proc /sys /dev /bin /sbin
@@ -14,7 +14,7 @@ exec 0</dev/console 1>/dev/console 2>/dev/console
 /bin/busybox --install -s /bin 2>/dev/null
 
 echo
-echo "DVMM_BOOT_OK reached userspace"
+echo "TDVMM_BOOT_OK reached userspace"
 echo "kernel: $(/bin/busybox uname -sr)"
 echo
 

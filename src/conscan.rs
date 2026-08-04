@@ -32,7 +32,7 @@ pub struct ConsoleScan {
     tee: Arc<Mutex<Vec<u8>>>,
     partial: Vec<u8>,
     dir: PathBuf,
-    /// The `<project>-` container-name prefix, e.g. `dvmm_tigerbeetle-`.
+    /// The `<project>-` container-name prefix, e.g. `tdvmm_tigerbeetle-`.
     project_prefix: String,
     services: Vec<String>,
     /// Lazily-opened per-file handles; a cached `None` marks a file we gave up on.
@@ -166,7 +166,7 @@ impl ConsoleScan {
         if let Some(Some(f)) = self.files.get_mut(stem) {
             if let Err(e) = f.write_all(bytes) {
                 crate::log_line(format_args!(
-                    "[dvmm][WARN] --logs-dir: writing {stem}.log: {e} — dropping this file"
+                    "[tdvmm][WARN] --logs-dir: writing {stem}.log: {e} — dropping this file"
                 ));
                 self.files.insert(stem.to_string(), None);
             }
@@ -178,7 +178,7 @@ impl ConsoleScan {
             Some(f) => f,
             None => {
                 crate::log_line(format_args!(
-                    "[dvmm][WARN] --logs-dir: unsafe service name {stem:?} — skipping its log"
+                    "[tdvmm][WARN] --logs-dir: unsafe service name {stem:?} — skipping its log"
                 ));
                 return None;
             }
@@ -197,7 +197,7 @@ impl ConsoleScan {
             }
             Err(e) => {
                 crate::log_line(format_args!(
-                    "[dvmm][WARN] --logs-dir: creating {}: {e} — skipping",
+                    "[tdvmm][WARN] --logs-dir: creating {}: {e} — skipping",
                     path.display()
                 ));
                 None
@@ -234,7 +234,7 @@ mod tests {
         ConsoleScan::new(
             Arc::new(Mutex::new(Vec::new())),
             dir,
-            "dvmm_tigerbeetle",
+            "tdvmm_tigerbeetle",
             services.iter().map(|s| s.to_string()).collect(),
             0,
             ghz(),
@@ -244,13 +244,13 @@ mod tests {
     #[test]
     fn maps_container_names_to_services() {
         let sc = scan(test_dir("_map"), &["replica0", "replica1", "replica2", "client"]);
-        assert_eq!(sc.service_of(b"dvmm_tigerbeetle-replica2-1").as_deref(), Some("replica2"));
-        assert_eq!(sc.service_of(b"dvmm_tigerbeetle-client-1").as_deref(), Some("client"));
+        assert_eq!(sc.service_of(b"tdvmm_tigerbeetle-replica2-1").as_deref(), Some("replica2"));
+        assert_eq!(sc.service_of(b"tdvmm_tigerbeetle-client-1").as_deref(), Some("client"));
         // A bracket that is exactly a service name (fallback path).
         assert_eq!(sc.service_of(b"replica0").as_deref(), Some("replica0"));
         // Non-service brackets and a wrong project resolve to nothing (residue).
         assert_eq!(sc.service_of(b"stack"), None);
-        assert_eq!(sc.service_of(b"dvmm_other-replica0-1"), None);
+        assert_eq!(sc.service_of(b"tdvmm_other-replica0-1"), None);
     }
 
     #[test]
@@ -258,7 +258,7 @@ mod tests {
         let dir = test_dir("reassemble");
         let mut sc = scan(dir.clone(), &["replica0"]);
         let tee = sc.tee.clone();
-        tee.lock().unwrap().extend_from_slice(b"[dvmm_tigerbeetle-replica0-1] hel");
+        tee.lock().unwrap().extend_from_slice(b"[tdvmm_tigerbeetle-replica0-1] hel");
         sc.drain(0); // no newline yet → buffered
         tee.lock().unwrap().extend_from_slice(b"lo world\n");
         sc.drain(1_000_000_000); // +1s of virtual time completes the line
@@ -272,8 +272,8 @@ mod tests {
         let mut sc = scan(dir.clone(), &["replica0", "client"]);
         let tee = sc.tee.clone();
         tee.lock().unwrap().extend_from_slice(
-            b"[dvmm_tigerbeetle-replica0-1] up\n[stack] booting\nplain kernel line\n\
-              [dvmm_tigerbeetle-client-1] tx\n",
+            b"[tdvmm_tigerbeetle-replica0-1] up\n[stack] booting\nplain kernel line\n\
+              [tdvmm_tigerbeetle-client-1] tx\n",
         );
         sc.drain(0);
         sc.finish(0);
@@ -311,13 +311,13 @@ mod tests {
         let dir = test_dir("append");
         let mut sc = scan(dir.clone(), &["replica0"]);
         let tee = sc.tee.clone();
-        tee.lock().unwrap().extend_from_slice(b"[dvmm_tigerbeetle-replica0-1] live1\n");
+        tee.lock().unwrap().extend_from_slice(b"[tdvmm_tigerbeetle-replica0-1] live1\n");
         sc.drain(0); // opens replica0.log, writes through the cached handle
         let path = dir.join("replica0.log");
         // An external rewrite through a different handle (the agent copy).
         std::fs::write(&path, b"AGENT COPY\n").unwrap();
         // A line teed after the rewrite must append after it, not clobber it.
-        tee.lock().unwrap().extend_from_slice(b"[dvmm_tigerbeetle-replica0-1] live2\n");
+        tee.lock().unwrap().extend_from_slice(b"[tdvmm_tigerbeetle-replica0-1] live2\n");
         sc.drain(0);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "AGENT COPY\n0.000 live2\n");
     }

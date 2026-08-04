@@ -206,46 +206,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dvmm"
-version = "0.1.0"
-dependencies = [
- "clap",
- "dvmm-proto",
- "flate2",
- "indicatif",
- "kvm-bindings",
- "kvm-ioctls",
- "libc",
- "linux-loader",
- "regex",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2",
- "tar",
- "vm-memory",
- "vm-superio",
- "vmm-sys-util",
-]
-
-[[package]]
-name = "dvmm-agent"
-version = "0.1.0"
-dependencies = [
- "dvmm-proto",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "dvmm-proto"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "encode_unicode"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -649,6 +609,46 @@ dependencies = [
  "filetime",
  "libc",
  "xattr",
+]
+
+[[package]]
+name = "tdvmm"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "flate2",
+ "indicatif",
+ "kvm-bindings",
+ "kvm-ioctls",
+ "libc",
+ "linux-loader",
+ "regex",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "tar",
+ "tdvmm-proto",
+ "vm-memory",
+ "vm-superio",
+ "vmm-sys-util",
+]
+
+[[package]]
+name = "tdvmm-agent"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tdvmm-proto",
+]
+
+[[package]]
+name = "tdvmm-proto"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

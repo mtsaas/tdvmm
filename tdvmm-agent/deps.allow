@@ -1,5 +1,5 @@
-dvmm-agent
-dvmm-proto
+tdvmm-agent
+tdvmm-proto
 itoa
 memchr
 proc-macro2

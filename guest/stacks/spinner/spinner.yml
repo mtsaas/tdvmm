@@ -1,7 +1,7 @@
-# dvmm -- tick-doorbell regression scenario.
+# tdvmm -- tick-doorbell regression scenario.
 #
-#   dvmm test spinner.dvmm --scenario spinner.yml   ->  PASS (exit 0) with the doorbell
-#   DVMM_NO_DOORBELL=1 dvmm test ... --scenario spinner.yml -> wedges (exit 2) without it
+#   tdvmm test spinner.tdvmm --scenario spinner.yml   ->  PASS (exit 0) with the doorbell
+#   TDVMM_NO_DOORBELL=1 tdvmm test ... --scenario spinner.yml -> wedges (exit 2) without it
 #
 # `spinner` busy-loops the single vCPU exit-free. The assertions prove the guest
 # stays responsive anyway: `worker` comes up and we can still exec into it well
@@ -10,7 +10,7 @@
 name: tick-doorbell-regression
 
 run:
-  cmdline: "console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable dvmm.stack=1 dvmm.interval=30"
+  cmdline: "console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable tdvmm.stack=1 tdvmm.interval=30"
 
 steps:
   # The worker container is up — which already requires the vCPU to have been

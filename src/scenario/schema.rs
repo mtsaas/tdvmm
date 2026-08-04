@@ -681,7 +681,7 @@ mod tests {
         let y = "\
 name: t
 run:
-  cmdline: \"console=ttyS0 dvmm.maxrows=5\"
+  cmdline: \"console=ttyS0 tdvmm.maxrows=5\"
 steps:
   - name: wait
     at: 0s
@@ -703,7 +703,7 @@ steps:
 ";
         let s = scn_from(y).unwrap();
         assert_eq!(s.steps.len(), 2);
-        assert_eq!(s.run.cmdline.as_deref(), Some("console=ttyS0 dvmm.maxrows=5"));
+        assert_eq!(s.run.cmdline.as_deref(), Some("console=ttyS0 tdvmm.maxrows=5"));
         // horizon covers the last step's at (2h) + slack.
         assert!(s.implicit_horizon_secs() > 2.0 * 3600.0);
     }

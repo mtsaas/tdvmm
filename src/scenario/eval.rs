@@ -5,7 +5,7 @@
 
 use std::collections::HashSet;
 
-use dvmm_proto::ContainerInfo;
+use tdvmm_proto::ContainerInfo;
 
 use super::schema::{ContainersAssert, PreparedExpect, PreparedUntil};
 use super::{truncate, AgentLine};

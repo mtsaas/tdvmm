@@ -180,7 +180,7 @@ impl VecBits {
 /// silent: the whole point is that if the guest ever exercises one of these,
 /// it shows up in the log instead of mystifying us later.
 fn log_unsupported(what: &str, detail: std::fmt::Arguments<'_>) {
-    crate::log_line(format_args!("[dvmm][lapic] UNSUPPORTED {what}: {detail} (ignored)"));
+    crate::log_line(format_args!("[tdvmm][lapic] UNSUPPORTED {what}: {detail} (ignored)"));
 }
 
 pub struct Lapic {

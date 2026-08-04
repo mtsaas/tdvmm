@@ -1,5 +1,5 @@
 #!/bin/sh
-# dvmm TigerBeetle stack -- demo accounting client (closed world).
+# tdvmm TigerBeetle stack -- demo accounting client (closed world).
 #
 # Reuses the pinned TigerBeetle image's built-in REPL (no extra language
 # toolchain, stays reproducible + closed-world). One `tigerbeetle repl
@@ -10,7 +10,7 @@
 #     read the two balances back, and log the cycle as a one-line narrative:
 #         cycle 3: 5 transfers, 500 moved -> balance A(debits)=1500 B(credits)=1500
 #   * sleep a virtual INTERVAL_SECONDS between cycles so the guest goes idle
-#     (HLT) and dvmm fast-forwards the gap.
+#     (HLT) and tdvmm fast-forwards the gap.
 #
 # Double-entry invariant: every transfer debits A and credits B by the same
 # amount, so at all times A.debits_posted == B.credits_posted. The scenario

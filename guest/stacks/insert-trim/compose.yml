@@ -1,4 +1,4 @@
-# dvmm INSERT-TRIM stack (the minimal fast fast-forward acceptance).
+# tdvmm INSERT-TRIM stack (the minimal fast fast-forward acceptance).
 #
 # The smallest real workload (Postgres + an insert-a-row / trim-to-cap
 # service) re-expressed as a docker-compose stack, so it can be driven through
@@ -18,7 +18,7 @@
 #
 # Knobs (INTERVAL_SECONDS / MAX_ROWS) use compose ${VAR:-default} interpolation so
 # the committed lockfile stays deterministic while the FF demo / smoke tests can
-# still override cadence + cap via the kernel cmdline (dvmm.interval= / .maxrows=).
+# still override cadence + cap via the kernel cmdline (tdvmm.interval= / .maxrows=).
 
 services:
   postgres:
@@ -39,12 +39,12 @@ services:
     # Override the postgres entrypoint: this container is NOT a database, it is the
     # insert/trim client. It reaches the db container BY NAME ("postgres") over the
     # compose network (netavark + aardvark DNS).
-    entrypoint: ["/bin/sh", "/opt/dvmm/service-loop.sh"]
+    entrypoint: ["/bin/sh", "/opt/tdvmm/service-loop.sh"]
     environment:
-      INTERVAL_SECONDS: "${DVMM_INTERVAL:-3600}"
-      MAX_ROWS: "${DVMM_MAXROWS:-1000}"
+      INTERVAL_SECONDS: "${TDVMM_INTERVAL:-3600}"
+      MAX_ROWS: "${TDVMM_MAXROWS:-1000}"
       PGHOST: postgres
       PGUSER: postgres
       PGDATABASE: appdb
     volumes:
-      - ./service-loop.sh:/opt/dvmm/service-loop.sh:ro
+      - ./service-loop.sh:/opt/tdvmm/service-loop.sh:ro

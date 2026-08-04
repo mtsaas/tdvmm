@@ -253,7 +253,7 @@ impl FfState {
                 .map_or(true, |t| now.duration_since(t) >= JUMP_RATE_WARN_COOLDOWN);
             if sustained >= JUMP_RATE_WARN_SUSTAIN && cooled {
                 msg = Some(format!(
-                    "[dvmm][WARN] fast-forward jump rate {:.0}/s sustained for {:.0}s \
+                    "[tdvmm][WARN] fast-forward jump rate {:.0}/s sustained for {:.0}s \
                      ({} jumps total, max Δ {:.3}s) — possible wedged or deeply-idle guest; \
                      NOT stopping (set --max-virtual-time to bound the run). {}",
                     rate,
@@ -326,7 +326,7 @@ impl FfState {
             .collect::<Vec<_>>()
             .join(",");
         format!(
-            "# dvmm fast-forward per-run metrics (machine-parseable; --metrics-out)\n\
+            "# tdvmm fast-forward per-run metrics (machine-parseable; --metrics-out)\n\
              schema 1\n\
              stop_reason {stop}\n\
              tsc_hz {tsc_hz}\n\

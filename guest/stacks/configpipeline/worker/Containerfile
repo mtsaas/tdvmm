@@ -1,4 +1,4 @@
-# dvmm corpus (configpipeline) worker image -- a build: context.
+# tdvmm corpus (configpipeline) worker image -- a build: context.
 #
 # Built HOST-SIDE at bake time only; the output flows through the SAME squash /
 # seed-store / compose.lock pipeline as any image:. The base is DIGEST-PINNED

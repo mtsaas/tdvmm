@@ -1,4 +1,4 @@
-# dvmm -- TigerBeetle cluster stack (3 replicas + a demo client).
+# tdvmm -- TigerBeetle cluster stack (3 replicas + a demo client).
 #
 # ============================================================================
 #  STATUS: PASSING. The 3-replica cluster forms and runs.
@@ -13,7 +13,7 @@
 #
 #  The one loud observable is a flood of `loop_run_for_ns too slow` warnings.
 #  These are NOT a wedge and NOT a fast-forward bug: the idle time-jump is exact
-#  (dvmm advances virtual time straight to the next armed deadline). The warnings
+#  (tdvmm advances virtual time straight to the next armed deadline). The warnings
 #  are the guest truthfully measuring real single-vCPU contention -- four busy
 #  co-tenants (3 replicas + client) serialized on ONE vCPU, exactly as they
 #  would on real single-core hardware. Their magnitude is host-load-dependent.
@@ -103,7 +103,7 @@ services:
       - replica1
       - replica2
     environment:
-      INTERVAL_SECONDS: "${DVMM_INTERVAL:-3600}"
+      INTERVAL_SECONDS: "${TDVMM_INTERVAL:-3600}"
     volumes:
       - ./client.sh:/scripts/client.sh:ro
 

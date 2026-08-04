@@ -1,6 +1,6 @@
-# dvmm DEMO scenario — the flagship capability reference as a test.
+# tdvmm DEMO scenario — the flagship capability reference as a test.
 #
-#   dvmm test demo.dvmm --scenario demo.yml --logs-dir /tmp/demo-logs  ->  PASS, exit 0
+#   tdvmm test demo.tdvmm --scenario demo.yml --logs-dir /tmp/demo-logs  ->  PASS, exit 0
 #
 # Drives a full virtual HOUR of the gRPC order stack under fast-forward (a rollup
 # cycle every ~3 virtual minutes), then injects a Postgres fault mid-run and proves
@@ -28,12 +28,12 @@ name: demo-gRPC-hour-with-fault
 expect_death: [postgres]
 
 run:
-  # ~3-virtual-minute cadence (dvmm.interval=180) so a full hour's narrative — many
+  # ~3-virtual-minute cadence (tdvmm.interval=180) so a full hour's narrative — many
   # rollups, a fault, and recovery — completes in seconds of wall clock. hc_tick=30
   # runs the healthcheck ticker every 30 virtual seconds so the service_healthy
   # gate resolves early (not at the first hour). console on ttyS0; ttyS1 is the
   # agent control channel.
-  cmdline: "console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable dvmm.stack=1 dvmm.interval=180 dvmm.hc_tick=30"
+  cmdline: "console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable tdvmm.stack=1 tdvmm.interval=180 tdvmm.hc_tick=30"
 
 steps:
   # 1. Readiness: postgres accepts connections (checked inside the pg container).

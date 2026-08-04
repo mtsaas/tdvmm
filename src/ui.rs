@@ -1,4 +1,4 @@
-//! `dvmm build`'s progress UI (Fable CLI-UX ruling).
+//! `tdvmm build`'s progress UI (Fable CLI-UX ruling).
 //!
 //! Interactive TTY: a single stepped spinner line (`⠋ [3/8] label … 12s`) that,
 //! on every step transition, PERSISTS the finished step as a `✓ [i/n] label`
@@ -88,7 +88,7 @@ fn is_truthy_env(name: &str) -> bool {
 }
 
 impl Progress {
-    /// The `dvmm build` constructor: active iff [`enabled`] says so.
+    /// The `tdvmm build` constructor: active iff [`enabled`] says so.
     pub fn new(no_progress_flag: bool) -> Progress {
         let color = std::env::var_os("NO_COLOR").is_none();
         if !enabled(no_progress_flag) {
@@ -126,14 +126,14 @@ impl Progress {
         self.start.elapsed()
     }
 
-    /// The TTY-only title line (`dvmm build  <stack>` + a blank line), printed
+    /// The TTY-only title line (`tdvmm build  <stack>` + a blank line), printed
     /// once before the first step. A no-op in frozen mode — the plain output
     /// has no equivalent line.
     pub fn title(&self, stack: &str) {
         if self.bar.is_none() {
             return;
         }
-        eprintln!("dvmm build  {stack}");
+        eprintln!("tdvmm build  {stack}");
         eprintln!();
     }
 
@@ -304,7 +304,7 @@ const MIN_WIDTH: usize = 40;
 /// (already a direct dependency for the KVM ioctls — adding NOTHING to
 /// `Cargo.toml`/`Cargo.lock`, which matters here: `build.rs`'s bake-cache key
 /// AND the guest agent's embedded build hash both fold in `Cargo.lock`'s
-/// bytes, so touching it would perturb the hashed `.dvmm` artifact — an
+/// bytes, so touching it would perturb the hashed `.tdvmm` artifact — an
 /// output-only UI change must not). Falls back to 80 columns if it can't be
 /// determined, clamped to a sane minimum.
 fn term_width() -> usize {

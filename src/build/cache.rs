@@ -1,10 +1,10 @@
 //! content-hash bake cache
 //!
-//! The biggest e2e-speed win: `dvmm build` is deterministic (identical inputs ->
-//! byte-identical `.dvmm`; see artifact_test gate 1), so a build whose inputs are
+//! The biggest e2e-speed win: `tdvmm build` is deterministic (identical inputs ->
+//! byte-identical `.tdvmm`; see artifact_test gate 1), so a build whose inputs are
 //! unchanged can REUSE the prior outputs and skip the whole pull/squash/assemble
 //! pipeline. The cache key hashes EVERY input that affects the output bytes; a hit
-//! restores the `.dvmm`, the per-stack initramfs (+ sha sidecar), and the committed
+//! restores the `.tdvmm`, the per-stack initramfs (+ sha sidecar), and the committed
 //! compose.lock.yml + stack.lock. `--no-cache` forces a full rebuild (still stored,
 //! so later runs hit); nightly bake-repeatability uses it to re-bake unconditionally.
 
@@ -26,7 +26,7 @@ pub(super) struct CacheCtx {
 }
 
 /// Resolve the cache directory (Fable Part A). Precedence:
-///   `--cache-dir <path>` (the `flag`)  >  `$DVMM_CACHE_DIR`  >  `$HOME/.dvmm`.
+///   `--cache-dir <path>` (the `flag`)  >  `$TDVMM_CACHE_DIR`  >  `$HOME/.tdvmm`.
 /// Returns `(dir, source)` where `source` is the provenance word for the log line.
 /// Cache entries are disposable, so no migration between locations is needed.
 pub(super) fn resolve_cache_dir(flag: Option<&str>) -> (PathBuf, &'static str) {
@@ -35,13 +35,13 @@ pub(super) fn resolve_cache_dir(flag: Option<&str>) -> (PathBuf, &'static str) {
             return (PathBuf::from(f), "--cache-dir flag");
         }
     }
-    if let Ok(d) = std::env::var("DVMM_CACHE_DIR") {
+    if let Ok(d) = std::env::var("TDVMM_CACHE_DIR") {
         if !d.is_empty() {
-            return (PathBuf::from(d), "DVMM_CACHE_DIR env");
+            return (PathBuf::from(d), "TDVMM_CACHE_DIR env");
         }
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    (PathBuf::from(home).join(".dvmm"), "default $HOME/.dvmm")
+    (PathBuf::from(home).join(".tdvmm"), "default $HOME/.tdvmm")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -61,15 +61,15 @@ pub(super) fn compute_cache_key(
     let repo_root = here
         .parent()
         .ok_or_else(|| "no repo root above guest/".to_string())?;
-    let self_sha = sha256_file_hex(self_exe).map_err(|x| format!("hashing dvmm binary: {x}"))?;
+    let self_sha = sha256_file_hex(self_exe).map_err(|x| format!("hashing tdvmm binary: {x}"))?;
     let kernel_sha = sha256_file_hex(kernel).map_err(|x| format!("hashing kernel: {x}"))?;
     // The agent is now a Rust crate built in a pinned musl container: its cache
     // input is the agent + proto crate trees + Cargo.lock (a toolchain/image bump
     // is captured via the `builders` digests below). Fable §2.
     let agent_tree =
-        tree_hash(&repo_root.join("dvmm-agent"), &[]).map_err(|x| format!("hashing dvmm-agent: {x}"))?;
+        tree_hash(&repo_root.join("tdvmm-agent"), &[]).map_err(|x| format!("hashing tdvmm-agent: {x}"))?;
     let proto_tree =
-        tree_hash(&repo_root.join("dvmm-proto"), &[]).map_err(|x| format!("hashing dvmm-proto: {x}"))?;
+        tree_hash(&repo_root.join("tdvmm-proto"), &[]).map_err(|x| format!("hashing tdvmm-proto: {x}"))?;
     let cargo_lock = sha256_file_hex(&repo_root.join("Cargo.lock"))
         .map_err(|x| format!("hashing Cargo.lock: {x}"))?;
     let overlay_tree =
@@ -85,7 +85,7 @@ pub(super) fn compute_cache_key(
     let builders_line = builders.join(",");
 
     let manifest = format!(
-        "dvmm-bake-cache v{CACHE_VERSION}\n\
+        "tdvmm-bake-cache v{CACHE_VERSION}\n\
          self:      {self_sha}\n\
          builders:  {builders_line}\n\
          engine:    {engine_sha}\n\
@@ -107,7 +107,7 @@ pub(super) fn compute_cache_key(
 
 /// The baked files a cache entry holds (basenames within the entry dir).
 const CACHE_FILES: [&str; 5] = [
-    "artifact.dvmm",
+    "artifact.tdvmm",
     "initramfs.cpio.gz",
     "initramfs.cpio.gz.sha256",
     "compose.lock.yml",
@@ -116,24 +116,24 @@ const CACHE_FILES: [&str; 5] = [
 
 pub(super) fn cache_is_hit(c: &CacheCtx) -> bool {
     c.dir.is_dir()
-        && c.dir.join("dvmm_sha256").is_file()
+        && c.dir.join("tdvmm_sha256").is_file()
         && CACHE_FILES.iter().all(|f| c.dir.join(f).is_file())
 }
 
-/// Restore a hit's outputs into place; returns the cached `.dvmm` sha256.
+/// Restore a hit's outputs into place; returns the cached `.tdvmm` sha256.
 pub(super) fn cache_restore(
     c: &CacheCtx,
-    out_dvmm: &Path,
+    out_tdvmm: &Path,
     out_initramfs: &Path,
     committed_lock: &Path,
     stack_lock: &Path,
 ) -> std::io::Result<String> {
-    for p in [out_dvmm, out_initramfs, committed_lock] {
+    for p in [out_tdvmm, out_initramfs, committed_lock] {
         if let Some(parent) = p.parent() {
             std::fs::create_dir_all(parent)?;
         }
     }
-    std::fs::copy(c.dir.join("artifact.dvmm"), out_dvmm)?;
+    std::fs::copy(c.dir.join("artifact.tdvmm"), out_tdvmm)?;
     std::fs::copy(c.dir.join("initramfs.cpio.gz"), out_initramfs)?;
     std::fs::copy(
         c.dir.join("initramfs.cpio.gz.sha256"),
@@ -141,7 +141,7 @@ pub(super) fn cache_restore(
     )?;
     std::fs::copy(c.dir.join("compose.lock.yml"), committed_lock)?;
     std::fs::copy(c.dir.join("stack.lock"), stack_lock)?;
-    Ok(std::fs::read_to_string(c.dir.join("dvmm_sha256"))?
+    Ok(std::fs::read_to_string(c.dir.join("tdvmm_sha256"))?
         .trim()
         .to_string())
 }
@@ -150,11 +150,11 @@ pub(super) fn cache_restore(
 /// Returns `Ok(false)` if an entry already exists (nothing to do).
 pub(super) fn cache_store(
     c: &CacheCtx,
-    out_dvmm: &Path,
+    out_tdvmm: &Path,
     out_initramfs: &Path,
     committed_lock: &Path,
     stack_lock: &Path,
-    dvmm_sha: &str,
+    tdvmm_sha: &str,
 ) -> std::io::Result<bool> {
     if c.dir.exists() {
         return Ok(false);
@@ -163,7 +163,7 @@ pub(super) fn cache_store(
     std::fs::create_dir_all(root)?;
     let tmp = root.join(format!(".tmp-{}-{}", std::process::id(), now_nanos()));
     std::fs::create_dir_all(&tmp)?;
-    std::fs::copy(out_dvmm, tmp.join("artifact.dvmm"))?;
+    std::fs::copy(out_tdvmm, tmp.join("artifact.tdvmm"))?;
     std::fs::copy(out_initramfs, tmp.join("initramfs.cpio.gz"))?;
     let sidecar = PathBuf::from(format!("{}.sha256", out_initramfs.display()));
     if sidecar.exists() {
@@ -173,7 +173,7 @@ pub(super) fn cache_store(
     }
     std::fs::copy(committed_lock, tmp.join("compose.lock.yml"))?;
     std::fs::copy(stack_lock, tmp.join("stack.lock"))?;
-    std::fs::write(tmp.join("dvmm_sha256"), format!("{dvmm_sha}\n"))?;
+    std::fs::write(tmp.join("tdvmm_sha256"), format!("{tdvmm_sha}\n"))?;
     // atomic publish; if another builder won the race, drop our temp.
     match std::fs::rename(&tmp, &c.dir) {
         Ok(()) => Ok(true),

@@ -170,7 +170,7 @@ pub(crate) fn dump_cpuid(kvm: &Kvm) -> Result<(), Box<dyn std::error::Error>> {
     let entries = filtered.as_slice();
     let find = |func: u32| entries.iter().find(|e| e.function == func && e.index == 0);
 
-    println!("# dvmm effective guest clock/timer CPUID profile (userspace backend)");
+    println!("# tdvmm effective guest clock/timer CPUID profile (userspace backend)");
     println!("#");
     println!("# The CPUID leaves the owned-clock + fast-forward guarantee depends on. A host or");
     println!("# CPU change surfaces here as a changed line. Per-core-volatile fields (leaf-1");

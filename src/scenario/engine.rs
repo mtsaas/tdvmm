@@ -7,7 +7,7 @@
 
 use serde_json::json;
 
-use dvmm_proto::{decode_line, encode_line, GuestEvent, Request};
+use tdvmm_proto::{decode_line, encode_line, GuestEvent, Request};
 
 use crate::control::ControlChannel;
 use crate::vtsc::TscFrequency;
@@ -127,7 +127,7 @@ impl ScenarioEngine {
                 "steps_total": self.scn.steps.len(),
                 // The control-channel wire schema (Fable §4): the run-log header
                 // records the proto version alongside the JSONL/report schema.
-                "proto_schema": dvmm_proto::SCHEMA,
+                "proto_schema": tdvmm_proto::SCHEMA,
             }),
         );
         self.phase = Phase::AwaitAgent;
@@ -226,7 +226,7 @@ impl ScenarioEngine {
                 );
             } else {
                 crate::log_line(format_args!(
-                    "[dvmm][WARN] horizon reached before a `done` event; folding {} guest event(s) into the verdict",
+                    "[tdvmm][WARN] horizon reached before a `done` event; folding {} guest event(s) into the verdict",
                     self.ledger.events
                 ));
                 self.finish_with_ledger(now);
@@ -604,11 +604,11 @@ impl ScenarioEngine {
             if let Phase::AwaitAgent = self.phase {
                 self.t0 = now;
                 if let Some(s) = parsed.schema {
-                    if s != dvmm_proto::SCHEMA {
+                    if s != tdvmm_proto::SCHEMA {
                         crate::log_line(format_args!(
-                            "[dvmm][WARN] agent proto schema {s} != host {} \
+                            "[tdvmm][WARN] agent proto schema {s} != host {} \
                              (host+agent should ship in lockstep)",
-                            dvmm_proto::SCHEMA
+                            tdvmm_proto::SCHEMA
                         ));
                     }
                 }
@@ -619,7 +619,7 @@ impl ScenarioEngine {
                         "agent": parsed.agent,
                         "agent_schema": parsed.schema,
                         "agent_build": parsed.build,
-                        "proto_schema": dvmm_proto::SCHEMA,
+                        "proto_schema": tdvmm_proto::SCHEMA,
                     }),
                 );
                 self.schedule(now, com2);
@@ -673,7 +673,7 @@ impl ScenarioEngine {
     fn on_guest_event(&mut self, now: u64, ev: &GuestEvent, seq: Option<u64>) {
         if let Some(dropped) = seq.and_then(|s| self.ledger.observe_seq(s)) {
             crate::log_line(format_args!(
-                "[dvmm][WARN] guest event seq gap: {dropped} line(s) dropped"
+                "[tdvmm][WARN] guest event seq gap: {dropped} line(s) dropped"
             ));
         }
         self.logger.event(
@@ -878,12 +878,12 @@ impl ScenarioEngine {
                 v.push(b'\n');
                 if let Err(e) = std::fs::write(&self.meta.report_path, &v) {
                     crate::log_line(format_args!(
-                        "[dvmm][WARN] could not write report {}: {e}",
+                        "[tdvmm][WARN] could not write report {}: {e}",
                         self.meta.report_path
                     ));
                 }
             }
-            Err(e) => crate::log_line(format_args!("[dvmm][WARN] report serialize: {e}")),
+            Err(e) => crate::log_line(format_args!("[tdvmm][WARN] report serialize: {e}")),
         }
 
         self.print_summary(&report);
@@ -894,7 +894,7 @@ impl ScenarioEngine {
         let l = |a: std::fmt::Arguments| crate::log_line(a);
         l(format_args!(""));
         l(format_args!(
-            "==== dvmm test: {} ({}) ====",
+            "==== tdvmm test: {} ({}) ====",
             self.scn.name, self.meta.stack
         ));
         l(format_args!(
@@ -939,7 +939,7 @@ impl ScenarioEngine {
 mod tests {
     use super::*;
     use crate::scenario::testutil::{engine_for, ev};
-    use dvmm_proto::Reply;
+    use tdvmm_proto::Reply;
 
     #[test]
     fn await_done_at_horizon_folds_ledger_not_infra() {

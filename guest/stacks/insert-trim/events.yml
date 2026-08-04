@@ -1,9 +1,9 @@
-# dvmm — Phase-C bridge round-trip (guest-assertion SDK).
+# tdvmm — Phase-C bridge round-trip (guest-assertion SDK).
 #
-#   dvmm test insert-trim --scenario events.yml   ->   PASS, exit 0
+#   tdvmm test insert-trim --scenario events.yml   ->   PASS, exit 0
 #
 # The "SDK" is literally one line: a workload container echoes a JSON assertion
-# event to /run/dvmm/events; the agent (outside the containers) forwards it over
+# event to /run/tdvmm/events; the agent (outside the containers) forwards it over
 # ttyS1; the host records it (vtsc-stamped) and folds it into the verdict. No
 # client library, no new transport — just a pipe.
 #
@@ -13,7 +13,7 @@
 name: bridge-roundtrip
 
 run:
-  cmdline: "console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable dvmm.stack=1 dvmm.interval=3600 dvmm.maxrows=5 dvmm.hc_tick=2"
+  cmdline: "console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable tdvmm.stack=1 tdvmm.interval=3600 tdvmm.maxrows=5 tdvmm.hc_tick=2"
   until: done
 
 steps:
@@ -31,6 +31,6 @@ steps:
     exec:
       container: service
       cmd: |
-        echo '{"kind":"sometimes","name":"bridge_rt","ok":true}' > /run/dvmm/events
-        echo '{"kind":"done"}' > /run/dvmm/events
+        echo '{"kind":"sometimes","name":"bridge_rt","ok":true}' > /run/tdvmm/events
+        echo '{"kind":"done"}' > /run/tdvmm/events
     expect: { exit: 0 }

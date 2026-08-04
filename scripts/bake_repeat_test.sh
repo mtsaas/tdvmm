@@ -5,7 +5,7 @@
 # compose.lock.yml must be byte-identical, and the stack manifest's COMPARED lines
 # (pinned image digests + the compose.lock hash + the per-image ledger) must match.
 # The built initramfs artifact hash is reported (it embeds apk/build metadata that
-# is NOT bit-reproducible in Phase 1 -- see images.lock NOTES -- so it is shown,
+# is NOT bit-reproducible in Phase 1 (embedded apk/build metadata) -- so it is shown,
 # not gated).
 #
 # Squashed images are pinned via --timestamp, so their digests are stable; plain
@@ -23,7 +23,7 @@ MAN="$ROOT/guest/stacks/$NAME/stack.lock"
 # compare only the reproducible portion of the manifest: the pinned image digests
 # + compose.lock hash + sizing. Drop the informational tail (podman-version +
 # baked-at) AND the initramfs_sha256 line -- the built ARTIFACT embeds apk/build
-# metadata that is not bit-reproducible in Phase 1 (see images.lock NOTES), so it
+# metadata that is not bit-reproducible in Phase 1, so it
 # is reported, not gated.
 compared() { sed '/informational (NOT compared/,$d' "$1" | grep -v '^initramfs_sha256'; }
 
@@ -31,12 +31,12 @@ compared() { sed '/informational (NOT compared/,$d' "$1" | grep -v '^initramfs_s
 # unconditionally (a content-hash cache HIT would trivially return the same file
 # and prove nothing). This exercises the real pull/squash/build/assemble each time.
 echo "== bake #1 (--no-cache, full re-bake) =="
-"$ROOT/target/release/dvmm" build --no-cache "$COMPOSE" >/tmp/bake1.log 2>&1 || { echo "BAKE1 FAILED"; tail -30 /tmp/bake1.log; exit 1; }
+"$ROOT/target/release/tdvmm" build --no-cache "$COMPOSE" >/tmp/bake1.log 2>&1 || { echo "BAKE1 FAILED"; tail -30 /tmp/bake1.log; exit 1; }
 L1="$(sha256sum "$LOCK" | awk '{print $1}')"; M1="$(compared "$MAN")"; A1="$(awk '/^initramfs_sha256/{print $2}' "$MAN")"
 cp "$LOCK" /tmp/lock1.yml
 
 echo "== bake #2 (--no-cache, full re-bake) =="
-"$ROOT/target/release/dvmm" build --no-cache "$COMPOSE" >/tmp/bake2.log 2>&1 || { echo "BAKE2 FAILED"; tail -30 /tmp/bake2.log; exit 1; }
+"$ROOT/target/release/tdvmm" build --no-cache "$COMPOSE" >/tmp/bake2.log 2>&1 || { echo "BAKE2 FAILED"; tail -30 /tmp/bake2.log; exit 1; }
 L2="$(sha256sum "$LOCK" | awk '{print $1}')"; M2="$(compared "$MAN")"; A2="$(awk '/^initramfs_sha256/{print $2}' "$MAN")"
 
 echo

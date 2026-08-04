@@ -1,4 +1,4 @@
--- dvmm corpus (svcchain): Postgres first-start schema.
+-- tdvmm corpus (svcchain): Postgres first-start schema.
 --
 -- Bind-mounted read-only into the db container at
 -- /docker-entrypoint-initdb.d/10-schema.sql; the official postgres entrypoint

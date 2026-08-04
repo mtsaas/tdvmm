@@ -27,7 +27,7 @@
 //! (`park.rs` tolerates it). Fast-forward semantics are unaffected: this only
 //! adds real-time-positioned exit boundaries, which every device exit already is.
 //!
-//! Default ON; `DVMM_NO_DOORBELL=1` disables it (A/B against the old behavior).
+//! Default ON; `TDVMM_NO_DOORBELL=1` disables it (A/B against the old behavior).
 
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
@@ -51,17 +51,17 @@ pub struct Doorbell {
 }
 
 impl Doorbell {
-    /// Install the doorbell for this (vCPU) thread. Reads `DVMM_NO_DOORBELL`;
+    /// Install the doorbell for this (vCPU) thread. Reads `TDVMM_NO_DOORBELL`;
     /// when enabled, records the `immediate_exit` pointer, installs the handler,
     /// and creates a per-thread one-shot timer. Must be called ON the vCPU thread
     /// (the timer targets `gettid()`).
     pub fn new(vcpu: &mut kvm_ioctls::VcpuFd) -> Self {
-        let disabled = std::env::var("DVMM_NO_DOORBELL")
+        let disabled = std::env::var("TDVMM_NO_DOORBELL")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
         if disabled {
             crate::log_line(format_args!(
-                "[dvmm][WARN] tick doorbell DISABLED (DVMM_NO_DOORBELL) — an \
+                "[tdvmm][WARN] tick doorbell DISABLED (TDVMM_NO_DOORBELL) — an \
                  exit-free guest cannot be preempted; for A/B testing only"
             ));
             return Self::off();
@@ -83,7 +83,7 @@ impl Doorbell {
             let mut timerid: libc::timer_t = std::mem::zeroed();
             if libc::timer_create(libc::CLOCK_MONOTONIC, &mut sev, &mut timerid) != 0 {
                 crate::log_line(format_args!(
-                    "[dvmm][WARN] tick doorbell: timer_create failed ({}) — an \
+                    "[tdvmm][WARN] tick doorbell: timer_create failed ({}) — an \
                      exit-free guest may wedge",
                     std::io::Error::last_os_error()
                 ));
@@ -100,7 +100,7 @@ impl Doorbell {
         crate::util::install_signal_handler(sig, on_doorbell);
 
         crate::log_line(format_args!(
-            "[dvmm] tick doorbell ARMED (SIGRTMIN+{}): armed timers preempt an \
+            "[tdvmm] tick doorbell ARMED (SIGRTMIN+{}): armed timers preempt an \
              exit-free vCPU; immediate_exit closes the wakeup race",
             sig - libc::SIGRTMIN()
         ));

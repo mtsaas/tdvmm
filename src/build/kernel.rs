@@ -43,7 +43,7 @@ fn kernel_lock_path(here: &Path) -> PathBuf {
 pub(super) fn read_kernel_lock(here: &Path) -> Result<KernelLock, Box<dyn std::error::Error>> {
     let path = kernel_lock_path(here);
     let text = std::fs::read_to_string(&path)
-        .map_err(|e| format!("reading {}: {e} (run `dvmm build-kernel --record`)", path.display()))?;
+        .map_err(|e| format!("reading {}: {e} (run `tdvmm build-kernel --record`)", path.display()))?;
     let mut k = KernelLock::default();
     for line in text.lines() {
         let l = line.trim();
@@ -73,14 +73,14 @@ pub(super) fn read_kernel_lock(here: &Path) -> Result<KernelLock, Box<dyn std::e
 
 fn write_kernel_lock(here: &Path, k: &KernelLock) -> Result<(), Box<dyn std::error::Error>> {
     let body = format!(
-        "# dvmm guest kernel pin (Fable Part C).\n\
+        "# tdvmm guest kernel pin (Fable Part C).\n\
          #\n\
          # The guest vmlinux is acquired EITHER by fetching the pinned GitHub release\n\
          # asset (PRIMARY, verified against KERNEL_SHA256) OR by a reproducible build in\n\
          # the pinned builder container (FALLBACK, also verified). Both paths yield the\n\
          # byte-identical kernel recorded here. No host kernel toolchain is required.\n\
          #\n\
-         # Regenerate with:  dvmm build-kernel --record\n\
+         # Regenerate with:  tdvmm build-kernel --record\n\
          KERNEL_VERSION={}\n\
          KERNEL_SHA256={}\n\
          KERNEL_CONFIG_SHA256={}\n\
@@ -110,7 +110,7 @@ pub(super) fn ensure_kernel(
     let out = here.join(format!("kernel/vmlinux-{}", kl.version));
     if kl.sha256.is_empty() {
         return Err(
-            "kernel.lock has no KERNEL_SHA256; run `dvmm build-kernel --record` first".into(),
+            "kernel.lock has no KERNEL_SHA256; run `tdvmm build-kernel --record` first".into(),
         );
     }
 
@@ -153,7 +153,7 @@ pub(super) fn ensure_kernel(
     if got != kl.sha256 {
         return Err(format!(
             "container-built kernel sha256 {got} != kernel.lock {}; the build is not reproducing \
-             the recorded kernel (re-run `dvmm build-kernel --record` if inputs changed)",
+             the recorded kernel (re-run `tdvmm build-kernel --record` if inputs changed)",
             kl.sha256
         )
         .into());
@@ -175,7 +175,7 @@ fn build_kernel_container(
     ux: &Ux,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if kl.builder_digest.is_empty() {
-        return Err("kernel.lock has no BUILDER_DIGEST; run `dvmm build-kernel --record`".into());
+        return Err("kernel.lock has no BUILDER_DIGEST; run `tdvmm build-kernel --record`".into());
     }
     let img_ref = format!("{}@{}", kl.builder_image, kl.builder_digest);
     ux.progress.detail(format!("   kernel: reproducible container build in {img_ref}"));
@@ -242,9 +242,9 @@ fn build_kernel_container(
         .arg("-e")
         .arg(format!("KBUILD_BUILD_TIMESTAMP={ts}"))
         .arg("-e")
-        .arg("KBUILD_BUILD_USER=dvmm")
+        .arg("KBUILD_BUILD_USER=tdvmm")
         .arg("-e")
-        .arg("KBUILD_BUILD_HOST=dvmm")
+        .arg("KBUILD_BUILD_HOST=tdvmm")
         .arg("-e")
         .arg("KCONFIG_NOTIMESTAMP=1")
         .arg(&img_ref)
@@ -259,7 +259,7 @@ fn build_kernel_container(
 }
 
 /// Resolve an image's pinned digest by pulling the ref and reading RepoDigests.
-/// `--record`-only (never in `dvmm build`'s pipeline): always inherits, like
+/// `--record`-only (never in `tdvmm build`'s pipeline): always inherits, like
 /// every other command outside the `build` orchestrator.
 fn resolve_image_digest(image: &str) -> Result<String, Box<dyn std::error::Error>> {
     let confdir = ScratchDir::new()?;
@@ -278,15 +278,15 @@ fn resolve_image_digest(image: &str) -> Result<String, Box<dyn std::error::Error
     Ok(pin)
 }
 
-/// `dvmm build-kernel`: acquire the pinned kernel (fetch/fallback), or `--record`
+/// `tdvmm build-kernel`: acquire the pinned kernel (fetch/fallback), or `--record`
 /// to bootstrap kernel.lock from a fresh reproducible container build. Shares
-/// `ensure_kernel`/`build_kernel_container` with `dvmm build`'s pipeline, but
+/// `ensure_kernel`/`build_kernel_container` with `tdvmm build`'s pipeline, but
 /// ALWAYS with progress UI disabled / output inherited (scope lock — progress
 /// is `build`-only): a plain inherited passthrough.
 pub fn cmd_build_kernel(args: BuildKernelArgs) -> Result<i32, Box<dyn std::error::Error>> {
     let here = self_here()?;
     let (cache_dir, cache_src) = resolve_cache_dir(args.cache_dir.as_deref());
-    eprintln!("== dvmm build-kernel ==  cache-dir: {} (source: {cache_src})", cache_dir.display());
+    eprintln!("== tdvmm build-kernel ==  cache-dir: {} (source: {cache_src})", cache_dir.display());
     let progress = ui::Progress::disabled();
     let ux = Ux::inherit(&progress);
 

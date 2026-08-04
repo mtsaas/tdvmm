@@ -1,5 +1,5 @@
 #!/bin/sh
-# dvmm guest-side healthcheck ticker (Phase 2b, items 3&4).
+# tdvmm guest-side healthcheck ticker (Phase 2b, items 3&4).
 #
 # WHY THIS EXISTS. podman has NO healthcheck auto-runner without a systemd timer,
 # and this guest runs busybox init (no systemd). Left alone, a container's health
@@ -22,11 +22,11 @@
 # healthcheck, so stacks without healthchecks get ZERO extra wakeups.
 set -u
 
-# Tick cadence in seconds. A small default; overridable via dvmm.hc_tick= on the
+# Tick cadence in seconds. A small default; overridable via tdvmm.hc_tick= on the
 # kernel cmdline. Test stacks set their healthcheck interval to match this.
-TICK="${DVMM_HC_TICK:-2}"
+TICK="${TDVMM_HC_TICK:-2}"
 for tok in $(cat /proc/cmdline 2>/dev/null); do
-  case "$tok" in dvmm.hc_tick=*) TICK="${tok#dvmm.hc_tick=}" ;; esac
+  case "$tok" in tdvmm.hc_tick=*) TICK="${tok#tdvmm.hc_tick=}" ;; esac
 done
 
 # running containers that declare a healthcheck (Test has >0 elements).
@@ -45,17 +45,17 @@ status_of() {
     2>/dev/null
 }
 
-echo "DVMM_HC_TICKER_START tick=${TICK}s"
+echo "TDVMM_HC_TICKER_START tick=${TICK}s"
 ANNOUNCED=" "   # space-delimited set of containers already reported healthy
 while :; do
   for c in $(hc_list); do
     podman healthcheck run "$c" >/dev/null 2>&1
     st="$(status_of "$c")"
-    echo "DVMM_HC_RUN container=$c status=${st:-unknown} ts=$(date -u +%H:%M:%S)"
+    echo "TDVMM_HC_RUN container=$c status=${st:-unknown} ts=$(date -u +%H:%M:%S)"
     if [ "$st" = "healthy" ]; then
       case "$ANNOUNCED" in
         *" $c "*) : ;;
-        *) echo "DVMM_HC_HEALTHY container=$c ts=$(date -u +%H:%M:%S)"
+        *) echo "TDVMM_HC_HEALTHY container=$c ts=$(date -u +%H:%M:%S)"
            ANNOUNCED="$ANNOUNCED$c " ;;
       esac
     fi

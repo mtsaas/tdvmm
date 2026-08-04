@@ -11,8 +11,8 @@ ROOT="$(cd "$HERE/.." && pwd)"
 TIMEOUT="${1:-30}"
 KERNEL="${2:-$ROOT/guest/kernel/vmlinux-6.1.128}"
 INITRD="${3:-$ROOT/guest/initramfs/initramfs.cpio.gz}"
-MARKER="DVMM_BOOT_OK"
-BIN="$ROOT/target/release/dvmm"
+MARKER="TDVMM_BOOT_OK"
+BIN="$ROOT/target/release/tdvmm"
 
 [ -f "$KERNEL" ] || { echo "SMOKE FAIL: kernel not found: $KERNEL"; exit 3; }
 [ -f "$INITRD" ] || { echo "SMOKE FAIL: initrd not found: $INITRD"; exit 3; }

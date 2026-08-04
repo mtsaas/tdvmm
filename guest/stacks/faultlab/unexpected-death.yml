@@ -1,6 +1,6 @@
 # TEST-1b negative gate: an UNEXPECTED container death -> verdict FAIL (exit 1).
 #
-#   dvmm test faultlab.dvmm --scenario unexpected-death.yml   ->   FAIL, exit 1
+#   tdvmm test faultlab.tdvmm --scenario unexpected-death.yml   ->   FAIL, exit 1
 #
 # Identical fault to kill-recover.yml's kill step, but WITHOUT declaring the death
 # in `expect_death`. The SIGKILLed db exits 137; because it was not declared

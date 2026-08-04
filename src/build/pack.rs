@@ -1,4 +1,4 @@
-//! .dvmm packing (mirror pack-dvmm.sh + artifact::pack)
+//! .tdvmm packing (mirror pack-tdvmm.sh + artifact::pack)
 
 use std::path::Path;
 use std::process::Command;
@@ -9,7 +9,7 @@ use super::ux::capture;
 use super::{ALPINE_VER, DEFAULT_CMDLINE};
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn pack_dvmm(
+pub(super) fn pack_tdvmm(
     self_exe: &Path,
     records: &[ImgRecord],
     compose_version: &str,
@@ -25,7 +25,7 @@ pub(super) fn pack_dvmm(
     initramfs_path: &Path,
     lock_path: &Path,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    // dump-cpuid via the SAME binary (byte-identical to pack-dvmm.sh).
+    // dump-cpuid via the SAME binary (byte-identical to pack-tdvmm.sh).
     let cpuid_profile = capture(Command::new(self_exe).arg("dump-cpuid"))?;
     let cpuid_sha = artifact::sha256_hex(cpuid_profile.as_bytes());
 

@@ -1,4 +1,4 @@
-# dvmm Phase-2b CORPUS stack #3: SVCCHAIN
+# tdvmm Phase-2b CORPUS stack #3: SVCCHAIN
 #
 # A realistic 3-tier "db -> backend -> frontend" shape that proves health-gated
 # ordering propagates across a TWO-HOP chain:
@@ -38,15 +38,15 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    entrypoint: ["/bin/sh", "/opt/dvmm/backend-loop.sh"]
+    entrypoint: ["/bin/sh", "/opt/tdvmm/backend-loop.sh"]
     environment:
-      INTERVAL_SECONDS: "${DVMM_INTERVAL:-3600}"
-      MAX_ROWS: "${DVMM_MAXROWS:-1000}"
+      INTERVAL_SECONDS: "${TDVMM_INTERVAL:-3600}"
+      MAX_ROWS: "${TDVMM_MAXROWS:-1000}"
       PGHOST: db
       PGUSER: postgres
       PGDATABASE: appdb
     volumes:
-      - ./backend-loop.sh:/opt/dvmm/backend-loop.sh:ro   # relative RO bind
+      - ./backend-loop.sh:/opt/tdvmm/backend-loop.sh:ro   # relative RO bind
     healthcheck:
       # healthy only AFTER backend-loop connects to db + creates the readiness file
       test: ["CMD-SHELL", "test -f /tmp/ready"]
@@ -64,5 +64,5 @@ services:
       - /bin/sh
       - -c
       - |
-        echo "DVMM_FRONTEND_UP backend-was-healthy ts=$$(date -u +%H:%M:%S)"
+        echo "TDVMM_FRONTEND_UP backend-was-healthy ts=$$(date -u +%H:%M:%S)"
         while :; do sleep 3600; done

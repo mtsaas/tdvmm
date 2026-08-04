@@ -1,5 +1,5 @@
 //! In-process filesystem helpers (Move 3, Step D) — replace the host `cp -a` /
-//! `chmod` / `install -D -m` shell-outs. The `.dvmm` bytes come ONLY from the
+//! `chmod` / `install -D -m` shell-outs. The `.tdvmm` bytes come ONLY from the
 //! normalizing cpio/artifact packers (Fable guardrail §2), so these helpers only
 //! need to reproduce {file type, content, symlink target, permission bits}:
 //! ownership, mtime, hardlink identity and sparseness are all normalized (or, for
@@ -68,7 +68,7 @@ pub(super) fn install_file(src: &Path, dst: &Path, mode: u32) -> std::io::Result
 
 /// Extract an UNCOMPRESSED tar archive into `dest`, in-process via the pure-Rust
 /// `tar` crate (Move 3 — replaces the host `tar`). The archive is untrusted
-/// TRANSPORT input (Fable guardrail §2): the `.dvmm` bytes come solely from the
+/// TRANSPORT input (Fable guardrail §2): the `.tdvmm` bytes come solely from the
 /// normalizing cpio packer, which re-derives uid/gid 0 + epoch + sorted order +
 /// hardlink groups; only {file type, content, link target, permission bits} are
 /// consumed here. Overwrites so a re-extract into a populated dir is idempotent.
@@ -141,7 +141,7 @@ mod cache_tests {
 
     #[test]
     fn tree_hash_is_stable_and_content_sensitive() {
-        let base = std::env::temp_dir().join(format!("dvmm-th-{}-{}", std::process::id(), now_nanos()));
+        let base = std::env::temp_dir().join(format!("tdvmm-th-{}-{}", std::process::id(), now_nanos()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(base.join("sub")).unwrap();
         std::fs::write(base.join("a.txt"), b"hello").unwrap();

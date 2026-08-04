@@ -1,6 +1,6 @@
 name: release
 
-# Move 1 (Fable-approved, host-assumptions plan): publish `dvmm` as a single
+# Move 1 (Fable-approved, host-assumptions plan): publish `tdvmm` as a single
 # static (musl) binary on version tags, so users need no Rust toolchain — just
 # download the file. Repo is private; release assets stay private too, this is
 # for the maintainer + collaborators.
@@ -25,19 +25,19 @@ jobs:
       - name: add x86_64-unknown-linux-musl target
         run: rustup target add x86_64-unknown-linux-musl
 
-      # `-p dvmm` scopes this to the root VMM binary only — never touches the
-      # dvmm-agent build (that stays inside its own pinned container, unchanged).
+      # `-p tdvmm` scopes this to the root VMM binary only — never touches the
+      # tdvmm-agent build (that stays inside its own pinned container, unchanged).
       # `.cargo/config.toml` supplies the target-scoped rust-lld/self-contained
       # linker flags, so no host C toolchain is required for this link.
-      - name: build static dvmm (release, musl)
-        run: cargo build --release --locked --target x86_64-unknown-linux-musl -p dvmm
+      - name: build static tdvmm (release, musl)
+        run: cargo build --release --locked --target x86_64-unknown-linux-musl -p tdvmm
 
       # Fail the release before it's ever cut if the binary is somehow not
       # fully static — this workflow exists to guarantee that property.
       - name: verify the binary is fully static
         run: |
           set -eu
-          BIN=target/x86_64-unknown-linux-musl/release/dvmm
+          BIN=target/x86_64-unknown-linux-musl/release/tdvmm
           file "$BIN"
           file "$BIN" | grep -q "statically linked\|static-pie linked"
           ldd "$BIN" 2>&1 | tee /tmp/ldd.out || true
@@ -47,16 +47,16 @@ jobs:
         run: |
           set -eu
           mkdir -p dist
-          cp target/x86_64-unknown-linux-musl/release/dvmm dist/dvmm-x86_64-unknown-linux-musl
-          chmod +x dist/dvmm-x86_64-unknown-linux-musl
+          cp target/x86_64-unknown-linux-musl/release/tdvmm dist/tdvmm-x86_64-unknown-linux-musl
+          chmod +x dist/tdvmm-x86_64-unknown-linux-musl
           cd dist
-          sha256sum dvmm-x86_64-unknown-linux-musl > sha256sums.txt
+          sha256sum tdvmm-x86_64-unknown-linux-musl > sha256sums.txt
           cat sha256sums.txt
 
       - name: create release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: |
-            dist/dvmm-x86_64-unknown-linux-musl
+            dist/tdvmm-x86_64-unknown-linux-musl
             dist/sha256sums.txt
           generate_release_notes: true

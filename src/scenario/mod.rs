@@ -52,7 +52,7 @@
 //! failure, or the agent could not reach a container). CI can tell "your stack is
 //! wrong" (1) from "the tool broke" (2).
 
-use dvmm_proto::Reply;
+use tdvmm_proto::Reply;
 
 mod eval;
 mod engine;
@@ -75,7 +75,7 @@ const HORIZON_SLACK_S: f64 = 300.0;
 pub(crate) const SCHEMA_VERSION: u32 = 1;
 
 /// Every inbound agent line is parsed as a permissive [`Reply`] — the wire type in
-/// `dvmm-proto`, which also carries the proactive hello and bridged guest events.
+/// `tdvmm-proto`, which also carries the proactive hello and bridged guest events.
 /// Aliased for intent at the [`engine`] and [`eval`] call sites.
 type AgentLine = Reply;
 
@@ -102,7 +102,7 @@ fn truncate(s: &str, n: usize) -> String {
 pub(crate) mod testutil {
     use std::collections::HashSet;
 
-    use dvmm_proto::GuestEvent;
+    use tdvmm_proto::GuestEvent;
 
     use crate::vtsc::TscFrequency;
 
@@ -122,7 +122,7 @@ pub(crate) mod testutil {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let p = std::env::temp_dir()
-            .join(format!("dvmm-scn-test-{}-{n}.yml", std::process::id()));
+            .join(format!("tdvmm-scn-test-{}-{n}.yml", std::process::id()));
         std::fs::write(&p, yaml).unwrap();
         let result = Scenario::load_and_validate(p.to_str().unwrap(), &svc());
         let _ = std::fs::remove_file(&p);
@@ -161,12 +161,12 @@ pub(crate) mod testutil {
 
 #[cfg(test)]
 mod tests {
-    use dvmm_proto::{decode_line, encode_line, Reply, Request};
+    use tdvmm_proto::{decode_line, encode_line, Reply, Request};
 
     #[test]
     fn host_roundtrips_proto_goldens() {
         use serde_json::Value;
-        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("dvmm-proto/goldens");
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tdvmm-proto/goldens");
         let mut files: Vec<_> = std::fs::read_dir(&dir)
             .unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()))
             .filter_map(|e| e.ok().map(|e| e.path()))

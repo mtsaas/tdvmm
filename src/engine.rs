@@ -1,6 +1,6 @@
 //! The SINGLE container-runtime choke point (Fable guardrail §2).
 //!
-//! Every `Command::new("podman")` in dvmm lives HERE. Today the engine is podman
+//! Every `Command::new("podman")` in tdvmm lives HERE. Today the engine is podman
 //! (Fable §7: podman-only); routing all ~30 build.rs call sites through this
 //! module stages the future docker-or-podman switch as an ADDITIVE change in ONE
 //! place rather than a scatter-gun edit across every site.
@@ -40,7 +40,7 @@ pub fn scratch(store: &Path, runroot: &Path, conf: &Path) -> Command {
 }
 
 /// `podman unshare …` with the clean `CONTAINERS_CONF` (the user-namespace
-/// re-exec helper `dvmm build` uses for `__seed-build` / `__assemble-initramfs`).
+/// re-exec helper `tdvmm build` uses for `__seed-build` / `__assemble-initramfs`).
 pub fn unshare(conf: &Path) -> Command {
     let mut c = command();
     c.env("CONTAINERS_CONF", conf).arg("unshare");
@@ -49,7 +49,7 @@ pub fn unshare(conf: &Path) -> Command {
 
 /// How a child's stdout/stderr are handled (Fable CLI-UX ruling). `Inherit`
 /// streams live — today's behavior everywhere, and the ONLY mode ever used
-/// outside `dvmm build`'s orchestrator. `CaptureOnFailure` buffers both
+/// outside `tdvmm build`'s orchestrator. `CaptureOnFailure` buffers both
 /// streams and discards them on success; on failure the full captured bytes
 /// are folded into the returned error message (never swallowed). The BUILD
 /// ORCHESTRATOR picks the mode (from whether its progress bar is active) —
@@ -63,7 +63,7 @@ pub enum OutputMode {
 
 /// Run a command for its side effect, per `mode`. Every run-time path
 /// (`run`/`test`/`boot`/…) never calls this with anything but `Inherit` — in
-/// fact it never calls this at all; it is exclusively a `dvmm build` helper.
+/// fact it never calls this at all; it is exclusively a `tdvmm build` helper.
 pub fn run(cmd: &mut Command, mode: OutputMode) -> Result<(), String> {
     match mode {
         OutputMode::Inherit => {

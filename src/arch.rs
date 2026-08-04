@@ -52,7 +52,7 @@ pub const SERIAL_PORT_BASE: u16 = 0x3f8;
 pub const SERIAL_IRQ: u32 = 4;
 
 /// The second 16550 UART (COM2 / ttyS1) — the TEST-1a modeled control channel.
-/// Standard PC wiring: base port 0x2f8, ISA IRQ3. The guest `dvmm-agent` blocks
+/// Standard PC wiring: base port 0x2f8, ISA IRQ3. The guest `tdvmm-agent` blocks
 /// reading ttyS1 (a blocked read = no wakes = fast-forward-transparent); the VMM
 /// delivers control commands here as scheduled queue events and reads the agent's
 /// line-delimited JSON replies. IRQ3 is already identity-routed to IO-APIC pin 3

@@ -7,7 +7,7 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 
-use dvmm_proto::{decode_line, encode_line, ErrorKind, GuestEvent, Reply, Request};
+use tdvmm_proto::{decode_line, encode_line, ErrorKind, GuestEvent, Reply, Request};
 
 use crate::agent::Agent;
 use crate::sys::{poll, PollFd, EINTR, POLLERR, POLLHUP, POLLIN};
@@ -131,7 +131,7 @@ pub(crate) fn run_loop(control: File, events: Option<File>, writer: &mut File, a
 /// Handle one complete control (ttyS1) line: decode a [`Request`], dispatch, reply.
 /// Byte-for-byte the former inline behavior.
 fn handle_control_line(line: &[u8], writer: &mut File, agent: &mut Agent) {
-    if dvmm_proto::trim_frame(line).is_empty() {
+    if tdvmm_proto::trim_frame(line).is_empty() {
         return;
     }
     let req: Request = match decode_line(line) {
@@ -159,7 +159,7 @@ fn bad_request(detail: impl AsRef<str>) -> Reply {
 /// truncated raw payload — recorded by the host, never silently dropped. The agent
 /// is transport only: it does not judge which `kind`s are meaningful.
 pub(crate) fn parse_event(line: &[u8]) -> GuestEvent {
-    let trimmed = dvmm_proto::trim_frame(line);
+    let trimmed = tdvmm_proto::trim_frame(line);
     let capped = &trimmed[..trimmed.len().min(FIFO_EVENT_CAP)];
     match serde_json::from_slice::<GuestEvent>(capped) {
         Ok(ev) if !ev.kind.is_empty() => ev,

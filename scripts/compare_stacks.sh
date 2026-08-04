@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# dvmm Phase-2b comparison harness (PERMANENT tooling).
+# tdvmm Phase-2b comparison harness (PERMANENT tooling).
 #
 # Runs ANY TWO baked stacks under fast-forward and emits a STABLE, side-by-side
 # report of how each behaves. Generic: pass any two stack names that emit the
-# DVMM_ROWCOUNT marker (e.g. insert-trim vs svcchain). It isolates the per-hop
+# TDVMM_ROWCOUNT marker (e.g. insert-trim vs svcchain). It isolates the per-hop
 # VMM property and the busy-wait tripwire across two different workloads.
 #
-# It consumes the VMM's EXISTING per-run fast-forward metrics (dvmm --metrics-out:
+# It consumes the VMM's EXISTING per-run fast-forward metrics (tdvmm --metrics-out:
 # the jump/speedup accounting + the Δvtsc histogram + the real-vs-virtual
 # accounting) rather than re-deriving anything, and prints, side by side:
 #   - hops (jumps) and hops per virtual-hour
@@ -22,18 +22,18 @@
 # interval, cap holds) and the per-hop <=500us mean gate (the VMM property).
 #
 # Usage: scripts/compare_stacks.sh [stackA] [stackB] [target_virtual_hours]
-#   stackA/stackB: stack names (default: insert-trim svcchain); each is baked to a .dvmm
+#   stackA/stackB: stack names (default: insert-trim svcchain); each is baked to a .tdvmm
 # Env: INTERVAL (3600) MAX_ROWS (1000) MEM (3072) MAX_JUMP_SECS (300)
 #      WALL_TIMEOUT (400)  GATE_HOP_US (500)
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-BIN="$ROOT/target/release/dvmm"
+BIN="$ROOT/target/release/tdvmm"
 STACKS_DIR="$ROOT/guest/stacks"
-# Self-contained: bake each stack into a gitignored test dir, then `dvmm run` it
-# (kernel + initramfs come from the .dvmm; no repo / ~/.dvmm/artifacts dependency).
-OUTDIR="${DVMM_OUT_DIR:-$ROOT/.dvmm-test-results}"; mkdir -p "$OUTDIR"
+# Self-contained: bake each stack into a gitignored test dir, then `tdvmm run` it
+# (kernel + initramfs come from the .tdvmm; no repo / ~/.tdvmm/artifacts dependency).
+OUTDIR="${TDVMM_OUT_DIR:-$ROOT/.tdvmm-test-results}"; mkdir -p "$OUTDIR"
 
 STACK_A="${1:-insert-trim}"
 STACK_B="${2:-svcchain}"
@@ -51,7 +51,7 @@ GATE_HOP_US="${GATE_HOP_US:-500}"
 # << INTERVAL, so this comfortably yields >= target+1 inserts.
 MAX_VIRTUAL_TIME="${MAX_VIRTUAL_TIME:-$(( (TARGET_HOURS + 2) * INTERVAL ))s}"
 
-[ -x "$BIN" ] || { echo "compare: building dvmm..."; ( cd "$ROOT" && cargo build --release ) || exit 3; }
+[ -x "$BIN" ] || { echo "compare: building tdvmm..."; ( cd "$ROOT" && cargo build --release ) || exit 3; }
 
 TMP="$(mktemp -d)"
 cleanup() { rm -rf "$TMP"; }
@@ -61,18 +61,18 @@ trap cleanup EXIT
 # $TMP/<label>.log ; echoes "pass"/"fail:<reason>" on stdout.
 run_stack() {
   local name="$1" label="$2"
-  local dvmm="$OUTDIR/$name.dvmm"
+  local tdvmm="$OUTDIR/$name.tdvmm"
   local log="$TMP/$label.log" metrics="$TMP/$label.metrics"
-  if [ ! -f "$dvmm" ]; then
-    if ! "$BIN" build "$STACKS_DIR/$name/compose.yml" -o "$dvmm" >"$TMP/$label.bake.log" 2>&1; then
+  if [ ! -f "$tdvmm" ]; then
+    if ! "$BIN" build "$STACKS_DIR/$name/compose.yml" -o "$tdvmm" >"$TMP/$label.bake.log" 2>&1; then
       echo "fail:bake '$name' (see $TMP/$label.bake.log)"; return
     fi
   fi
 
-  local cmdline="console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable dvmm.stack=1 dvmm.interval=$INTERVAL dvmm.maxrows=$MAX_ROWS"
+  local cmdline="console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable tdvmm.stack=1 tdvmm.interval=$INTERVAL tdvmm.maxrows=$MAX_ROWS"
   local start_wall end_wall pid
   start_wall=$(date +%s.%N)
-  "$BIN" run "$dvmm" --mem "$MEM" --ff on \
+  "$BIN" run "$tdvmm" --mem "$MEM" --ff on \
     --max-jump-secs "$MAX_JUMP_SECS" --max-virtual-time "$MAX_VIRTUAL_TIME" \
     --metrics-out "$metrics" --cmdline "$cmdline" </dev/null >"$log" 2>&1 &
   pid=$!
@@ -82,20 +82,20 @@ run_stack() {
   # Wait for the VMM to stop ITSELF at the virtual-time horizon (which flushes
   # --metrics-out at the stop site). Only SIGTERM it as a last resort on timeout.
   while [ "$(date +%s)" -lt "$deadline" ]; do
-    if grep -qE 'exceeds the sanity bound|panicked|DVMM_SVC_FAIL|DVMM_STACK_FAIL|dvmm: fatal' "$log"; then
+    if grep -qE 'exceeds the sanity bound|panicked|TDVMM_SVC_FAIL|TDVMM_STACK_FAIL|tdvmm: fatal' "$log"; then
       result="fail"; reason="vmm/guest error"; break
     fi
     kill -0 "$pid" 2>/dev/null || break   # exited on its own (horizon) -> metrics flushed
     sleep 2
   done
   if kill -0 "$pid" 2>/dev/null; then
-    if [ -z "$result" ]; then result="fail"; reason="timeout after ${WALL_TIMEOUT}s ($(grep -c 'DVMM_ROWCOUNT=' "$log") rows)"; fi
+    if [ -z "$result" ]; then result="fail"; reason="timeout after ${WALL_TIMEOUT}s ($(grep -c 'TDVMM_ROWCOUNT=' "$log") rows)"; fi
     kill "$pid" 2>/dev/null
   fi
   wait "$pid" 2>/dev/null
   end_wall=$(date +%s.%N)
 
-  local rows; rows=$(grep -c 'DVMM_ROWCOUNT=' "$log" 2>/dev/null); rows=${rows:-0}
+  local rows; rows=$(grep -c 'TDVMM_ROWCOUNT=' "$log" 2>/dev/null); rows=${rows:-0}
   if [ -z "$result" ]; then
     if [ -f "$metrics" ] && [ "$rows" -ge "$need" ]; then
       result="pass"
@@ -105,8 +105,8 @@ run_stack() {
   fi
   awk "BEGIN{printf \"%.1f\", $end_wall-$start_wall}" > "$TMP/$label.wall"
 
-  grep -oE 'DVMM_ROWCOUNT=[0-9]+' "$log" | cut -d= -f2 > "$TMP/$label.rows"
-  grep -oE 'DVMM_ROWCOUNT=[0-9]+ iter=[0-9]+ max=[0-9]+ ts=[0-9T:-]+Z' "$log" \
+  grep -oE 'TDVMM_ROWCOUNT=[0-9]+' "$log" | cut -d= -f2 > "$TMP/$label.rows"
+  grep -oE 'TDVMM_ROWCOUNT=[0-9]+ iter=[0-9]+ max=[0-9]+ ts=[0-9T:-]+Z' "$log" \
     | sed -E 's/.*ts=([0-9T:-]+)Z/\1/' > "$TMP/$label.ts"
   [ "$result" = "pass" ] && echo "pass" || echo "fail:$reason"
 }
@@ -145,7 +145,7 @@ functional_gate() {
 }
 
 echo "==================================================================="
-echo " dvmm  stack comparison under fast-forward"
+echo " tdvmm  stack comparison under fast-forward"
 echo "   A (control)   = $STACK_A"
 echo "   B (treatment) = $STACK_B"
 echo "   interval=${INTERVAL}s  max_rows=$MAX_ROWS  target=${TARGET_HOURS} virtual-hours  mem=${MEM}MiB"

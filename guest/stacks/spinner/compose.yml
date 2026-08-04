@@ -1,10 +1,10 @@
-# dvmm -- REGRESSION guard for the tick doorbell.
+# tdvmm -- REGRESSION guard for the tick doorbell.
 #
 # `spinner` pins the single vCPU with a pure shell busy-loop: `while :; do :; done`
 # makes NO syscalls, so the guest runs EXIT-FREE (no MMIO/PIO, no HLT). Without the
 # tick doorbell (src/doorbell.rs), the LAPIC timer deadline can never be serviced
 # during that burst, jiffies freeze, and on one vCPU the scheduler can never
-# preempt — so `worker`, podman, and the dvmm agent all starve and the guest
+# preempt — so `worker`, podman, and the tdvmm agent all starve and the guest
 # wedges. This is exactly the container-start wedge class, distilled to one line.
 #
 # With the doorbell, the armed tick preempts the spinner and the guest stays

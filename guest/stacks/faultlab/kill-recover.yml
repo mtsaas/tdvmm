@@ -1,6 +1,6 @@
 # TEST-1b acceptance: KILL + RECOVER.
 #
-#   dvmm test faultlab.dvmm --scenario kill-recover.yml   ->   PASS, exit 0
+#   tdvmm test faultlab.tdvmm --scenario kill-recover.yml   ->   PASS, exit 0
 #
 # The shape the fault set exists for: a service is healthy, we KILL its dependency,
 # the dependent observably fails, we START the dependency again, and the dependent

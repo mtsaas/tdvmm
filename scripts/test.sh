@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# dvmm — the single tiered e2e test runner (goal-3a).
+# tdvmm — the single tiered e2e test runner (goal-3a).
 #
 #   scripts/test.sh --fast      # T0 + T1        (the pre-push / inner loop)
 #   scripts/test.sh --merge     # T0 + T1 + T2   (the PR gate)
@@ -25,13 +25,13 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 MANIFEST="$ROOT/tests/manifest.toml"
-BIN="$ROOT/target/release/dvmm"
+BIN="$ROOT/target/release/tdvmm"
 
 JOBS="${JOBS:-4}"                         # parallel pool width (RAM-bound ~3GiB/guest)
 # Keep bake-heavy scratch OFF the small /tmp tmpfs (per env guidance).
-export TMPDIR="${TMPDIR:-$ROOT/.dvmm-tmp}"
+export TMPDIR="${TMPDIR:-$ROOT/.tdvmm-tmp}"
 mkdir -p "$TMPDIR"
-RESULTS="${DVMM_TEST_RESULTS:-$ROOT/.dvmm-test-results}"
+RESULTS="${TDVMM_TEST_RESULTS:-$ROOT/.tdvmm-test-results}"
 
 # US (ASCII 31) is the field delimiter everywhere: it is NON-whitespace, so `read`
 # preserves empty fields (a whitespace IFS like TAB collapses `a\t\tb`).
@@ -144,7 +144,7 @@ SUITE="${MODE:-named}"
 rm -rf "$RESULTS"; mkdir -p "$RESULTS"
 
 echo "==================================================================="
-echo " dvmm test.sh  suite=$SUITE  jobs=$JOBS  selected=${#SELECTED[@]}"
+echo " tdvmm test.sh  suite=$SUITE  jobs=$JOBS  selected=${#SELECTED[@]}"
 echo "   pool (parallel-safe): ${#POOL[@]}    serial (perf/bake): ${#SERIAL[@]}"
 echo "   results: $RESULTS   TMPDIR=$TMPDIR"
 echo "==================================================================="

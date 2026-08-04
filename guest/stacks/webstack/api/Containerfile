@@ -1,4 +1,4 @@
-# dvmm corpus (webstack) api image -- a build: context.
+# tdvmm corpus (webstack) api image -- a build: context.
 #
 # Built HOST-SIDE at bake time only (guest/bake-stack.sh: podman build
 # --squash-all --timestamp <epoch>), NEVER inside the guest. The output flows

@@ -20,7 +20,7 @@ pub(super) fn sha256_file_hex(path: &Path) -> std::io::Result<String> {
 pub(super) fn self_here() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let exe = std::env::current_exe()?;
     let mut p = exe.clone();
-    // .../target/release/dvmm -> .../ (repo root)
+    // .../target/release/tdvmm -> .../ (repo root)
     for _ in 0..3 {
         p.pop();
     }
@@ -35,10 +35,10 @@ pub(super) fn self_here() -> Result<PathBuf, Box<dyn std::error::Error>> {
     Err("could not locate the repo guest/ directory (run from the repo, or keep target/ in place)".into())
 }
 
-/// Filename prefix for every build scratch dir (`dvmm-build-<pid>-<nanos>`). The
+/// Filename prefix for every build scratch dir (`tdvmm-build-<pid>-<nanos>`). The
 /// pid is the first hyphen-field after it — [`sweep_stale_scratch`] parses it, so
 /// keep the two in sync.
-const SCRATCH_PREFIX: &str = "dvmm-build-";
+const SCRATCH_PREFIX: &str = "tdvmm-build-";
 
 /// Create a fresh, uniquely-named scratch directory under the system temp dir.
 fn mkdtemp() -> std::io::Result<PathBuf> {
@@ -115,9 +115,9 @@ fn unshare_remove(path: &Path) -> Result<(), String> {
     result
 }
 
-/// Sweep scratch dirs orphaned by dvmm processes no longer alive — e.g. a
+/// Sweep scratch dirs orphaned by tdvmm processes no longer alive — e.g. a
 /// SIGKILL/OOM where [`ScratchDir`]'s Drop never ran. Best-effort; call once at
-/// `dvmm build` start. A dir whose embedded pid is still alive is left untouched,
+/// `tdvmm build` start. A dir whose embedded pid is still alive is left untouched,
 /// so concurrent bakes never reap each other's scratch.
 pub(super) fn sweep_stale_scratch() {
     let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
@@ -174,7 +174,7 @@ pub(super) fn utc_now_iso() -> String {
 }
 
 /// Convert a day count since the Unix epoch to a `(year, month, day)` civil date
-/// (Howard Hinnant's algorithm). Shared with `main.rs` for `dvmm ls` timestamps.
+/// (Howard Hinnant's algorithm). Shared with `main.rs` for `tdvmm ls` timestamps.
 pub(crate) fn civil_from_days(z: i64) -> (i64, i64, i64) {
     let z = z + 719468;
     let era = if z >= 0 { z } else { z - 146096 } / 146097;

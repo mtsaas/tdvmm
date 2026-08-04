@@ -1,50 +1,51 @@
 #!/usr/bin/env bash
-# Container smoke test: boot the Alpine guest and require that it creates a
-# podman bridge network and runs a digest-pinned image over serial, fully
-# offline. Exits 0 on success, non-zero otherwise.
+# Container smoke test: bake the minimal `spinner` stack, boot its artifact, and
+# require that the guest creates a podman bridge network and runs a digest-pinned
+# image over serial, fully offline. Exits 0 on success, non-zero otherwise.
 #
-# The guest's /init runs the self-test automatically and prints markers; with
-# `dvmm.autotest=1` on the cmdline it powers off cleanly when done, so this
-# script just watches the serial log for the pass/fail markers.
+# The guest's /init runs the container self-test automatically and prints markers;
+# `tdvmm.autotest=1` powers off cleanly when done, and omitting `tdvmm.stack=1`
+# means the guest runs the self-test rather than the spinner compose. This script
+# just watches the serial log for the pass/fail markers.
 #
-# Usage: scripts/smoke_test_container.sh [timeout_seconds] [kernel] [initrd]
+# The base container guest (the retired build_rootfs.sh) is gone: every baked
+# stack ships the same container self-test, so we bake+run the smallest one.
+#
+# Usage: scripts/smoke_test_container.sh [timeout_seconds]
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 
 TIMEOUT="${1:-120}"
-KERNEL="${2:-$ROOT/guest/kernel/vmlinux-6.1.128}"
-INITRD="${3:-$ROOT/guest/initramfs-alpine/initramfs-alpine.cpio.gz}"
-MEM="${MEM:-2048}"
 # Virtual-time horizon (safety net): the guest boots, runs its self-test, then
 # `reboot=t`-shuts-down (autotest) well within this budget. Bounds a wedge.
 MAX_VIRTUAL_TIME="${MAX_VIRTUAL_TIME:-3600s}"
-BIN="$ROOT/target/release/dvmm"
+BIN="$ROOT/target/release/tdvmm"
+STACK="spinner"
 
-PASS="DVMM_SELFTEST_PASS"
-FAILMARK="DVMM_SELFTEST_FAIL"
-NETOK="DVMM_NET_CREATE_OK"
-RUNOK="DVMM_PODMAN_RUN_OK"
-HELLO="DVMM_CONTAINER_HELLO"
-
-[ -f "$KERNEL" ] || { echo "SMOKE FAIL: kernel not found: $KERNEL"; exit 3; }
-[ -f "$INITRD" ] || { echo "SMOKE FAIL: initrd not found: $INITRD"; exit 3; }
+PASS="TDVMM_SELFTEST_PASS"
+FAILMARK="TDVMM_SELFTEST_FAIL"
+NETOK="TDVMM_NET_CREATE_OK"
+RUNOK="TDVMM_PODMAN_RUN_OK"
+HELLO="TDVMM_CONTAINER_HELLO"
 
 if [ ! -x "$BIN" ]; then
   echo "building release binary..."
   ( cd "$ROOT" && cargo build --release ) || { echo "SMOKE FAIL: build error"; exit 3; }
 fi
 
+# Bake the (minimal) spinner stack into ~/.tdvmm; a warm cache makes this a
+# near-instant restore. Writes spinner's committed locks (hence needs-bake).
+"$BIN" build "$ROOT/guest/stacks/$STACK/compose.yml" || { echo "SMOKE FAIL: bake error"; exit 3; }
+
 LOG="$(mktemp)"
 cleanup() { kill "$PID" 2>/dev/null; wait "$PID" 2>/dev/null; rm -f "$LOG"; }
 trap cleanup EXIT
 
-# Run detached, no interactive input; capture serial output. dvmm.autotest=1
-# makes the guest power off after the self-test.
-CMDLINE="console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable dvmm.autotest=1"
-"$BIN" boot --kernel "$KERNEL" --initrd "$INITRD" --mem "$MEM" \
-  --max-virtual-time "$MAX_VIRTUAL_TIME" --cmdline "$CMDLINE" \
+# Run detached, no interactive input; capture serial output.
+CMDLINE="console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable tdvmm.autotest=1"
+"$BIN" run "$STACK" --max-virtual-time "$MAX_VIRTUAL_TIME" --cmdline "$CMDLINE" \
   </dev/null >"$LOG" 2>&1 &
 PID=$!
 

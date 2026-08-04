@@ -2,8 +2,8 @@
 # Phase-2a rejection tests: prove the bake-time boundary is LOUD.
 #
 # Each corpus compose file exercises exactly one thing outside the supported
-# subset; the in-binary validator (`dvmm build --validate-only`, the same gate
-# `dvmm build` runs FIRST, before any image pull) must reject it -- or, for
+# subset; the in-binary validator (`tdvmm build --validate-only`, the same gate
+# `tdvmm build` runs FIRST, before any image pull) must reject it -- or, for
 # published ports, warn and strip it. A silent hang at guest runtime is the
 # failure this prevents.
 #
@@ -13,9 +13,9 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-BIN="$ROOT/target/release/dvmm"
+BIN="$ROOT/target/release/tdvmm"
 CORPUS="$ROOT/guest/stacks/rejects"
-[ -x "$BIN" ] || { echo "building dvmm..."; ( cd "$ROOT" && cargo build --release ) || exit 3; }
+[ -x "$BIN" ] || { echo "building tdvmm..."; ( cd "$ROOT" && cargo build --release ) || exit 3; }
 
 # case: <file> <expect: reject|warn> <substring the diagnostic must contain>
 #
@@ -39,7 +39,7 @@ echo "--------------------------------------------------------------------------
 while read -r file expect needle; do
   [ -n "${file:-}" ] || continue
   out="$("$BIN" build --validate-only "$CORPUS/$file" 2>&1 >/dev/null)"; rc=$?
-  diag="$(printf '%s' "$out" | grep -E 'DVMM_BAKE_(REJECT|WARN)' | head -1)"
+  diag="$(printf '%s' "$out" | grep -E 'TDVMM_BAKE_(REJECT|WARN)' | head -1)"
   pass=0
   if [ "$expect" = "reject" ]; then
     [ "$rc" -eq 3 ] && printf '%s' "$diag" | grep -qi "$needle" && pass=1

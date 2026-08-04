@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
-use dvmm_proto::GuestEvent;
+use tdvmm_proto::GuestEvent;
 
 /// Accumulates guest→host assertion events into a verdict. Empty for a run that
 /// sees no events, so an event-free scenario's verdict/report/JSONL are unchanged.
