@@ -1,4 +1,4 @@
-# deterministic-vmm Phase-2b CORPUS stack #3: SVCCHAIN
+# dvmm Phase-2b CORPUS stack #3: SVCCHAIN
 #
 # A realistic 3-tier "db -> backend -> frontend" shape that proves health-gated
 # ordering propagates across a TWO-HOP chain:

@@ -73,7 +73,7 @@ pub(super) fn read_kernel_lock(here: &Path) -> Result<KernelLock, Box<dyn std::e
 
 fn write_kernel_lock(here: &Path, k: &KernelLock) -> Result<(), Box<dyn std::error::Error>> {
     let body = format!(
-        "# deterministic-vmm guest kernel pin (Fable Part C).\n\
+        "# dvmm guest kernel pin (Fable Part C).\n\
          #\n\
          # The guest vmlinux is acquired EITHER by fetching the pinned GitHub release\n\
          # asset (PRIMARY, verified against KERNEL_SHA256) OR by a reproducible build in\n\

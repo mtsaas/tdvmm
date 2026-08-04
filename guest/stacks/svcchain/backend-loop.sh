@@ -1,5 +1,5 @@
 #!/bin/sh
-# deterministic-vmm corpus (svcchain) backend service (the middle tier).
+# dvmm corpus (svcchain) backend service (the middle tier).
 #
 # Bind-mounted READ-ONLY into the pinned Postgres image and run as that
 # container's entrypoint. It starts only after `db` is healthy (compose gate),

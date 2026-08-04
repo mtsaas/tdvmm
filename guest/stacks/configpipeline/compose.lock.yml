@@ -25,7 +25,7 @@ services:
   worker:
     environment:
       INTERVAL_SECONDS: ${DVMM_INTERVAL:-3600}
-    image: localhost/dvmm-configpipeline-worker@sha256:b82c8a23d2e8cc21a56b743fa6f4de1c2158f346615026057019c9ea15306d83
+    image: localhost/dvmm-configpipeline-worker@sha256:27a78f66877240f252ad19922ae245874ed39b30439897e5416d0c6b24570768
     volumes:
     - /var/lib/dvmm-stack/binds/worker/config:/etc/app:rw
     - state:/var/state

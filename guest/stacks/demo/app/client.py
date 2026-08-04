@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""deterministic-vmm demo stack — the load client (a real gRPC client).
+"""dvmm demo stack — the load client (a real gRPC client).
 
 Drives the api's OrderService over the compose network, by name, once per virtual
 hour: it submits a deterministic batch of orders and then reads the stats back.

@@ -1,4 +1,4 @@
-# deterministic-vmm — DEMO stack: the flagship capability reference.
+# dvmm — DEMO stack: the flagship capability reference.
 #
 # A small but REAL, end-to-end microservice stack, closed-world and
 # fast-forwardable, that exercises the whole supported compose subset at once:

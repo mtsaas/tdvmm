@@ -1,4 +1,4 @@
-# deterministic-vmm guest kernel pin (Fable Part C).
+# dvmm guest kernel pin (Fable Part C).
 #
 # The guest vmlinux is acquired EITHER by fetching the pinned GitHub release
 # asset (PRIMARY, verified against KERNEL_SHA256) OR by a reproducible build in

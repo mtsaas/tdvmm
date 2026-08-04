@@ -4,12 +4,12 @@
 # GENERATED PROVENANCE block on every bake.
 #
 # ---------------------------------------------------------------------------
-# Determinism-phase NOTES (Phase 1)
+# Reproducibility NOTES (Phase 1)
 # ---------------------------------------------------------------------------
 # The unit of run-to-run reproducibility for now is the BUILT INITRAMFS
 # ARTIFACT: build_rootfs.sh writes initramfs-alpine.cpio.gz and its sha256
 # sidecar (.sha256). An identical artifact hash == identical initial guest
-# state, which is what deterministic replay will care about. Bit-reproducible
+# state. Bit-reproducible
 # REBUILDS (SOURCE_DATE_EPOCH / timestamp normalization of apk, image build,
 # cpio) are explicitly OUT of Phase-1 scope -- not done here, just noted.
 #

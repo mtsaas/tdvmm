@@ -1,4 +1,4 @@
-# deterministic-vmm — Phase-C bridge round-trip (guest-assertion SDK).
+# dvmm — Phase-C bridge round-trip (guest-assertion SDK).
 #
 #   dvmm test insert-trim --scenario events.yml   ->   PASS, exit 0
 #

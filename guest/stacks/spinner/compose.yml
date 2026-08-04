@@ -1,4 +1,4 @@
-# deterministic-vmm -- REGRESSION guard for the tick doorbell.
+# dvmm -- REGRESSION guard for the tick doorbell.
 #
 # `spinner` pins the single vCPU with a pure shell busy-loop: `while :; do :; done`
 # makes NO syscalls, so the guest runs EXIT-FREE (no MMIO/PIO, no HLT). Without the

@@ -1,4 +1,4 @@
-# deterministic-vmm Phase-2b CORPUS stack #2: CONFIGPIPELINE
+# dvmm Phase-2b CORPUS stack #2: CONFIGPIPELINE
 #
 # A realistic "worker + sidecar sharing state" shape that exercises the build /
 # bind / volume features TOGETHER:

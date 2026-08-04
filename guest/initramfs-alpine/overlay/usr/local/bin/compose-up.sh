@@ -1,5 +1,5 @@
 #!/bin/sh
-# deterministic-vmm Phase-2a stack launcher (closed world, no runtime network).
+# dvmm Phase-2a stack launcher (closed world, no runtime network).
 #
 # Replaces the hand-rolled workload.sh with the GENERIC compose path:
 #   1. start `podman system service` (Docker-compatible API) with an IDLE TIMEOUT,

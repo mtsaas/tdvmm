@@ -1,4 +1,4 @@
-# deterministic-vmm artifact manifest (Phase 1)
+# dvmm artifact manifest (Phase 1)
 #
 # The unit of run-to-run reproducibility: the boot artifacts (vmlinux + initramfs)
 # AND the effective guest CPUID profile the VMM presents. The declared LAPIC-timer
@@ -8,15 +8,15 @@
 # Regenerate:  scripts/gen_manifest.sh
 # Verify:      scripts/gen_manifest.sh --check   (nonzero exit on any deviation)
 
-vmlinux    sha256=d867146b89f97d6e660802b51b877034ec76093f84ca353c6bfbd75071883156  guest/kernel/vmlinux-6.1.128
+vmlinux    sha256=98d75369b464dcc0093f0a7d43182c0e040c1b7262fcd826019f9e502637e5a5  guest/kernel/vmlinux-6.1.128
 initramfs  sha256=79c1fab6bfc3379718d26890f75b7262203bc09d113876e31d987adea3a8eb7c  guest/initramfs-alpine/initramfs-alpine.cpio.gz
-cpuid      sha256=c8a3fd57806a3a7e1a3e614940407e19d8e88c7c3b12416cf5c355616e7eec62  (effective guest CPUID, userspace backend; block below)
+cpuid      sha256=363ae2d8caa213ec96b917b827fb871382fb6e77e79eaf565628476ed3c55baf  (effective guest CPUID, userspace backend; block below)
 compose    version=v5.3.1  sha256=f9ebc6ebdb19d769b793c245a736caaeb198c62587f13b25c660c13b4987f959  (Docker Compose v2 CLI baked into the guest; source guest/initramfs-alpine/compose-engine.lock)
 
 # ===== effective guest CPUID (userspace backend; dvmm dump-cpuid) =====
-# deterministic-vmm effective guest clock/timer CPUID profile (userspace backend)
+# dvmm effective guest clock/timer CPUID profile (userspace backend)
 #
-# The CPUID leaves the determinism + fast-forward guarantee depends on. A host or
+# The CPUID leaves the owned-clock + fast-forward guarantee depends on. A host or
 # CPU change surfaces here as a changed line. Per-core-volatile fields (leaf-1
 # initial-APIC-ID byte, topology x2APIC IDs) are excluded so this is stable
 # run-to-run on one host.

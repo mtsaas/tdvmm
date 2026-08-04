@@ -1,4 +1,4 @@
-# deterministic-vmm base rootfs-builder image pin (Move 3 Step C).
+# dvmm base rootfs-builder image pin (Move 3 Step C).
 #
 # The base Alpine rootfs (the pinned minirootfs + the apk package set in PKGS) is
 # assembled INSIDE this pinned container using `apk --root /rootfs` — NO chroot,

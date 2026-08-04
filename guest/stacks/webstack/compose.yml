@@ -1,4 +1,4 @@
-# deterministic-vmm Phase-2b CORPUS stack #1: WEBSTACK
+# dvmm Phase-2b CORPUS stack #1: WEBSTACK
 #
 # A realistic "web/api + cache + relational db" shape that exercises SEVERAL
 # supported-subset features TOGETHER:

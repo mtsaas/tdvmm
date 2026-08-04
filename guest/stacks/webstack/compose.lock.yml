@@ -16,7 +16,9 @@ services:
       PGHOST: postgres
       PGUSER: postgres
       REDIS_HOST: redis
-    image: localhost/dvmm-webstack-api@sha256:41fa4f4c8053c5f029a7b345a16113d963a8695df64b9d277e660ea0904ab25b
+    image: localhost/dvmm-webstack-api@sha256:bfe34feef36b0c866c90ecc14a98e52db3cf5c64352ec1cf23c00fc819abf937
+    volumes:
+    - /run/dvmm/events:/run/dvmm/events:rw
   postgres:
     environment:
       POSTGRES_DB: appdb
@@ -33,6 +35,7 @@ services:
     shm_size: 256m
     volumes:
     - /var/lib/dvmm-stack/binds/postgres/schema.sql:/docker-entrypoint-initdb.d/10-schema.sql:ro
+    - /run/dvmm/events:/run/dvmm/events:rw
   redis:
     healthcheck:
       interval: 2s
@@ -44,3 +47,5 @@ services:
       - ping
       timeout: 3s
     image: docker.io/library/redis@sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf
+    volumes:
+    - /run/dvmm/events:/run/dvmm/events:rw

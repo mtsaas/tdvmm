@@ -1353,7 +1353,7 @@ mod emitter_tests {
             // configpipeline: a build: service (worker) pinned by its output tag.
             digests.insert(
                 "localhost/dvmm-configpipeline-worker:corpus".into(),
-                "localhost/dvmm-configpipeline-worker@sha256:b82c8a23d2e8cc21a56b743fa6f4de1c2158f346615026057019c9ea15306d83".into(),
+                "localhost/dvmm-configpipeline-worker@sha256:27a78f66877240f252ad19922ae245874ed39b30439897e5416d0c6b24570768".into(),
             );
             let project = format!("dvmm_{}", stack.replace('-', "_"));
             let out = emit_lock(

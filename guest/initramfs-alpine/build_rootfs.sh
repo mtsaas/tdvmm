@@ -255,7 +255,7 @@ UNSHARE
 
 cp "$WORK/packages.lock" "$HERE/packages.lock"
 
-# Determinism-phase anchor: the BUILT INITRAMFS ARTIFACT is the repro unit.
+# Reproducibility anchor: the BUILT INITRAMFS ARTIFACT is the repro unit.
 ART_SHA="$(sha256sum "$OUT" | awk '{print $1}')"
 printf '%s  %s\n' "$ART_SHA" "$(basename "$OUT")" > "$OUT.sha256"
 

@@ -1,5 +1,5 @@
 #!/bin/sh
-# deterministic-vmm Step 2b workload service.
+# dvmm Step 2b workload service.
 #
 # A tiny closed-world service: every INTERVAL_SECONDS it INSERTs one row into
 # Postgres and TRIMs the table down to at most MAX_ROWS newest rows, forever.

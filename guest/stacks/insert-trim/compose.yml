@@ -1,4 +1,4 @@
-# deterministic-vmm INSERT-TRIM stack (the minimal fast fast-forward acceptance).
+# dvmm INSERT-TRIM stack (the minimal fast fast-forward acceptance).
 #
 # The smallest real workload (Postgres + an insert-a-row / trim-to-cap
 # service) re-expressed as a docker-compose stack, so it can be driven through

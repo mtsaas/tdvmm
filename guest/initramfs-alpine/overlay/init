@@ -1,5 +1,5 @@
 #!/bin/sh
-# PID 1 for the deterministic-vmm Alpine container guest (Step 2a).
+# PID 1 for the dvmm Alpine container guest (Step 2a).
 #
 # The whole rootfs lives in RAM. This init brings up just enough of a system to
 # run rootful podman with a bridge network, entirely offline (closed world),

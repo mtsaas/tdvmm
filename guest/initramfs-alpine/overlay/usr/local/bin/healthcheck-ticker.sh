@@ -1,5 +1,5 @@
 #!/bin/sh
-# deterministic-vmm guest-side healthcheck ticker (Phase 2b, items 3&4).
+# dvmm guest-side healthcheck ticker (Phase 2b, items 3&4).
 #
 # WHY THIS EXISTS. podman has NO healthcheck auto-runner without a systemd timer,
 # and this guest runs busybox init (no systemd). Left alone, a container's health

@@ -1,4 +1,4 @@
-# deterministic-vmm -- TigerBeetle cluster stack (3 replicas + a demo client).
+# dvmm -- TigerBeetle cluster stack (3 replicas + a demo client).
 #
 # ============================================================================
 #  STATUS: PASSING. The 3-replica cluster forms and runs.
@@ -17,8 +17,8 @@
 #  are the guest truthfully measuring real single-vCPU contention -- four busy
 #  co-tenants (3 replicas + client) serialized on ONE vCPU, exactly as they
 #  would on real single-core hardware. Their magnitude is host-load-dependent.
-#  Making execution time (not just idle) deterministic is a Phase-3 item (see
-#  ARCHITECTURE.md section 12).
+#  Execution time (not just idle) is real time by design -- see ARCHITECTURE.md
+#  section 12.
 # ============================================================================
 #
 # WHAT THIS IS

@@ -1,5 +1,5 @@
 #!/bin/sh
-# deterministic-vmm corpus (webstack) api service.
+# dvmm corpus (webstack) api service.
 #
 # Runs as the built api image's entrypoint. Because compose gates this service on
 # `postgres: service_healthy` AND `redis: service_healthy`, reaching this code at

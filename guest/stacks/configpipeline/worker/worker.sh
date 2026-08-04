@@ -1,5 +1,5 @@
 #!/bin/sh
-# deterministic-vmm corpus (configpipeline) worker service.
+# dvmm corpus (configpipeline) worker service.
 #
 # Proves, in one service, three supported-subset capabilities at once:
 #   (a) the relative RW bind was MATERIALIZED into the guest image -- it reads the
