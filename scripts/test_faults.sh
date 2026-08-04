@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# deterministic-vmm TEST-1b acceptance + negative gates for FAULT INJECTION.
+# dvmm TEST-1b acceptance + negative gates for FAULT INJECTION.
 #
 # The MVP fault set (kill/stop/start + partition/heal), delivered as scheduled
 # (vtsc, ScenarioStep) queue entries, exercised end-to-end against the faultlab

@@ -3,7 +3,7 @@ name = "dvmm-agent"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-description = "Static (musl) guest-side control-channel executor for the deterministic VMM. Baked into every .dvmm; speaks dvmm-proto over ttyS1."
+description = "Static (musl) guest-side control-channel executor for dvmm. Baked into every .dvmm; speaks dvmm-proto over ttyS1."
 
 [[bin]]
 name = "dvmm-agent"

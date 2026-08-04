@@ -23,8 +23,8 @@ Two ideas drive everything:
    contains everything: kernel, an in-RAM root filesystem, and the container
    images (pinned by digest). At run time the guest has no outside network. The
    same inputs produce a byte-identical `.dvmm` — the *build* is reproducible.
-   (Execution itself is not yet deterministic — see "A note on the goal" at the
-   end.)
+   (The *run* is a live VM that fast-forwards idle time — see "What dvmm is" at
+   the end.)
 
 Almost every rule below exists to keep those two things true.
 
@@ -124,10 +124,15 @@ Comments follow one rule: explain only what the code can't say for itself
 (intent, a non-obvious "why", an invariant) — not what it already says, and not
 the history of how it got here.
 
-## A note on the goal
+## What dvmm is
 
-Full deterministic *replay* — byte-identical re-execution of a run — is the
-long-term goal, and the code is built toward it (single vCPU, closed world,
-integer-only time math, pinned inputs). It isn't finished: fast-forward and
-reproducible **artifacts** are what work today. `ARCHITECTURE.md` has the details
-and the open items.
+dvmm is a **time-dilation VMM**: it bakes a Docker Compose–style stack into one
+self-contained file and runs it in a single Linux VM, fast-forwarding virtual
+time whenever the guest is idle — so a stack that idles through hours of service
+time finishes in seconds to minutes of real time.
+
+The discipline the code follows — single vCPU, single writer, closed world,
+integer-only time math, pinned inputs — is there to keep the clock jumps
+trustworthy and the system debuggable. What works today: fast-forward and
+byte-identical **artifacts**. `ARCHITECTURE.md` has the details and the open
+items.

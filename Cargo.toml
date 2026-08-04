@@ -2,7 +2,7 @@
 name = "dvmm"
 version = "0.1.0"
 edition = "2021"
-description = "A minimal single-vCPU, fast-forwardable KVM VMM for deterministic service-stack testing."
+description = "A single-vCPU KVM VMM that fast-forwards idle time — runs compose-style service stacks through hours of virtual time in seconds."
 license = "Apache-2.0"
 
 # Cargo WORKSPACE (Fable §1): three members — this root VMM package (`dvmm`), the

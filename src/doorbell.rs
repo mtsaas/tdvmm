@@ -24,9 +24,8 @@
 //! IRR sets stay in `service_timers` on the vCPU thread; the vCPU thread arms the
 //! host timer. FF-neutral — FF ON/OFF are identical while running (the TSC offset
 //! only moves while parked); a stale fire during a park is a benign `EINTR`
-//! (`park.rs` tolerates it). Determinism is unaffected: this only adds
-//! real-time-positioned exit boundaries, which every device exit already is, and
-//! determinism is the separate future substrate.
+//! (`park.rs` tolerates it). Fast-forward semantics are unaffected: this only
+//! adds real-time-positioned exit boundaries, which every device exit already is.
 //!
 //! Default ON; `DVMM_NO_DOORBELL=1` disables it (A/B against the old behavior).
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# deterministic-vmm Phase-2b comparison harness (PERMANENT tooling).
+# dvmm Phase-2b comparison harness (PERMANENT tooling).
 #
 # Runs ANY TWO baked stacks under fast-forward and emits a STABLE, side-by-side
 # report of how each behaves. Generic: pass any two stack names that emit the
@@ -145,7 +145,7 @@ functional_gate() {
 }
 
 echo "==================================================================="
-echo " deterministic-vmm  stack comparison under fast-forward"
+echo " dvmm  stack comparison under fast-forward"
 echo "   A (control)   = $STACK_A"
 echo "   B (treatment) = $STACK_B"
 echo "   interval=${INTERVAL}s  max_rows=$MAX_ROWS  target=${TARGET_HOURS} virtual-hours  mem=${MEM}MiB"

@@ -257,8 +257,7 @@ dvmm verify  demo   # check nothing changed; print its sha256
   `depends_on`, relative bind mounts, and named volumes. Anything needing the outside
   world is rejected at build time.
 - **Every run starts fresh.** Writes inside the guest are ephemeral — each run boots from
-  the same baked state. That is what makes a run repeatable. (Note: the *build* is
-  byte-reproducible; a *run* is not deterministic — see `ARCHITECTURE.md`.)
+  the same baked state, so every run starts from an identical point.
 - **Virtual time is the point.** `at:` times, timeouts, and intervals are all *virtual*.
   Fast-forward only collapses genuine idle (a sleeping/HLTed guest), so a service that
   busy-loops won't speed up — and that shows up as a slow run.

@@ -9,22 +9,14 @@ Two things make it useful:
 - **It fast-forwards idle time.** When the guest goes to sleep waiting for a
   timer, dvmm jumps its clock straight to the next thing that happens. A service
   that inserts a row "every hour" runs its whole day in seconds.
-- **A whole stack is one reproducible file.** `dvmm build` bakes your compose
-  stack — kernel, container images, and all — into a single, self-contained
-  `.dvmm`. The same inputs always produce the **byte-identical** file (same
-  sha256), so you can pin, share, and re-test the exact same bits.
+- **A whole stack is one file.** `dvmm build` bakes your compose stack — kernel,
+  container images, and all — into a single, self-contained `.dvmm` you can pin,
+  share, and re-test offline. Identical inputs produce the byte-identical `.dvmm`
+  — its sha256 is its identity — as you'd expect from a content-addressed build.
 
 The guest is a **closed world**: everything it needs is baked in, and it has no
 network access to the outside at run time — so a test isn't at the mercy of what
 the network or host happens to have.
-
-**"Reproducible" here means the build, not the run.** Identical inputs produce a
-byte-identical `.dvmm` (verified). A *run* is **not** deterministic — it's a real
-VM on real hardware, so execution timing varies and two runs of the same artifact
-are not byte-identical. Deterministic, replayable execution is the project's
-long-term goal, not a property it has today (see `ARCHITECTURE.md`). What the
-closed world plus fast-forward give you now is testing against a fixed, pinned
-stack with no outside flakiness — not instruction-for-instruction repeatability.
 
 **New here?** `GETTING_STARTED.md` is a practical, step-by-step walkthrough —
 build a stack, run it, read its logs, and write tests with fault injection.

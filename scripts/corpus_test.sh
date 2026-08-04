@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# deterministic-vmm Phase-2b CORPUS runner (PERMANENT tooling).
+# dvmm Phase-2b CORPUS runner (PERMANENT tooling).
 #
 # Proves the supported compose subset on a set of realistic, real-world-shaped
 # stacks -- each exercising SEVERAL features together (multi-service, health

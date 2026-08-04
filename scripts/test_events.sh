@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# deterministic-vmm — Phase-C guest-assertion bridge, end-to-end gate.
+# dvmm — Phase-C guest-assertion bridge, end-to-end gate.
 #
 # Proves the full path: a workload container writes a JSON event to the guest
 # FIFO -> the agent forwards it over ttyS1 -> the host records a vtsc-stamped
