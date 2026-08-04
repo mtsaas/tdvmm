@@ -21,11 +21,10 @@ LOCK="$ROOT/guest/stacks/$NAME/compose.lock.yml"
 MAN="$ROOT/guest/stacks/$NAME/stack.lock"
 
 # compare only the reproducible portion of the manifest: the pinned image digests
-# + compose.lock hash + sizing. Drop the informational tail (podman-version +
-# baked-at) AND the initramfs_sha256 line -- the built ARTIFACT embeds apk/build
-# metadata that is not bit-reproducible in Phase 1, so it
-# is reported, not gated.
-compared() { sed '/informational (NOT compared/,$d' "$1" | grep -v '^initramfs_sha256'; }
+# + compose.lock hash + sizing. Drop comment lines, the informational tdvmm_sha256
+# tail, and the initramfs_sha256 line -- the built ARTIFACT embeds apk/build
+# metadata that is not bit-reproducible in Phase 1, so it is reported, not gated.
+compared() { grep -v -e '^#' -e '^initramfs_sha256' -e '^tdvmm_sha256' "$1"; }
 
 # --no-cache on BOTH bakes: bake_repeat is the staleness guard, so it must RE-BAKE
 # unconditionally (a content-hash cache HIT would trivially return the same file
