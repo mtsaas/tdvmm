@@ -47,7 +47,6 @@ pub(super) fn eval_exec_assertion(expect: &PreparedExpect, reply: &AgentLine) ->
             notes.push(format!("contains {sub:?} ✗"));
         }
     }
-    let _ = &expect.desc;
     (ok, notes.join(", "))
 }
 
@@ -160,7 +159,6 @@ mod tests {
             exit: 0,
             output_matches: Some(Regex::new("^5$").unwrap()),
             output_contains: None,
-            desc: String::new(),
         };
         let good = AgentLine {
             id: Some(1),

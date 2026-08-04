@@ -129,7 +129,7 @@ struct RawExpect {
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ContainersAssert {
+pub(crate) enum ContainersAssert {
     AllRunning,
     NoneExitedNonzero,
 }
@@ -247,7 +247,6 @@ pub(super) struct PreparedExpect {
     pub(super) exit: i64,
     pub(super) output_matches: Option<Regex>,
     pub(super) output_contains: Option<String>,
-    pub(super) desc: String,
 }
 
 pub(super) enum PreparedUntil {
@@ -308,6 +307,9 @@ impl Scenario {
     /// names. Fails loudly and fast (before boot) on: bad YAML, unknown keys,
     /// unparseable durations, a bad regex, an unknown service, or a malformed
     /// step (not exactly one kind).
+    ///
+    /// # Errors
+    /// Returns [`ScenarioError`] on any of the failure modes above.
     pub fn load_and_validate(
         path: &str,
         services: &HashSet<String>,
@@ -394,18 +396,10 @@ impl Scenario {
                     Some(r) => Some(re(&format!("{where_}.expect.output_matches"), r)?),
                     None => None,
                 };
-                let mut parts = vec![format!("exit={}", raw_expect.exit.unwrap_or(0))];
-                if let Some(r) = &raw_expect.output_matches {
-                    parts.push(format!("output~=/{r}/"));
-                }
-                if let Some(c) = &raw_expect.output_contains {
-                    parts.push(format!("output contains {c:?}"));
-                }
                 let expect = PreparedExpect {
                     exit: raw_expect.exit.unwrap_or(0),
                     output_matches,
                     output_contains: raw_expect.output_contains.clone(),
-                    desc: parts.join(", "),
                 };
                 PreparedKind::Exec {
                     req,
@@ -540,7 +534,6 @@ impl Scenario {
                 }
             };
 
-            let _ = i;
             steps.push(PreparedStep {
                 display: where_,
                 at_secs,

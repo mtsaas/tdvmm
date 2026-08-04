@@ -72,7 +72,7 @@ const DEFAULT_WAITFOR_TIMEOUT_S: f64 = 60.0;
 const DEFAULT_WAITFOR_EVERY_S: f64 = 5.0;
 /// Slack added past the last step's `at` for the implicit end-horizon.
 const HORIZON_SLACK_S: f64 = 300.0;
-pub const SCHEMA_VERSION: u32 = 1;
+pub(crate) const SCHEMA_VERSION: u32 = 1;
 
 /// Every inbound agent line is parsed as a permissive [`Reply`] — the wire type in
 /// `dvmm-proto`, which also carries the proactive hello and bridged guest events.

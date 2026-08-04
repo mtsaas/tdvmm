@@ -78,6 +78,10 @@ pub enum Flow {
 }
 
 impl ScenarioEngine {
+    /// Build the engine for `scn`, opening its JSONL run-log.
+    ///
+    /// # Errors
+    /// Returns [`ScenarioError`] if the JSONL run-log cannot be opened.
     pub fn new(scn: Scenario, freq: TscFrequency, meta: RunMeta) -> Result<Self, ScenarioError> {
         let logger = Logger::new(&meta.jsonl_path, freq)
             .map_err(|e| ScenarioError(format!("opening JSONL log {}: {e}", meta.jsonl_path)))?;
@@ -516,6 +520,9 @@ impl ScenarioEngine {
     }
 
     /// A `(vtsc, ScenarioStep)` deadline fired at `now`.
+    ///
+    /// The returned [`Flow`] tells the caller whether the run has finished.
+    #[must_use]
     pub fn on_due(&mut self, now: u64, com2: &mut ControlChannel) -> Flow {
         match self.phase {
             Phase::AwaitAgent => {
@@ -574,6 +581,9 @@ impl ScenarioEngine {
     }
 
     /// A reply line arrived from the agent.
+    ///
+    /// The returned [`Flow`] tells the caller whether the run has finished.
+    #[must_use]
     pub fn on_reply(&mut self, line: &[u8], now: u64, com2: &mut ControlChannel) -> Flow {
         let parsed: AgentLine = match decode_line(line) {
             Ok(v) => v,
