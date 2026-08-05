@@ -45,6 +45,11 @@ if [ ! -f /.on-tmpfs-root ]; then
   $BB mknod "$NEW/dev/null"    c 1 3  2>/dev/null
   $BB mknod "$NEW/dev/ttyS0"   c 4 64 2>/dev/null
   $BB mknod "$NEW/dev/ttyS1"   c 4 65 2>/dev/null
+  # ttyS3 (COM4): the --allow-egress transport. Unconditional but harmless when
+  # egress is off -- COM4 is not instantiated, 0x2e8 is open bus, so the 4-UART
+  # kernel never registers ttyS3 and this node is simply never opened (the
+  # forwarder that opens it starts only on tdvmm.egress=1).
+  $BB mknod "$NEW/dev/ttyS3"   c 4 67 2>/dev/null
   : > "$NEW/.on-tmpfs-root"
 
   $BB umount /proc 2>/dev/null
