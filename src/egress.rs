@@ -278,6 +278,10 @@ struct Session {
     guest_write_closed: bool,
     /// The socket reached EOF: no more host→guest data will arrive.
     host_read_closed: bool,
+    /// The `CLOSE` announcing the read-side EOF has been framed toward the guest.
+    /// Sent exactly once, and only AFTER every buffered host→guest byte has been
+    /// framed, so a half-close never overtakes the last `DATA` on the wire.
+    host_close_sent: bool,
     /// The epoll interest mask currently applied to this stream's fd.
     epoll_mask: u32,
 }
@@ -291,6 +295,7 @@ impl Session {
             to_guest_credit: WINDOW_BYTES,
             guest_write_closed: false,
             host_read_closed: false,
+            host_close_sent: false,
             epoll_mask: 0,
         }
     }
@@ -702,8 +707,10 @@ impl EgressBackend {
                 let want = (WINDOW_BYTES - sess.to_guest.len()).min(READ_CHUNK);
                 match self.connector.read(id, &mut buf[..want]) {
                     Ok(Some(0)) => {
+                        // Mark EOF, but do NOT frame CLOSE here — the final DATA is
+                        // framed in step 3 below, and CLOSE must follow it, not
+                        // precede it (step 3b sends it once the buffer is drained).
                         sess.host_read_closed = true;
-                        enqueue(&mut self.tx_pending, EgressFrame::Close { stream: id.0 })?;
                         if sess.state == SessionState::Established {
                             sess.state = SessionState::HalfClosed;
                         }
@@ -730,6 +737,16 @@ impl EgressBackend {
             sess.to_guest_credit -= take;
             self.stats.bytes_down += take as u64;
             sess.to_guest.drain(..take);
+        }
+
+        // 3b. Announce the read-side EOF — but only once the whole host→guest buffer
+        // has been framed, so `CLOSE` lands AFTER the last `DATA`. If credit stalled
+        // framing, `to_guest` is non-empty and CLOSE waits for a later pump (after a
+        // `WINDOW` grant drains it), preserving the guest's "no data after CLOSE"
+        // contract.
+        if sess.host_read_closed && sess.to_guest.is_empty() && !sess.host_close_sent {
+            enqueue(&mut self.tx_pending, EgressFrame::Close { stream: id.0 })?;
+            sess.host_close_sent = true;
         }
 
         // 4. Keep the epoll interest in step with the window and the write backlog.
@@ -1654,6 +1671,30 @@ mod tests {
         assert!(b.is_quiescent());
     }
 
+    #[test]
+    fn close_follows_the_final_data_on_read_eof() {
+        // Regression: when the last host→guest bytes AND the socket EOF are observed
+        // in the SAME pump, the final DATA must be framed BEFORE the CLOSE. If CLOSE
+        // overtook that DATA on the wire, the guest — which drops data after a
+        // half-close, per the mux contract — would lose the last response bytes.
+        let (mut b, m) = setup();
+        establish(&mut b, &m, 1);
+        let _ = b.drain_to_guest(usize::MAX); // discard the OPEN_OK
+        // One pump reads the body, then reads again and sees EOF.
+        m.push_recv(1, b"body-bytes");
+        m.set_eof(1);
+        b.pump(&[]).unwrap();
+        let frames = b.drain_to_guest(usize::MAX);
+        let d0 = decode(&frames).unwrap().unwrap();
+        assert_eq!(
+            d0.frame,
+            EgressFrame::Data { stream: 1, payload: b"body-bytes" },
+            "the final DATA must come first",
+        );
+        let d1 = decode(&frames[d0.consumed..]).unwrap().unwrap();
+        assert_eq!(d1.frame, EgressFrame::Close { stream: 1 }, "CLOSE must follow the last DATA");
+    }
+
     // ---- T4b: the jump-legality mirror (INV-E1) ------------------------------
 
     #[test]
@@ -1887,10 +1928,19 @@ mod tests {
         assert!(!ch.is_quiescent(), "an open session is non-quiescent (gate holds)");
         let down_before = ch.stats().bytes_down;
 
-        // Park with the egress fd BEFORE any host bytes exist: it must NOT wake on
-        // egress (the guest would be blocked at HLT on a ttyS3 read here).
-        let w = parker.park(Some(150_000_000), Some(ch.epoll_fd())).unwrap();
-        assert!(!w.egress, "park must block until host-side bytes exist");
+        // Park with the egress fd BEFORE any host bytes exist. The wake FLAG is
+        // advisory (see `park::Wakes::egress`): a benign spurious egress wake is
+        // possible here — the resolver signals its eventfd just AFTER its answer was
+        // already drained (the standard self-pipe race the design tolerates by
+        // re-pumping). So assert the decisive EFFECT instead: with the socket still
+        // empty, the boundary pump frames NO host→guest response.
+        let _ = parker.park(Some(150_000_000), Some(ch.epoll_fd())).unwrap();
+        ch.pump(&mut lapic, &ioapic).unwrap();
+        assert_eq!(
+            ch.stats().bytes_down,
+            down_before,
+            "no response is framed before the host-side write exists",
+        );
 
         // Late host write: the client socket becomes readable -> epoll fd signals.
         (&server).write_all(b"late-egress-response").unwrap();
