@@ -10,8 +10,17 @@ pub struct RunMeta {
     pub stack: String,
     pub artifact_sha256: String,
     pub fast_forward: bool,
+    /// Whether host-mediated egress was opened for this run. Surfaced in the JSON
+    /// report so a run that touched the network is self-identifying.
+    pub egress: bool,
     pub jsonl_path: String,
     pub report_path: String,
+}
+
+/// `skip_serializing_if` helper: a `false` egress flag is omitted, so a
+/// closed-world run's report is byte-for-byte unchanged from before this feature.
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 #[derive(Clone, Default, Serialize)]
@@ -33,6 +42,10 @@ pub(super) struct Report {
     pub(super) scenario: String,
     pub(super) scenario_sha256: String,
     pub(super) fast_forward: bool,
+    /// Egress opened for this run. Omitted when false (closed-world runs keep
+    /// their pre-feature report bytes); present as `true` only when egress was on.
+    #[serde(skip_serializing_if = "is_false")]
+    pub(super) egress: bool,
     pub(super) duration_wall_s: f64,
     pub(super) virtual_seconds: f64,
     pub(super) ff: FfSummary,

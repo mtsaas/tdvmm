@@ -1,0 +1,17 @@
+# tdvmm egress T1 -- the clock does NOT jump while a request is in flight.
+# Driven by scripts/egress_safety_test.sh (which supplies --allow-egress, --ff on,
+# the ephemeral endpoint URL, and --metrics-out). The probe measures virtual
+# elapsed across a request the endpoint holds for D real seconds and emits
+# `t1_no_jump` (ok iff D <= virtual_elapsed <= D+2).
+name: egress-t1-no-jump
+run:
+  cmdline: "console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable tdvmm.stack=1 tdvmm.egress_mode=t1 tdvmm.egress_d=2"
+  until: done
+steps:
+  - name: wait-probe-up
+    at: 0s
+    wait_for:
+      probe: { exec: { container: probe, cmd: "true" } }
+      until: exit_zero
+      every: 5s
+      timeout: 3m

@@ -261,6 +261,15 @@ tdvmm verify  demo   # check nothing changed; print its sha256
 - **Virtual time is the point.** `at:` times, timeouts, and intervals are all *virtual*.
   Fast-forward only collapses genuine idle (a sleeping/HLTed guest), so a service that
   busy-loops won't speed up — and that shows up as a slow run.
+- **Opening the network.** By default the guest can't reach anything outside — that's
+  what makes fast-forward safe. If a service must call out, add `--allow-egress` to
+  `run`/`test`: it opens one proxy the guest reaches at its bridge gateway on port 1080,
+  and a container opts in with `ALL_PROXY=socks5h://<gateway>:1080` in its own compose.
+  It's never baked into an artifact — you pass the flag each time. Trade-offs: the run
+  slows to real speed while a connection is open (so prefer short requests and
+  `Connection: close`); the guest's wall clock is fake and drifts per jump, so TLS/token
+  flows may fail; and that run is no longer exactly repeatable (the report records
+  `egress=on`).
 
 ## Where to go next
 

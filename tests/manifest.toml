@@ -121,6 +121,15 @@ desc = "representative corpus stack (chattiest: web+redis+postgres, dual health 
 # svcchain; relative rw binds + named volumes by corpus-full (configpipeline).
 
 [[test]]
+name = "egress-safety"
+tier = "T2"
+tags = ["parallel-safe", "needs-bake"]
+timeout = 420
+requires = "guest/stacks/egress-probe/compose.yml guest/kernel/vmlinux-6.1.128"
+cmd = "scripts/egress_safety_test.sh"
+desc = "SAFETY(--allow-egress): phase gate proven e2e — clock never jumps mid-request (T1), FF re-engages once drained (T2), a gate breach aborts (T3b), an adversarial dribble is not FF'd past the read timeout (T3c), transport under --ff off (T5), closed-world identity flag-off (T6). Loopback test server, no internet."
+
+[[test]]
 name = "corpus-demo"
 tier = "T2"
 tags = ["perf-exclusive", "needs-bake"]

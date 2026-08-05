@@ -1,0 +1,15 @@
+# tdvmm egress T5 -- transport control under --ff off (separates transport
+# correctness from gating). The probe does one request and asserts the full
+# response came back through the mux.
+name: egress-t5-transport-ff-off
+run:
+  cmdline: "console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable tdvmm.stack=1 tdvmm.egress_mode=t5"
+  until: done
+steps:
+  - name: wait-probe-up
+    at: 0s
+    wait_for:
+      probe: { exec: { container: probe, cmd: "true" } }
+      until: exit_zero
+      every: 5s
+      timeout: 3m

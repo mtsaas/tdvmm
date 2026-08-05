@@ -45,6 +45,11 @@ if [ ! -f /.on-tmpfs-root ]; then
   $BB mknod "$NEW/dev/null"    c 1 3  2>/dev/null
   $BB mknod "$NEW/dev/ttyS0"   c 4 64 2>/dev/null
   $BB mknod "$NEW/dev/ttyS1"   c 4 65 2>/dev/null
+  # ttyS3 (COM4): the --allow-egress transport. Unconditional but harmless when
+  # egress is off -- COM4 is not instantiated, 0x2e8 is open bus, so the 4-UART
+  # kernel never registers ttyS3 and this node is simply never opened (the
+  # forwarder that opens it starts only on tdvmm.egress=1).
+  $BB mknod "$NEW/dev/ttyS3"   c 4 67 2>/dev/null
   : > "$NEW/.on-tmpfs-root"
 
   $BB umount /proc 2>/dev/null
@@ -130,6 +135,18 @@ if ! grep -q 'tdvmm.noagent=1' /proc/cmdline 2>/dev/null; then
   if [ -x /usr/local/bin/tdvmm-agent ] && [ -c /dev/ttyS1 ]; then
     echo "[init] starting tdvmm-agent on /dev/ttyS1 (control channel)"
     /usr/local/bin/tdvmm-agent >/tmp/tdvmm-agent.log 2>&1 &
+  fi
+fi
+
+# EGRESS forwarder (--allow-egress only): the same agent binary in `forward` mode,
+# a SOCKS5h proxy on 0.0.0.0:1080 that relays guest-initiated TCP over /dev/ttyS3
+# (COM4) to the host. Started ONLY on tdvmm.egress=1 -- which the VMM appends to the
+# cmdline exactly when it instantiates COM4 -- so with egress off ttyS3 is never
+# opened and this block is inert (the closed world is unchanged).
+if grep -q 'tdvmm.egress=1' /proc/cmdline 2>/dev/null; then
+  if [ -x /usr/local/bin/tdvmm-agent ] && [ -c /dev/ttyS3 ]; then
+    echo "[init] starting tdvmm-agent forwarder on /dev/ttyS3 (egress SOCKS5h :1080)"
+    /usr/local/bin/tdvmm-agent forward >/tmp/tdvmm-forwarder.log 2>&1 &
   fi
 fi
 

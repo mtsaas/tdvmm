@@ -1,0 +1,19 @@
+# tdvmm egress T2 -- fast-forward re-engages once the session drains.
+# After a quick request + close, the probe sleeps a long virtual interval; the
+# safety suite asserts host-side (--metrics-out) that it was collapsed to ~no real
+# time (jumps>0, virtual>=600, real small).
+name: egress-t2-ff-reengages
+run:
+  cmdline: "console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable tdvmm.stack=1 tdvmm.egress_mode=t2 tdvmm.egress_sleep=600"
+  until: done
+  # The probe sleeps 600 virtual s AFTER the request; the horizon must exceed that
+  # so `done` (not the horizon) ends the run. Well above the implicit last-step+slack.
+  max_virtual_time: 20m
+steps:
+  - name: wait-probe-up
+    at: 0s
+    wait_for:
+      probe: { exec: { container: probe, cmd: "true" } }
+      until: exit_zero
+      every: 5s
+      timeout: 3m
