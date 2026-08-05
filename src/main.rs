@@ -44,6 +44,7 @@ mod cpio;
 mod cpuid;
 mod diag;
 mod doorbell;
+mod egress;
 mod engine;
 mod events;
 mod exit;

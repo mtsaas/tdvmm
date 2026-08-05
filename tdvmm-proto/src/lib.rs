@@ -27,6 +27,11 @@
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+/// The binary mux protocol for the `--allow-egress` channel (COM4 / ttyS3). A
+/// separate wire contract from the line-JSON control channel above; see
+/// [`egress::EGRESS_SCHEMA`].
+pub mod egress;
+
 /// The wire-protocol schema version. Embedded in the hello + `ping` reply and
 /// recorded in the run-log preamble. Bump on ANY change to the types below (a
 /// bump also requires regenerating the golden fixtures in the same commit).
