@@ -41,6 +41,7 @@ pub use agent::cmd_build_agent;
 pub use bake::cmd_build;
 pub use initramfs::cmd_assemble_initramfs;
 pub use kernel::cmd_build_kernel;
+pub use kernel::resolve_boot_inputs;
 pub use seed::cmd_seed_build;
 pub(crate) use util::civil_from_days;
 

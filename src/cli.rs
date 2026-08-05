@@ -10,7 +10,7 @@ use crate::{DEFAULT_CMDLINE, DEFAULT_MAX_JUMP_SECS, DEFAULT_MEM_MIB};
 #[derive(Parser)]
 #[command(
     name = "tdvmm",
-    about = "fast-forward KVM VMM — run/inspect/verify a .tdvmm stack, or boot raw artifacts",
+    about = "Fast-forward KVM VMM for testing compose stacks",
     long_about = "A single-vCPU, fast-forwardable KVM VMM. `run` boots a self-contained \
                   .tdvmm stack artifact (baked defaults, overridable by flags); `boot` is \
                   the low-level raw kernel+initramfs verb for VMM development.\n\n\
@@ -18,41 +18,38 @@ use crate::{DEFAULT_CMDLINE, DEFAULT_MAX_JUMP_SECS, DEFAULT_MEM_MIB};
                   suffix (ms, s, m, h), e.g. 500ms, 30s, 5m, 2h.",
     after_help = "Examples:\n  \
                   tdvmm build guest/stacks/insert-trim/compose.yml\n  \
-                  tdvmm ls\n  \
                   tdvmm run insert-trim\n  \
-                  tdvmm test insert-trim --scenario guest/stacks/insert-trim/insert-trim.yml",
+                  tdvmm test insert-trim --scenario guest/stacks/insert-trim/insert-trim.yml\n  \
+                  tdvmm ls",
     version
 )]
 pub(crate) struct Cli {
     #[command(subcommand)]
     pub(crate) cmd: Cmd,
-    /// Disable the `tdvmm build` progress spinner; emit plain `== step ==`
-    /// lines (also forced by a non-terminal stderr, `CI`, or `TERM=dumb`). No
-    /// effect on any other subcommand.
+    /// Disable the `tdvmm build` progress spinner (plain `== step ==` lines).
+    ///
+    /// Also forced by a non-terminal stderr, `CI`, or `TERM=dumb`. No effect on
+    /// any other subcommand.
     #[arg(long, global = true)]
     pub(crate) no_progress: bool,
 }
 
 #[derive(Subcommand)]
 pub(crate) enum Cmd {
-    /// Bake a compose stack into a self-contained .tdvmm (host tool: podman + network).
+    /// Bake a compose stack into a .tdvmm artifact.
+    ///
+    /// A host build tool (needs podman + network): pulls and digest-pins each image,
+    /// squashes them into an offline seed store, and packs a self-contained .tdvmm.
+    /// The content-hash cache makes an unchanged stack near-instant to re-bake.
     #[command(after_help = "Example:\n  tdvmm build guest/stacks/insert-trim/compose.yml -o insert-trim.tdvmm")]
     Build(BuildCliArgs),
-    /// Build the reproducible static-musl tdvmm-agent standalone (pinned builder
-    /// container). Prints `<sha256>  <path>`. Used by the size / double-build gates.
-    #[command(name = "build-agent")]
-    BuildAgent(BuildAgentArgs),
-    /// Acquire the pinned guest kernel: fetch the pinned GitHub release asset
-    /// (PRIMARY, sha256-verified against kernel.lock) or reproducibly build it in
-    /// the pinned builder container (FALLBACK). `--record` bootstraps kernel.lock.
-    #[command(name = "build-kernel")]
-    BuildKernel(BuildKernelArgs),
-    /// Boot a raw kernel + initramfs (the low-level VMM-dev / smoke verb).
-    Boot(BootArgs),
-    /// Run a .tdvmm stack artifact: apply its baked run-defaults, then boot (offline).
+    /// Run a .tdvmm stack (offline).
+    ///
+    /// Loads the artifact (a store name or a path), applies its baked run-defaults,
+    /// then boots. Flags override the baked defaults.
     #[command(after_help = "Example:\n  tdvmm run insert-trim --ff on   (a store name, or a path to a .tdvmm)")]
     Run(RunArgs),
-    /// Test a .tdvmm stack against a scenario: drive virtual time, assert, verdict.
+    /// Test a .tdvmm stack against a scenario.
     #[command(
         long_about = "Test a .tdvmm stack against a scenario: drive virtual time, assert, \
                       verdict.\n\nExit codes (the shared tdvmm 0-3 contract; `test` itself only \
@@ -64,13 +61,38 @@ pub(crate) enum Cmd {
         after_help = "Example:\n  tdvmm test insert-trim.tdvmm --scenario guest/stacks/insert-trim/insert-trim.yml"
     )]
     Test(TestArgs),
-    /// Print a .tdvmm artifact's manifest.json (reads ONLY the manifest member).
-    Inspect(ArtifactArg),
-    /// Verify a .tdvmm: recompute member hashes vs the manifest; print its sha256 identity.
-    Verify(ArtifactArg),
-    /// List the .tdvmm artifacts in the local store (name, size, modified).
+    /// List the .tdvmm artifacts in the local store.
     Ls(LsArgs),
-    /// Print the effective guest clock/timer CPUID profile (the manifest artifact).
+    /// Print a .tdvmm artifact's manifest.
+    ///
+    /// Reads ONLY the manifest.json member — never the big kernel/initramfs payloads.
+    Inspect(ArtifactArg),
+    /// Verify a .tdvmm artifact and print its sha256 identity.
+    ///
+    /// Recomputes every member hash and checks it against the manifest.
+    Verify(ArtifactArg),
+    /// Boot a kernel + initramfs directly (low-level).
+    ///
+    /// The VMM-dev / smoke verb: boots a raw vmlinux + initramfs, no .tdvmm artifact.
+    /// Both default to the managed guest artifacts — the pinned kernel (auto-fetched)
+    /// and the busybox clock guest — so a bare `tdvmm boot` smoke-boots the minimal
+    /// guest; pass --kernel / --initrd to override.
+    Boot(BootArgs),
+    /// Fetch or build the pinned guest kernel.
+    ///
+    /// Fetches the pinned GitHub release asset (PRIMARY, sha256-verified against
+    /// kernel.lock), or reproducibly builds it in the pinned builder container
+    /// (FALLBACK). `--record` bootstraps kernel.lock.
+    #[command(name = "build-kernel", hide = true)]
+    BuildKernel(BuildKernelArgs),
+    /// Build the reproducible guest agent binary.
+    ///
+    /// Builds the static-musl tdvmm-agent in the pinned builder container and prints
+    /// `<sha256>  <path>`. Used by the size / double-build gates.
+    #[command(name = "build-agent", hide = true)]
+    BuildAgent(BuildAgentArgs),
+    /// Print the effective guest clock/timer CPUID profile.
+    #[command(hide = true)]
     DumpCpuid,
     /// [internal] Build the seed store inside `podman unshare` (used by `tdvmm build`).
     #[command(name = "__seed-build", hide = true)]
@@ -179,12 +201,12 @@ pub(crate) struct CommonRunFlags {
 
 #[derive(Args)]
 pub(crate) struct BootArgs {
-    /// Path to the uncompressed ELF vmlinux.
+    /// Uncompressed ELF vmlinux (default: the pinned guest kernel, auto-fetched).
     #[arg(long, value_name = "PATH")]
-    pub(crate) kernel: String,
-    /// Path to the initramfs.
+    pub(crate) kernel: Option<String>,
+    /// Initramfs to boot (default: the committed busybox clock guest).
     #[arg(long, value_name = "PATH")]
-    pub(crate) initrd: String,
+    pub(crate) initrd: Option<String>,
     #[command(flatten)]
     pub(crate) common: CommonRunFlags,
 }

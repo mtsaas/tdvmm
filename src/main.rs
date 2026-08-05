@@ -289,14 +289,16 @@ fn dispatch() -> Result<i32, Box<dyn std::error::Error>> {
 
 fn cmd_boot(args: BootArgs) -> Result<i32, Box<dyn std::error::Error>> {
     let eff = EffectiveConfig::from_boot(&args.common)?;
-    let kernel = std::fs::read(&args.kernel)
-        .map_err(|e| format!("opening kernel {}: {e}", args.kernel))?;
-    let initrd = std::fs::read(&args.initrd)
-        .map_err(|e| format!("opening initrd {}: {e}", args.initrd))?;
+    let (kernel_path, initrd_path) =
+        build::resolve_boot_inputs(args.kernel.as_deref(), args.initrd.as_deref())?;
+    let kernel = std::fs::read(&kernel_path)
+        .map_err(|e| format!("opening kernel {}: {e}", kernel_path.display()))?;
+    let initrd = std::fs::read(&initrd_path)
+        .map_err(|e| format!("opening initrd {}: {e}", initrd_path.display()))?;
     dlog!(
         "[tdvmm] boot: kernel={} initrd={}",
-        args.kernel,
-        args.initrd
+        kernel_path.display(),
+        initrd_path.display()
     );
     let out = boot_and_run(&kernel, &initrd, &eff, None, None)?;
     Ok(out.exit_code)

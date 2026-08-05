@@ -343,3 +343,28 @@ pub fn cmd_build_kernel(args: BuildKernelArgs) -> Result<i32, Box<dyn std::error
     println!("{sha}  {}", out.display());
     Ok(0)
 }
+
+/// Resolve `tdvmm boot`'s kernel + initramfs, filling in a default for any input
+/// the caller omitted: the pinned guest kernel (ensured/fetched like `tdvmm
+/// build`) and the committed busybox clock-guest initramfs. A provided path is
+/// used verbatim.
+pub fn resolve_boot_inputs(
+    kernel: Option<&str>,
+    initrd: Option<&str>,
+) -> Result<(PathBuf, PathBuf), Box<dyn std::error::Error>> {
+    let here = self_here()?;
+    let kernel = match kernel {
+        Some(k) => PathBuf::from(k),
+        None => {
+            let (cache_dir, _src) = resolve_cache_dir(None);
+            let progress = ui::Progress::disabled();
+            let ux = Ux::inherit(&progress);
+            ensure_kernel(&here, &cache_dir, false, &ux)?
+        }
+    };
+    let initrd = match initrd {
+        Some(i) => PathBuf::from(i),
+        None => here.join("initramfs/initramfs.cpio.gz"),
+    };
+    Ok((kernel, initrd))
+}
