@@ -1,37 +1,56 @@
-//! Deterministic newc (SVR4) cpio emitter for `tdvmm build` (OP-1b).
+//! Deterministic newc (SVR4) cpio emitter — the `initramfs` payload of a `.tdvmm`.
 //!
-//! Replaces the removed shell tail of the bake pipeline
-//! (`gen_init_cpio` + `cpio --create --format=newc --reproducible` +
-//! `zero_cpio_inodes.py`), emitting the **combined initramfs cpio directly from
-//! Rust** with the EXACT same bytes so the initramfs — and thus the `.tdvmm` — is
-//! byte-identical to the old producer.
+//! ## Byte layout
 //!
-//! The archive is two concatenated newc segments (the kernel initramfs unpacker
-//! reads concatenated cpios), each padded to a 512-byte boundary:
+//! An archive is a run of entries followed by a `TRAILER!!!` entry. Each entry is a
+//! 110-byte header — the magic `070701` and thirteen 8-char uppercase-hex fields
+//! (ino, mode, uid, gid, nlink, mtime, filesize, devmajor, devminor, rdevmajor,
+//! rdevminor, namesize, check) — then the NUL-terminated name, then the file data.
+//! The header-plus-name and the data are each zero-padded to a 4-byte boundary.
 //!
-//!   1. **device nodes** — `/dev`, `/dev/console`, `/dev/null`, `/dev/ttyS0`,
-//!      `/dev/ttyS1` + a trailer. Matches `gen_init_cpio -t <epoch>` with every
-//!      `c_ino` zeroed (as the former `zero_cpio_inodes.py` did; fixed fake device `3:1`).
-//!   2. **the rootfs tree** — every path except `dev`/`dev/*`, in `LC_ALL=C`
-//!      byte-sorted order, with `--owner=0:0` (uid/gid 0), device numbers zeroed,
-//!      all mtimes pinned to the guest epoch, and `c_ino` **renumbered by
-//!      first-appearance** exactly as GNU cpio's `--reproducible` does — including
-//!      its hardlink handling: the non-last links of an inode group are written
-//!      (in reverse order) with `filesize=0`, and the last link carries the data.
+//! The kernel's initramfs unpacker reads *concatenated* newc archives, so an
+//! initramfs is assembled from several independent segments joined end to end. This
+//! module emits two kinds, each self-contained (its own trailer, then padding to a
+//! 512-byte boundary):
 //!
-//! All 13 newc header fields are 8-char uppercase hex; header+name and data are
-//! each padded to a 4-byte boundary. Fidelity is pinned by `cpio_tests` against
-//! GNU `cpio --reproducible` on synthetic trees.
+//!   1. [`nodes_segment`] — the device nodes `/dev`, `/dev/console`, `/dev/null`,
+//!      `/dev/ttyS0`, `/dev/ttyS1`. Every entry carries a fixed containing device
+//!      `3:1`; the character devices carry their real `rdev`.
+//!   2. [`rootfs_segment`] — one on-disk directory tree, everything except `/dev`
+//!      (which the node segment supplies).
+//!
+//! [`gzip_to`] compresses the concatenated segments into the final `initramfs`.
+//!
+//! ## Determinism
+//!
+//! Identical inputs produce byte-identical output, which is what makes the whole
+//! `.tdvmm` byte-reproducible. Every field that would otherwise vary is normalized:
+//!
+//!   * entries are emitted in `LC_ALL=C` byte-sorted order of their relative names;
+//!   * uid/gid and the containing device numbers are zeroed, and mtime is pinned to
+//!     [`BUILD_EPOCH`];
+//!   * `c_ino` is renumbered by first appearance in sorted order, so it reflects the
+//!     tree's shape rather than the host's actual inode numbers;
+//!   * directories are written with `nlink = 2` (the on-disk subdirectory count is
+//!     not preserved);
+//!   * a hardlink group is emitted as GNU `cpio --reproducible` does: the non-last
+//!     links are written first (in reverse of their sorted order) with `filesize = 0`
+//!     and no data, and only the last link in sorted order carries the file content.
+//!
+//! [`gzip_to`] zeroes the gzip member's mtime and omits the original filename, so the
+//! compression layer is deterministic too. `cpio_tests` pins the format against a
+//! byte-identity golden and against GNU `cpio --reproducible` on synthetic trees.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-/// The fixed guest wall-clock epoch (2026-08-01T00:00:00Z) — every archived
-/// entry's mtime, matching the former shell builder's `touch -h -d @$BUILD_EPOCH`.
-pub const BUILD_EPOCH: u32 = 1785542400;
+/// The fixed guest wall-clock epoch (2026-08-01T00:00:00Z), written as the mtime of
+/// every archived entry so timestamps never vary between builds.
+const BUILD_EPOCH: u32 = 1785542400;
 
 // libc file-type bits (S_IFMT masking).
 const S_IFMT: u32 = 0o170000;
@@ -41,6 +60,71 @@ const S_IFLNK: u32 = 0o120000;
 const S_IFCHR: u32 = 0o020000;
 const S_IFBLK: u32 = 0o060000;
 
+/// The error type for cpio emission: an I/O failure (tagged with the operation and
+/// keeping the underlying [`std::io::Error`] as its `source`), or a file too large
+/// for the newc format's 32-bit size field.
+#[derive(Debug)]
+pub enum CpioError {
+    /// An I/O failure, tagged with the operation (e.g. `"reading /…/bin/sh"`).
+    Io { what: String, source: std::io::Error },
+    /// A file larger than the newc `filesize` field (32-bit) can encode. Names the
+    /// entry and its byte length.
+    TooLarge { name: String, size: u64 },
+}
+
+impl CpioError {
+    /// An [`Io`](CpioError::Io) with `what` context attached.
+    pub(crate) fn io(what: impl Into<String>, source: std::io::Error) -> Self {
+        CpioError::Io { what: what.into(), source }
+    }
+    /// A [`TooLarge`](CpioError::TooLarge) naming the entry and its byte length.
+    pub(crate) fn too_large(name: impl Into<String>, size: u64) -> Self {
+        CpioError::TooLarge { name: name.into(), size }
+    }
+}
+
+impl fmt::Display for CpioError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CpioError::Io { what, source } => write!(f, "{what}: {source}"),
+            CpioError::TooLarge { name, size } => {
+                write!(f, "{name} is {size} bytes, over the newc 32-bit filesize limit")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CpioError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            CpioError::Io { source, .. } => Some(source),
+            CpioError::TooLarge { .. } => None,
+        }
+    }
+}
+
+/// The per-entry fields of a newc header. `uid`, `gid`, and the unused `check` field
+/// are always zero and are emitted by [`Cpio::header`], not carried here.
+struct NewcHeader<'a> {
+    ino: u32,
+    mode: u32,
+    nlink: u32,
+    mtime: u32,
+    filesize: u32,
+    devmajor: u32,
+    devminor: u32,
+    rdevmajor: u32,
+    rdevminor: u32,
+    name: &'a [u8],
+}
+
+/// An archive under construction: the output buffer plus the framing operations
+/// that keep it a valid, block-aligned newc stream.
+///
+/// This self-buffers into an owned `Vec<u8>` rather than being generic over
+/// `impl Write` like `artifact::tar`: `pad_to_512` needs the running archive
+/// length, and every caller materializes a whole segment before concatenating and
+/// gzipping, so streaming to a sink would buy nothing.
 struct Cpio {
     out: Vec<u8>,
 }
@@ -50,59 +134,63 @@ impl Cpio {
         Cpio { out: Vec::new() }
     }
 
-    /// Write one newc header (13 uppercase-hex fields) + name + NUL + 4-byte pad.
-    #[allow(clippy::too_many_arguments)]
-    fn header(
-        &mut self,
-        ino: u32,
-        mode: u32,
-        nlink: u32,
-        mtime: u32,
-        filesize: u32,
-        devmajor: u32,
-        devminor: u32,
-        rdevmajor: u32,
-        rdevminor: u32,
-        name: &[u8],
-    ) {
-        let namesize = name.len() as u32 + 1; // includes the trailing NUL
+    /// Append `n` zero bytes — the padding used at 4-byte and 512-byte boundaries.
+    fn pad_zeros(&mut self, n: usize) {
+        self.out.resize(self.out.len() + n, 0);
+    }
+
+    /// Write one newc header (magic + 13 uppercase-hex fields) followed by the
+    /// NUL-terminated name, padded to a 4-byte boundary.
+    fn header(&mut self, h: NewcHeader<'_>) {
+        let namesize = h.name.len() as u32 + 1; // includes the trailing NUL
         self.out.extend_from_slice(b"070701");
         let fields = [
-            ino, mode, 0, /*uid*/ 0, /*gid*/ nlink, mtime, filesize, devmajor, devminor,
-            rdevmajor, rdevminor, namesize, 0, /*check*/
+            h.ino, h.mode, 0, // uid
+            0, // gid
+            h.nlink, h.mtime, h.filesize, h.devmajor, h.devminor, h.rdevmajor, h.rdevminor,
+            namesize, 0, // check
         ];
         for v in fields {
             self.out.extend_from_slice(format!("{v:08X}").as_bytes());
         }
-        self.out.extend_from_slice(name);
+        self.out.extend_from_slice(h.name);
         self.out.push(0);
         let hdrlen = 110 + namesize as usize;
-        let pad = (4 - (hdrlen % 4)) % 4;
-        self.out.extend(std::iter::repeat(0u8).take(pad));
+        self.pad_zeros((4 - (hdrlen % 4)) % 4);
     }
 
-    /// Write member data padded to a 4-byte boundary.
+    /// Write member data, padded to a 4-byte boundary.
     fn data(&mut self, d: &[u8]) {
         self.out.extend_from_slice(d);
-        let pad = (4 - (d.len() % 4)) % 4;
-        self.out.extend(std::iter::repeat(0u8).take(pad));
+        self.pad_zeros((4 - (d.len() % 4)) % 4);
     }
 
+    /// Write the `TRAILER!!!` entry that marks end-of-archive.
     fn trailer(&mut self) {
-        // ino=0, mode=0, nlink=1, mtime=0, filesize=0, dev=0:0, rdev=0:0.
-        self.header(0, 0, 1, 0, 0, 0, 0, 0, 0, b"TRAILER!!!");
+        self.header(NewcHeader {
+            ino: 0,
+            mode: 0,
+            nlink: 1,
+            mtime: 0,
+            filesize: 0,
+            devmajor: 0,
+            devminor: 0,
+            rdevmajor: 0,
+            rdevminor: 0,
+            name: b"TRAILER!!!",
+        });
     }
 
-    /// Pad the whole archive-so-far up to a 512-byte boundary (cpio block size /
-    /// gen_init_cpio trailer padding).
+    /// Pad the archive-so-far up to a 512-byte boundary (the cpio block size, so a
+    /// segment can be concatenated with the next).
     fn pad_to_512(&mut self) {
-        let pad = (512 - (self.out.len() % 512)) % 512;
-        self.out.extend(std::iter::repeat(0u8).take(pad));
+        self.pad_zeros((512 - (self.out.len() % 512)) % 512);
     }
 }
 
-/// Emit the device-node segment: matches `gen_init_cpio -t epoch` output with
-/// every c_ino zeroed. Fixed fake device `3:1`; trailer + pad to 512.
+/// Emit the device-node segment: the fixed set of `/dev` entries, then a trailer and
+/// 512-byte padding. Every entry's containing device is `3:1`; the character devices
+/// carry their real `rdev`.
 fn write_nodes_segment(c: &mut Cpio) {
     // (name, mode, nlink, rdevmajor, rdevminor)
     let nodes: &[(&[u8], u32, u32, u32, u32)] = &[
@@ -113,41 +201,59 @@ fn write_nodes_segment(c: &mut Cpio) {
         (b"dev/ttyS1", S_IFCHR | 0o660, 1, 4, 65),
     ];
     for &(name, mode, nlink, rmaj, rmin) in nodes {
-        // c_ino=0, mtime=epoch, filesize=0, devmajor=3 devminor=1.
-        c.header(0, mode, nlink, BUILD_EPOCH, 0, 3, 1, rmaj, rmin, name);
+        c.header(NewcHeader {
+            ino: 0,
+            mode,
+            nlink,
+            mtime: BUILD_EPOCH,
+            filesize: 0,
+            devmajor: 3,
+            devminor: 1,
+            rdevmajor: rmaj,
+            rdevminor: rmin,
+            name,
+        });
     }
     c.trailer();
     c.pad_to_512();
 }
 
-/// One collected rootfs entry (lstat, no symlink following).
+/// One collected rootfs entry, from an `lstat` that does not follow symlinks.
 struct Entry {
     name: Vec<u8>, // relative path, no leading "./"
     path: PathBuf,
     dev: u64,
     ino: u64,
+    rdev: u64,
     nlink: u32,
     mode: u32,
     is_dir: bool,
 }
 
-/// Recursively collect all entries under `root`, excluding `dev` and `dev/*`
-/// (provided by the node segment). Relative names, no leading "./".
-fn collect(root: &Path) -> std::io::Result<Vec<Entry>> {
+/// Recursively collect every entry under `root`, excluding `dev` and `dev/*` (the
+/// node segment supplies those). Names are relative to `root`, with no leading "./",
+/// and returned in `LC_ALL=C` byte-sorted order.
+fn collect(root: &Path) -> Result<Vec<Entry>, CpioError> {
     let mut entries = Vec::new();
     let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
-    // We must NOT follow symlinks; recurse only into real directories.
+    // Symlinks are never followed; recurse only into real directories.
     while let Some(dir) = stack.pop() {
-        for de in fs::read_dir(&dir)? {
-            let de = de?;
+        let rd = fs::read_dir(&dir)
+            .map_err(|err| CpioError::io(format!("reading directory {}", dir.display()), err))?;
+        for de in rd {
+            let de = de
+                .map_err(|err| CpioError::io(format!("reading directory {}", dir.display()), err))?;
             let path = de.path();
-            let rel = path.strip_prefix(root).unwrap();
+            let rel = path
+                .strip_prefix(root)
+                .expect("read_dir walks paths rooted at `root`, so each is prefixed by it");
             let relbytes = rel.as_os_str().as_bytes().to_vec();
-            // exclude dev and everything under it
+            // Exclude dev and everything under it.
             if relbytes == b"dev" || relbytes.starts_with(b"dev/") {
                 continue;
             }
-            let meta = fs::symlink_metadata(&path)?;
+            let meta = fs::symlink_metadata(&path)
+                .map_err(|err| CpioError::io(format!("stat {}", path.display()), err))?;
             let mode = meta.mode();
             let is_dir = (mode & S_IFMT) == S_IFDIR;
             entries.push(Entry {
@@ -155,6 +261,7 @@ fn collect(root: &Path) -> std::io::Result<Vec<Entry>> {
                 path: path.clone(),
                 dev: meta.dev(),
                 ino: meta.ino(),
+                rdev: meta.rdev(),
                 nlink: meta.nlink() as u32,
                 mode,
                 is_dir,
@@ -164,17 +271,16 @@ fn collect(root: &Path) -> std::io::Result<Vec<Entry>> {
             }
         }
     }
-    // LC_ALL=C sort on the ("./"-prefixed) names == byte sort of relative names.
+    // The relative names sort identically to the "./"-prefixed names under LC_ALL=C.
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(entries)
 }
 
-/// The rdev fields for a device node, else (0,0).
+/// The `(rdevmajor, rdevminor)` for a device node, else `(0, 0)`. Uses the same
+/// `dev_t` split as GNU cpio.
 fn rdev_of(meta_rdev: u64, mode: u32) -> (u32, u32) {
     let t = mode & S_IFMT;
     if t == S_IFCHR || t == S_IFBLK {
-        // Linux dev_t split (major = (rdev>>8)&0xfff, ...) — the same split GNU
-        // cpio uses.
         let major = ((meta_rdev >> 8) & 0xfff) as u32;
         let minor = (meta_rdev & 0xff) as u32 | (((meta_rdev >> 12) & !0xffu64) as u32);
         (major, minor)
@@ -183,9 +289,10 @@ fn rdev_of(meta_rdev: u64, mode: u32) -> (u32, u32) {
     }
 }
 
-/// Emit the rootfs segment: byte-sorted, uid/gid 0, dev zeroed, mtime=epoch,
-/// c_ino renumbered by first-appearance, GNU-cpio hardlink handling.
-fn write_rootfs_segment(c: &mut Cpio, root: &Path) -> std::io::Result<()> {
+/// Emit the rootfs tree under `root` as one segment: byte-sorted, uid/gid 0,
+/// containing device zeroed, mtime pinned, `c_ino` renumbered, hardlink groups
+/// handled as GNU cpio does; then a trailer and 512-byte padding.
+fn write_rootfs_segment(c: &mut Cpio, root: &Path) -> Result<(), CpioError> {
     let entries = collect(root)?;
 
     // Pass 1: renumber inodes by first appearance in sorted order.
@@ -199,7 +306,7 @@ fn write_rootfs_segment(c: &mut Cpio, root: &Path) -> std::io::Result<()> {
         });
     }
 
-    // Pass 1b: per hardlink group (non-dir, nlink>1), count archived members.
+    // Pass 1b: count the archived members of each hardlink group (non-dir, nlink>1).
     let mut group_total: HashMap<(u64, u64), usize> = HashMap::new();
     for e in &entries {
         if !e.is_dir && e.nlink > 1 {
@@ -207,9 +314,9 @@ fn write_rootfs_segment(c: &mut Cpio, root: &Path) -> std::io::Result<()> {
         }
     }
 
-    // Pass 2: emit. Defer hardlink-group members until the last archived one, at
-    // which point write the earlier ones (reversed, data-less) then this one
-    // (with data) — exactly GNU cpio --reproducible.
+    // Pass 2: emit. A hardlink group is held back until its last archived member, at
+    // which point the earlier links are written (reversed, data-less) and then this
+    // one with data — matching GNU cpio --reproducible.
     let mut deferred: HashMap<(u64, u64), Vec<usize>> = HashMap::new();
     let mut seen: HashMap<(u64, u64), usize> = HashMap::new();
 
@@ -223,7 +330,6 @@ fn write_rootfs_segment(c: &mut Cpio, root: &Path) -> std::io::Result<()> {
                 deferred.entry(key).or_default().push(idx);
                 continue;
             }
-            // Trigger: write reversed(deferred) with no data, then this with data.
             if let Some(list) = deferred.remove(&key) {
                 for &di in list.iter().rev() {
                     write_entry(c, &entries[di], ino_map[&key], false)?;
@@ -235,93 +341,106 @@ fn write_rootfs_segment(c: &mut Cpio, root: &Path) -> std::io::Result<()> {
         }
     }
 
-    // Any group that never reached its total (links outside the archived tree)
-    // should not happen for our closed rootfs; surface it rather than diverge.
-    for (_, list) in deferred.iter() {
-        debug_assert!(list.is_empty(), "cpio: undrained hardlink deferral");
-    }
+    // Every hardlink group drains at its last link; a leftover would mean a link
+    // points outside the archived tree, which a closed rootfs never contains.
+    debug_assert!(deferred.is_empty(), "cpio: undrained hardlink deferral");
 
     c.trailer();
     c.pad_to_512();
     Ok(())
 }
 
-/// Write a single rootfs entry. `with_data` is false for a non-last hardlink.
-fn write_entry(c: &mut Cpio, e: &Entry, new_ino: u32, with_data: bool) -> std::io::Result<()> {
+/// Write a single rootfs entry. `with_data` is false for a non-last hardlink, whose
+/// header records `filesize = 0` and carries no content.
+fn write_entry(c: &mut Cpio, e: &Entry, new_ino: u32, with_data: bool) -> Result<(), CpioError> {
     let t = e.mode & S_IFMT;
-    let meta = fs::symlink_metadata(&e.path)?;
-    let (rmaj, rmin) = rdev_of(meta.rdev(), e.mode);
+    let (rmaj, rmin) = rdev_of(e.rdev, e.mode);
 
     let payload: Vec<u8> = if !with_data {
         Vec::new()
     } else if t == S_IFREG {
-        fs::read(&e.path)?
+        fs::read(&e.path).map_err(|err| CpioError::io(format!("reading {}", e.path.display()), err))?
     } else if t == S_IFLNK {
-        fs::read_link(&e.path)?.as_os_str().as_bytes().to_vec()
+        fs::read_link(&e.path)
+            .map_err(|err| CpioError::io(format!("reading symlink {}", e.path.display()), err))?
+            .as_os_str()
+            .as_bytes()
+            .to_vec()
     } else {
         Vec::new()
     };
 
     // GNU cpio --reproducible writes nlink=2 for every directory (it does not
-    // preserve the subdir-dependent on-disk link count); non-dirs keep their real
-    // link count (so hardlink groups carry the true count).
+    // preserve the subdirectory-dependent on-disk count); non-directories keep their
+    // real link count, so a hardlink group carries the true count.
     let nlink = if e.is_dir { 2 } else { e.nlink };
 
-    c.header(
-        new_ino,
-        e.mode,
+    let filesize = u32::try_from(payload.len())
+        .map_err(|_| CpioError::too_large(String::from_utf8_lossy(&e.name), payload.len() as u64))?;
+
+    c.header(NewcHeader {
+        ino: new_ino,
+        mode: e.mode,
         nlink,
-        BUILD_EPOCH,
-        payload.len() as u32,
-        0, // devmajor (ignore_devno)
-        0, // devminor
-        rmaj,
-        rmin,
-        &e.name,
-    );
+        mtime: BUILD_EPOCH,
+        filesize,
+        devmajor: 0,
+        devminor: 0,
+        rdevmajor: rmaj,
+        rdevminor: rmin,
+        name: &e.name,
+    });
     if !payload.is_empty() {
         c.data(&payload);
     }
     Ok(())
 }
 
-/// The device-nodes cpio segment (with its trailer + 512-pad), on its own. The
-/// kernel initramfs unpacker reads CONCATENATED newc archives, so a full
-/// initramfs can be assembled as `nodes_segment() + <base seg> + <stack seg>`
-/// (Fable Part D: a reusable base-runtime segment + a per-stack segment).
+/// The device-nodes cpio segment (with its trailer and 512-byte padding), on its
+/// own. Because the kernel unpacker reads concatenated archives, a full initramfs is
+/// assembled as `nodes_segment() + <base segment> + <stack segment>`.
 pub fn nodes_segment() -> Vec<u8> {
     let mut c = Cpio::new();
     write_nodes_segment(&mut c);
     c.out
 }
 
-/// Emit ONE rootfs tree as a standalone cpio segment (byte-sorted, uid/gid 0,
-/// dev zeroed, mtime=epoch, GNU-cpio-compatible inode renumbering + hardlink
-/// handling, trailer + 512-pad). Deterministic: identical trees -> identical
-/// bytes. Concatenate segments to form the final initramfs.
-pub fn rootfs_segment(root: &Path) -> std::io::Result<Vec<u8>> {
+/// Emit one rootfs tree as a standalone cpio segment (byte-sorted, uid/gid 0,
+/// containing device zeroed, mtime pinned, `c_ino` renumbered, GNU-cpio hardlink
+/// handling, trailer and 512-byte padding). Identical trees produce identical bytes;
+/// concatenate segments to form the final initramfs.
+///
+/// # Errors
+///
+/// Returns [`CpioError::Io`] if walking `root` or reading any file, symlink, or
+/// directory under it fails.
+pub fn rootfs_segment(root: &Path) -> Result<Vec<u8>, CpioError> {
     let mut c = Cpio::new();
     write_rootfs_segment(&mut c, root)?;
     Ok(c.out)
 }
 
-/// gzip an already-assembled (concatenated) cpio byte buffer to `out_path`,
-/// in-process via `flate2` (Move 3 Step B — replaces the host `gzip -9 -n`).
+/// gzip a concatenated cpio buffer to `out_path` at level 9, with the gzip member's
+/// mtime zeroed and no original filename — the deterministic equivalent of
+/// `gzip -n`, so identical input bytes give identical output bytes.
 ///
-/// Level 9, `mtime=0`, and no FNAME/comment in the header — the deterministic
-/// equivalent of `gzip -n`. flate2 uses its DEFAULT `miniz_oxide` (pure-Rust)
-/// backend ONLY: a zlib/zlib-ng feature would add a C build dep and break Move 1,
-/// so it must never be enabled. The emitted deflate stream differs from GNU
-/// gzip's, so the initramfs sha256 changes ONCE versus the old producer; the
-/// kernel decompresses standard deflate identically. Deterministic: identical
-/// input bytes -> identical output bytes.
-pub fn gzip_to(combined: &[u8], out_path: &Path) -> std::io::Result<()> {
+/// The compressor is `flate2`'s default pure-Rust `miniz_oxide` backend. A
+/// zlib/zlib-ng feature would add a C build dependency and must never be enabled; the
+/// kernel decompresses the standard deflate stream regardless.
+///
+/// # Errors
+///
+/// Returns [`CpioError::Io`] if `out_path` cannot be created or written.
+pub fn gzip_to(combined: &[u8], out_path: &Path) -> Result<(), CpioError> {
     use flate2::{Compression, GzBuilder};
     use std::io::Write;
-    let out_file = fs::File::create(out_path)?;
+    let out_file =
+        fs::File::create(out_path).map_err(|err| CpioError::io(format!("creating {}", out_path.display()), err))?;
     let mut enc = GzBuilder::new().mtime(0).write(out_file, Compression::new(9));
-    enc.write_all(combined)?;
-    enc.finish()?;
+    enc.write_all(combined)
+        .map_err(|err| CpioError::io(format!("writing {}", out_path.display()), err))?;
+    enc.finish()
+        .map_err(|err| CpioError::io(format!("finishing {}", out_path.display()), err))?;
     Ok(())
 }
 
@@ -329,6 +448,87 @@ pub fn gzip_to(combined: &[u8], out_path: &Path) -> std::io::Result<()> {
 mod cpio_tests {
     use super::*;
     use std::process::Command;
+
+    fn build_golden_tree(root: &Path) {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        // Pin every mode explicitly so the golden hash does not depend on the umask.
+        let chmod = |p: &Path, m: u32| {
+            fs::set_permissions(p, fs::Permissions::from_mode(m)).unwrap();
+        };
+
+        fs::create_dir_all(root.join("bin")).unwrap();
+        fs::create_dir_all(root.join("etc")).unwrap();
+        chmod(&root.join("bin"), 0o755);
+        chmod(&root.join("etc"), 0o755);
+
+        fs::write(root.join("bin/real"), b"hello\n").unwrap();
+        chmod(&root.join("bin/real"), 0o755);
+        // A hardlink group of three, exercising the reversed data-less deferral.
+        fs::hard_link(root.join("bin/real"), root.join("bin/link1")).unwrap();
+        fs::hard_link(root.join("bin/real"), root.join("bin/link2")).unwrap();
+        symlink("real", root.join("bin/sym")).unwrap();
+
+        fs::write(root.join("etc/conf"), b"k=v\n").unwrap();
+        chmod(&root.join("etc/conf"), 0o644);
+    }
+
+    #[test]
+    fn nodes_segment_golden_sha256_is_stable() {
+        let seg = nodes_segment();
+        // Byte-identity tripwire: nodes_segment() takes no filesystem input, so a
+        // change to this hash means the emitted device-node bytes changed — rebuild
+        // the golden only when that change is intended.
+        assert_eq!(
+            crate::artifact::sha256_hex(&seg),
+            "d651f3a29e0ef23ce5c60d0403500c14b6fa4d13607d77bfdec0b9f773dcc206",
+        );
+    }
+
+    #[test]
+    fn rootfs_segment_golden_sha256_is_stable() {
+        let tmp = std::env::temp_dir().join(format!("tdvmm-cpio-golden-{}", std::process::id()));
+        let root = tmp.join("root");
+        let _ = fs::remove_dir_all(&tmp);
+        build_golden_tree(&root);
+        let seg = rootfs_segment(&root).unwrap();
+        let _ = fs::remove_dir_all(&tmp);
+        // Byte-identity tripwire for the rootfs codec (sort order, inode renumbering,
+        // hardlink deferral, symlink payload). Rebuild only on an intended change.
+        assert_eq!(
+            crate::artifact::sha256_hex(&seg),
+            "c58dd5637c3dea56eecb18809340d2914904444506599daaade387f33233913c",
+        );
+    }
+
+    #[test]
+    fn gzip_to_is_deterministic_with_zero_mtime() {
+        let dir = std::env::temp_dir().join(format!("tdvmm-cpio-gzip-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let p1 = dir.join("a.gz");
+        let p2 = dir.join("b.gz");
+        let input = b"the quick brown fox jumps over the lazy dog\n".repeat(64);
+
+        gzip_to(&input, &p1).unwrap();
+        gzip_to(&input, &p2).unwrap();
+        let g1 = fs::read(&p1).unwrap();
+        let g2 = fs::read(&p2).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+
+        // Deterministic: identical input -> identical gzip bytes.
+        assert_eq!(g1, g2);
+        // The gzip member's MTIME (bytes 4..8) is zeroed, as `gzip -n` does.
+        assert_eq!(&g1[4..8], &[0, 0, 0, 0]);
+        // Round-trips through a standard inflate.
+        let mut dec = flate2::read::GzDecoder::new(&g1[..]);
+        let mut back = Vec::new();
+        std::io::Read::read_to_end(&mut dec, &mut back).unwrap();
+        assert_eq!(back, input);
+        // Byte-identity tripwire for the deflate output.
+        assert_eq!(
+            crate::artifact::sha256_hex(&g1),
+            "775fc26dce5db8c51aae4406818d9bb849ae0d402c2a1db38e7dbf6cc05ce8d2",
+        );
+    }
 
     fn oracle_rootfs_cpio(root: &Path) -> Vec<u8> {
         // find . -mindepth 1 (excl dev) -print0 | LC_ALL=C sort -z | cpio ...
@@ -368,9 +568,8 @@ mod cpio_tests {
         // an empty dir + nested
         fs::create_dir_all(root.join("var/lib")).unwrap();
 
-        // The real pipeline touches every file to the build epoch before cpio, so
-        // the oracle records epoch mtimes — match that here (our emitter writes the
-        // epoch constant unconditionally).
+        // The oracle records epoch mtimes, so touch every path to the build epoch
+        // before running it (the emitter writes the epoch constant unconditionally).
         Command::new("find")
             .arg(&root)
             .args(["-exec", "touch", "-h", "-d", "@1785542400", "{}", "+"])
@@ -388,13 +587,7 @@ mod cpio_tests {
             fs::write("scratch/oracle.cpio", &oracle).ok();
             // Localize the first difference for debugging.
             let n = mine.out.len().min(oracle.len());
-            let mut first = None;
-            for i in 0..n {
-                if mine.out[i] != oracle[i] {
-                    first = Some(i);
-                    break;
-                }
-            }
+            let first = (0..n).find(|&i| mine.out[i] != oracle[i]);
             panic!(
                 "rootfs cpio mismatch: mine={} oracle={} first_diff={:?}",
                 mine.out.len(),
