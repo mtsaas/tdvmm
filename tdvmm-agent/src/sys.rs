@@ -85,9 +85,8 @@ pub(crate) struct PollFd {
 }
 
 /// `poll(fds, nfds, timeout)` via the raw x86_64 syscall (nr 7). `timeout = -1`
-/// blocks indefinitely (no timer armed → fast-forward-transparent, exactly like the
-/// old blocked read). Returns the kernel return value (negative errno on failure).
-/// std/core only.
+/// blocks indefinitely (no timer armed → fast-forward-transparent). Returns the
+/// kernel return value (negative errno on failure). std/core only.
 ///
 /// # Safety
 ///

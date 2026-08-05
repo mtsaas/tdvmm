@@ -1,10 +1,16 @@
 //! The agent's request dispatch and container ops: ping/exec/containers/lifecycle/
 //! partition+heal/logs over podman + nft. Pure request -> reply; the transport is in
 //! `bridge`.
+//!
+//! Every podman/nft/file helper fails with a structured [`AgentError`] that keeps the
+//! underlying cause as its `source()`. Those errors are flattened to a wire `error`
+//! string only at the boundary where a [`Reply`] is built.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -17,14 +23,99 @@ use crate::{AGENT_ID, BUILD};
 const COMPOSE_SERVICE_LABEL: &str = "com.docker.compose.service";
 
 // ============================================================================
+// Errors
+// ============================================================================
+
+/// The failure modes of the agent's container/network helpers. Each variant names a
+/// genuinely distinct mode and keeps its cause as `source()` where one exists; the
+/// context-attaching constructors ([`AgentError::io`], …) ensure every error records
+/// the operation that produced it. The dispatch layer flattens these to the wire
+/// `error` string.
+#[derive(Debug)]
+pub(crate) enum AgentError {
+    /// Spawning a subprocess or reading a file failed. `what` names the operation
+    /// (e.g. `"running podman ps"`); the underlying [`io::Error`] is the `source`.
+    Io { what: String, source: io::Error },
+    /// A subprocess ran to completion but did not succeed — a non-zero exit, or a
+    /// kill after the timeout. Carries the command label, its exit `status` (`None`
+    /// when it was killed by a signal or left no code), and the captured stderr.
+    Command { what: String, status: Option<i32>, stderr: String },
+    /// A subprocess emitted output that did not parse as the expected JSON; the
+    /// [`serde_json::Error`] is the `source`.
+    Parse { what: String, source: serde_json::Error },
+    /// A subprocess succeeded but its output lacked the data we needed — an inspect
+    /// that returned no bridge IP, or an empty log path. Not corrupt data, a miss.
+    Missing { what: String },
+}
+
+impl AgentError {
+    /// An [`Io`](AgentError::Io) with `what` context attached.
+    pub(crate) fn io(what: impl Into<String>, source: io::Error) -> Self {
+        AgentError::Io { what: what.into(), source }
+    }
+    /// A [`Command`](AgentError::Command) naming the command, its exit status, and
+    /// captured stderr.
+    pub(crate) fn command(what: impl Into<String>, status: Option<i32>, stderr: impl Into<String>) -> Self {
+        AgentError::Command { what: what.into(), status, stderr: stderr.into() }
+    }
+    /// A [`Parse`](AgentError::Parse) wrapping a serde failure.
+    pub(crate) fn parse(what: impl Into<String>, source: serde_json::Error) -> Self {
+        AgentError::Parse { what: what.into(), source }
+    }
+    /// A [`Missing`](AgentError::Missing) from any displayable message.
+    pub(crate) fn missing(what: impl Into<String>) -> Self {
+        AgentError::Missing { what: what.into() }
+    }
+}
+
+impl fmt::Display for AgentError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AgentError::Io { what, source } => write!(f, "{what}: {source}"),
+            AgentError::Command { what, status, stderr } => {
+                match status {
+                    Some(code) => write!(f, "{what} exited with status {code}")?,
+                    None => write!(f, "{what} did not complete")?,
+                }
+                if !stderr.is_empty() {
+                    write!(f, ": {stderr}")?;
+                }
+                Ok(())
+            }
+            AgentError::Parse { what, source } => write!(f, "{what}: {source}"),
+            AgentError::Missing { what } => write!(f, "{what}"),
+        }
+    }
+}
+
+impl std::error::Error for AgentError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            AgentError::Io { source, .. } => Some(source),
+            AgentError::Parse { source, .. } => Some(source),
+            AgentError::Command { .. } | AgentError::Missing { .. } => None,
+        }
+    }
+}
+
+/// Which container of a service [`resolve_by_service`] should return: the running one
+/// (lifecycle / partition / logs) or a non-running one (to `start`, or to read a
+/// killed service's logs). Replaces a boolean so call sites read for themselves.
+#[derive(Clone, Copy)]
+enum Want {
+    Running,
+    Stopped,
+}
+
+// ============================================================================
 // Agent state + dispatch
 // ============================================================================
 
 pub(crate) struct Agent {
     /// Canonical unordered service-pair key -> the two container IPs to drop
     /// between. The whole nft ruleset is rebuilt from this on every change, so the
-    /// installed rules are always exactly the active set. BTreeMap => sorted keys
-    /// (deterministic ruleset, matching the Go agent's `sort.Strings`).
+    /// installed rules are always exactly the active set. The `BTreeMap` iterates in
+    /// sorted key order, so the emitted ruleset is deterministic.
     partitions: BTreeMap<String, [String; 2]>,
 }
 
@@ -71,7 +162,7 @@ impl Agent {
                 containers: Some(list),
                 ..Default::default()
             },
-            Err(e) => err(req.id, "containers", ErrorKind::PodmanPs.msg(e)),
+            Err(e) => err(req.id, "containers", ErrorKind::PodmanPs.msg(e.to_string())),
         }
     }
 
@@ -92,7 +183,7 @@ impl Agent {
                     ErrorKind::NoContainer.msg(format!("no running container for service {container}")),
                 );
             }
-            Err(e) => return err(req.id, "exec", ErrorKind::PodmanPs.msg(e)),
+            Err(e) => return err(req.id, "exec", ErrorKind::PodmanPs.msg(e.to_string())),
         };
 
         let start = Instant::now();
@@ -132,7 +223,7 @@ impl Agent {
         if container.is_empty() {
             return err(req.id, op, format!("{op} requires `container`"));
         }
-        let (id, name) = match resolve_by_service(&container, true) {
+        let (id, name) = match resolve_by_service(&container, Want::Running) {
             Ok(Some(v)) => v,
             Ok(None) => {
                 return err(
@@ -141,11 +232,10 @@ impl Agent {
                     ErrorKind::NoContainer.msg(format!("no running container for service {container}")),
                 )
             }
-            Err(e) => return err(req.id, op, ErrorKind::PodmanPs.msg(e)),
+            Err(e) => return err(req.id, op, ErrorKind::PodmanPs.msg(e.to_string())),
         };
-        let (_so, se, run) = run_podman(req.timeout_s.unwrap_or(0), &[op, &id]);
-        if let Err(e) = run {
-            return err(req.id, op, format!("podman_{op}: {e} {}", se.trim()));
+        if let Err(e) = run_podman(req.timeout_s.unwrap_or(0), &[op, &id]) {
+            return err(req.id, op, format!("podman_{op}: {e}"));
         }
         // Block until the container has actually stopped (kill does not wait; stop
         // does, but this is idempotent + cheap and makes the census deterministic).
@@ -159,11 +249,11 @@ impl Agent {
         if container.is_empty() {
             return err(req.id, "start", "start requires `container`".into());
         }
-        let (id, name) = match resolve_by_service(&container, false) {
+        let (id, name) = match resolve_by_service(&container, Want::Stopped) {
             Ok(Some(v)) => v,
             Ok(None) => {
                 // Already running? Treat as an idempotent success.
-                if let Ok(Some(_)) = resolve_by_service(&container, true) {
+                if let Ok(Some(_)) = resolve_by_service(&container, Want::Running) {
                     return ok_stdout(req.id, "start", format!("already running {container}"));
                 }
                 return err(
@@ -172,11 +262,10 @@ impl Agent {
                     ErrorKind::NoContainer.msg(format!("no stopped container for service {container}")),
                 );
             }
-            Err(e) => return err(req.id, "start", ErrorKind::PodmanPs.msg(e)),
+            Err(e) => return err(req.id, "start", ErrorKind::PodmanPs.msg(e.to_string())),
         };
-        let (_so, se, run) = run_podman(req.timeout_s.unwrap_or(0), &["start", &id]);
-        if let Err(e) = run {
-            return err(req.id, "start", format!("podman_start: {e} {}", se.trim()));
+        if let Err(e) = run_podman(req.timeout_s.unwrap_or(0), &["start", &id]) {
+            return err(req.id, "start", format!("podman_start: {e}"));
         }
         ok_stdout(req.id, "start", format!("start {container} ({name})"))
     }
@@ -192,13 +281,13 @@ impl Agent {
                 "partition requires two services (`container` and `peer`)".into(),
             );
         }
-        let aid = match resolve_by_service(&a, true) {
+        let aid = match resolve_by_service(&a, Want::Running) {
             Ok(v) => v,
-            Err(e) => return err(req.id, "partition", ErrorKind::PodmanPs.msg(e)),
+            Err(e) => return err(req.id, "partition", ErrorKind::PodmanPs.msg(e.to_string())),
         };
-        let bid = match resolve_by_service(&b, true) {
+        let bid = match resolve_by_service(&b, Want::Running) {
             Ok(v) => v,
-            Err(e) => return err(req.id, "partition", ErrorKind::PodmanPs.msg(e)),
+            Err(e) => return err(req.id, "partition", ErrorKind::PodmanPs.msg(e.to_string())),
         };
         let (aid, bid) = match (aid, bid) {
             (Some((aid, _)), Some((bid, _))) => (aid, bid),
@@ -227,7 +316,7 @@ impl Agent {
         self.partitions.insert(key.clone(), [aip.clone(), bip.clone()]);
         if let Err(e) = self.apply_partitions() {
             self.partitions.remove(&key);
-            return err(req.id, "partition", ErrorKind::Nft.msg(e));
+            return err(req.id, "partition", ErrorKind::Nft.msg(e.to_string()));
         }
         ok_stdout(
             req.id,
@@ -255,7 +344,7 @@ impl Agent {
             }
         }
         if let Err(e) = self.apply_partitions() {
-            return err(req.id, "heal", ErrorKind::Nft.msg(e));
+            return err(req.id, "heal", ErrorKind::Nft.msg(e.to_string()));
         }
         let detail = if !a.is_empty() {
             format!("heal {a} <-> {b}")
@@ -287,9 +376,9 @@ impl Agent {
 
         // Resolve service -> a container id. Prefer a running one, but fall back to
         // a stopped/exited container so a killed service's logs are still pullable.
-        let id = match resolve_by_service(&service, true) {
+        let id = match resolve_by_service(&service, Want::Running) {
             Ok(Some((id, _))) => id,
-            Ok(None) => match resolve_by_service(&service, false) {
+            Ok(None) => match resolve_by_service(&service, Want::Stopped) {
                 Ok(Some((id, _))) => id,
                 Ok(None) => {
                     return err(
@@ -298,14 +387,14 @@ impl Agent {
                         ErrorKind::NoContainer.msg(format!("no container for service {service}")),
                     )
                 }
-                Err(e) => return err(req.id, "logs", ErrorKind::PodmanPs.msg(e)),
+                Err(e) => return err(req.id, "logs", ErrorKind::PodmanPs.msg(e.to_string())),
             },
-            Err(e) => return err(req.id, "logs", ErrorKind::PodmanPs.msg(e)),
+            Err(e) => return err(req.id, "logs", ErrorKind::PodmanPs.msg(e.to_string())),
         };
 
         let log_path = match container_log_path(&id) {
             Ok(p) => p,
-            Err(e) => return err(req.id, "logs", ErrorKind::PodmanPs.msg(e)),
+            Err(e) => return err(req.id, "logs", ErrorKind::PodmanPs.msg(e.to_string())),
         };
 
         match read_log_chunk(&log_path, cursor, cap) {
@@ -318,11 +407,7 @@ impl Agent {
                 eof: Some(eof),
                 ..Default::default()
             },
-            Err(e) => err(
-                req.id,
-                "logs",
-                ErrorKind::PodmanOp.msg(format!("read log {log_path}: {e}")),
-            ),
+            Err(e) => err(req.id, "logs", ErrorKind::PodmanOp.msg(e.to_string())),
         }
     }
 
@@ -330,7 +415,7 @@ impl Agent {
     /// add/delete/add idiom gives a clean slate whether or not the table pre-
     /// existed. The chain is a default-ACCEPT forward base chain, so only our
     /// explicit drop rules matter and all other traffic falls through to netavark.
-    fn apply_partitions(&self) -> Result<(), String> {
+    fn apply_partitions(&self) -> Result<(), AgentError> {
         let mut b = String::new();
         b.push_str("add table inet tdvmm_faults\n");
         b.push_str("delete table inet tdvmm_faults\n");
@@ -353,18 +438,27 @@ impl Agent {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| e.to_string())?;
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(b.as_bytes());
-        }
-        let out = child.wait_with_output().map_err(|e| e.to_string())?;
+            .map_err(|e| AgentError::io("spawning nft", e))?;
+        // Feed the ruleset, then drop stdin so nft reads EOF and applies the
+        // transaction. Hold the write result: when the write fails it is because nft
+        // already died, and nft's own exit status and stderr below are the real
+        // diagnostic — so wait for nft regardless (which also reaps it) and surface
+        // the write error only if nft otherwise reports success.
+        let write_result = match child.stdin.take() {
+            Some(mut stdin) => stdin.write_all(b.as_bytes()),
+            None => Ok(()),
+        };
+        let out = child
+            .wait_with_output()
+            .map_err(|e| AgentError::io("waiting for nft", e))?;
         if !out.status.success() {
-            return Err(format!(
-                "exit status {}: {}",
-                out.status.code().unwrap_or(-1),
-                String::from_utf8_lossy(&out.stderr).trim()
+            return Err(AgentError::command(
+                "nft -f -",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr).trim().to_string(),
             ));
         }
+        write_result.map_err(|e| AgentError::io("writing ruleset to nft stdin", e))?;
         Ok(())
     }
 }
@@ -390,20 +484,26 @@ struct PodmanPs {
     status: String,
 }
 
-/// `podman <args>` capturing stdout; Err on spawn failure or nonzero exit.
-fn podman_json(args: &[&str]) -> Result<Vec<PodmanPs>, String> {
+/// `podman <args>` capturing stdout as a JSON array of [`PodmanPs`]. Errors on spawn
+/// failure, a non-zero exit, or output that does not parse.
+fn podman_json(args: &[&str]) -> Result<Vec<PodmanPs>, AgentError> {
     let out = Command::new("podman")
         .args(args)
         .output()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| AgentError::io(format!("running podman {}", args.join(" ")), e))?;
     if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        return Err(AgentError::command(
+            format!("podman {}", args.join(" ")),
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ));
     }
-    serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())
+    serde_json::from_slice(&out.stdout)
+        .map_err(|e| AgentError::parse(format!("parsing podman {} output", args.join(" ")), e))
 }
 
 /// `podman ps -a --format json`, normalized to the wire census shape.
-fn list_containers() -> Result<Vec<ContainerInfo>, String> {
+fn list_containers() -> Result<Vec<ContainerInfo>, AgentError> {
     let raw = podman_json(&["ps", "-a", "--format", "json"])?;
     let mut list = Vec::with_capacity(raw.len());
     for c in &raw {
@@ -432,7 +532,7 @@ fn list_containers() -> Result<Vec<ContainerInfo>, String> {
 
 /// Find a RUNNING container id + name for the given compose service (label, else
 /// a name match for single-name stacks). `Ok(None)` = not found (retryable).
-fn resolve_running(service: &str) -> Result<Option<(String, String)>, String> {
+fn resolve_running(service: &str) -> Result<Option<(String, String)>, AgentError> {
     let raw = podman_json(&["ps", "--format", "json"])?;
     for c in &raw {
         if c.state != "running" {
@@ -450,9 +550,9 @@ fn resolve_running(service: &str) -> Result<Option<(String, String)>, String> {
     Ok(None)
 }
 
-/// Find a container of the service: the first RUNNING one if `want_running`, else
+/// Find a container of the service: the first RUNNING one for [`Want::Running`], else
 /// the first NON-running one (for `start`). Matches label or name.
-fn resolve_by_service(service: &str, want_running: bool) -> Result<Option<(String, String)>, String> {
+fn resolve_by_service(service: &str, want: Want) -> Result<Option<(String, String)>, AgentError> {
     let raw = podman_json(&["ps", "-a", "--format", "json"])?;
     for c in &raw {
         let mut matched = c.labels.get(COMPOSE_SERVICE_LABEL).map(|v| v == service) == Some(true);
@@ -462,7 +562,12 @@ fn resolve_by_service(service: &str, want_running: bool) -> Result<Option<(Strin
         if !matched {
             continue;
         }
-        if (c.state == "running") == want_running {
+        let running = c.state == "running";
+        let wanted = match want {
+            Want::Running => running,
+            Want::Stopped => !running,
+        };
+        if wanted {
             return Ok(Some((c.id.clone(), c.names.first().cloned().unwrap_or_default())));
         }
     }
@@ -470,7 +575,7 @@ fn resolve_by_service(service: &str, want_running: bool) -> Result<Option<(Strin
 }
 
 /// The first bridge IP of a container.
-fn container_ip(id_or_name: &str) -> Result<String, String> {
+fn container_ip(id_or_name: &str) -> Result<String, AgentError> {
     let out = Command::new("podman")
         .args([
             "inspect",
@@ -479,23 +584,27 @@ fn container_ip(id_or_name: &str) -> Result<String, String> {
             id_or_name,
         ])
         .output()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| AgentError::io("running podman inspect", e))?;
     if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        return Err(AgentError::command(
+            "podman inspect (network IP)",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ));
     }
     for tok in String::from_utf8_lossy(&out.stdout).split_whitespace() {
         if !tok.is_empty() {
             return Ok(tok.to_string());
         }
     }
-    Err(format!("no IP for {id_or_name}"))
+    Err(AgentError::missing(format!("no bridge IP for {id_or_name}")))
 }
 
 /// The container's k8s-file log path. Podman (unlike Docker) has no top-level
 /// `.LogPath`; the k8s-file backend records the file under
 /// `.HostConfig.LogConfig.Path`. With the guest's `log_driver = "k8s-file"` this
 /// is a plain file whose lines are `<RFC3339-ts> <stdout|stderr> <F|P> <message>`.
-fn container_log_path(id_or_name: &str) -> Result<String, String> {
+fn container_log_path(id_or_name: &str) -> Result<PathBuf, AgentError> {
     let out = Command::new("podman")
         .args([
             "inspect",
@@ -504,15 +613,19 @@ fn container_log_path(id_or_name: &str) -> Result<String, String> {
             id_or_name,
         ])
         .output()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| AgentError::io("running podman inspect", e))?;
     if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        return Err(AgentError::command(
+            "podman inspect (log path)",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ));
     }
     let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if p.is_empty() {
-        return Err(format!("empty LogPath for {id_or_name}"));
+        return Err(AgentError::missing(format!("empty log path for {id_or_name}")));
     }
-    Ok(p)
+    Ok(PathBuf::from(p))
 }
 
 /// Read up to `cap` raw bytes from `path` starting at `cursor`. Returns
@@ -521,19 +634,27 @@ fn container_log_path(id_or_name: &str) -> Result<String, String> {
 /// log file (a container that has not logged yet) reads as an empty log at EOF —
 /// not an error. `next_cursor` is derived from `raw_bytes_read`, so paging stays
 /// byte-exact even though `data` is lossy UTF-8.
-pub(crate) fn read_log_chunk(path: &str, cursor: u64, cap: usize) -> std::io::Result<(String, usize, bool)> {
+pub(crate) fn read_log_chunk(
+    path: impl AsRef<Path>,
+    cursor: u64,
+    cap: usize,
+) -> Result<(String, usize, bool), AgentError> {
+    let path = path.as_ref();
     let mut f = match File::open(path) {
         Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
             return Ok((String::new(), 0, true));
         }
-        Err(e) => return Err(e),
+        Err(e) => return Err(AgentError::io(format!("opening log {}", path.display()), e)),
     };
-    f.seek(SeekFrom::Start(cursor))?;
+    f.seek(SeekFrom::Start(cursor))
+        .map_err(|e| AgentError::io(format!("seeking log {}", path.display()), e))?;
     let mut buf = vec![0u8; cap];
     let mut total = 0usize;
     while total < cap {
-        let n = f.read(&mut buf[total..])?;
+        let n = f
+            .read(&mut buf[total..])
+            .map_err(|e| AgentError::io(format!("reading log {}", path.display()), e))?;
         if n == 0 {
             break;
         }
@@ -556,22 +677,21 @@ fn enable_bridge_netfilter() {
     }
 }
 
-/// Run `podman <args>` under a timeout (guest seconds; fast-forwards), capturing
-/// stdout/stderr. Returns `(stdout, stderr, Ok/Err)`. std-only timeout: poll
-/// `try_wait`, `child.kill()` on the deadline (no libc, no raw signal syscall).
-fn run_podman(timeout_s: u64, args: &[&str]) -> (String, String, Result<(), String>) {
+/// Run `podman <args>` under a timeout (guest seconds; fast-forwards). std-only
+/// timeout: poll `try_wait` and `child.kill()` on the deadline (no libc, no raw
+/// signal syscall). The stdout/stderr pipes are drained on threads so a chatty
+/// command cannot deadlock on a full pipe while we poll. On failure the captured
+/// stderr rides along inside the [`AgentError::Command`]; stdout is not used.
+fn run_podman(timeout_s: u64, args: &[&str]) -> Result<(), AgentError> {
     let timeout = Duration::from_secs(if timeout_s == 0 { 60 } else { timeout_s });
-    let mut child = match Command::new("podman")
+    let label = || format!("podman {}", args.join(" "));
+    let mut child = Command::new("podman")
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => return (String::new(), String::new(), Err(e.to_string())),
-    };
-    // Drain the pipes on threads so a chatty command can't deadlock on a full pipe
-    // while we poll for the timeout.
+        .map_err(|e| AgentError::io(format!("spawning {}", label()), e))?;
+
     let mut so_pipe = child.stdout.take();
     let mut se_pipe = child.stderr.take();
     let so_h = std::thread::spawn(move || {
@@ -604,14 +724,13 @@ fn run_podman(timeout_s: u64, args: &[&str]) -> (String, String, Result<(), Stri
         }
     };
 
-    let so = String::from_utf8_lossy(&so_h.join().unwrap_or_default()).into_owned();
-    let se = String::from_utf8_lossy(&se_h.join().unwrap_or_default()).into_owned();
-    let res = match status {
+    // Join both drains (also reaps the stdout thread); stdout itself is discarded.
+    let _ = so_h.join();
+    let stderr = String::from_utf8_lossy(&se_h.join().unwrap_or_default()).into_owned();
+    match status {
         Some(st) if st.success() => Ok(()),
-        Some(st) => Err(format!("exit status {}", st.code().unwrap_or(-1))),
-        None => Err("timed out".to_string()),
-    };
-    (so, se, res)
+        other => Err(AgentError::command(label(), other.and_then(|st| st.code()), stderr)),
+    }
 }
 
 // ============================================================================

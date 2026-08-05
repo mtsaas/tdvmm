@@ -67,7 +67,7 @@ impl<R> Iterator for LineReader<R> {
 
 /// Block until ttyS1 and/or the (optional) event FIFO is readable; return
 /// `(control_ready, events_ready)`. Infinite timeout ⇒ no timer armed ⇒
-/// fast-forward-transparent, exactly like the former blocked read. EINTR retries.
+/// fast-forward-transparent. EINTR retries.
 fn poll2(control_fd: i32, events_fd: Option<i32>) -> io::Result<(bool, bool)> {
     let mut fds = [
         PollFd { fd: control_fd, events: POLLIN, revents: 0 },
@@ -89,7 +89,9 @@ fn poll2(control_fd: i32, events_fd: Option<i32>) -> io::Result<(bool, bool)> {
 
 /// The agent's core: multiplex ttyS1 (control) and the event FIFO under one blocked
 /// `poll`, draining each as an iterator of complete lines. Control is served before
-/// events. Control EOF/error stops the agent (as before); a FIFO hiccup never does.
+/// events. A control EOF/error stops the agent — a dead control channel mid-run is
+/// the VM reaching end of life, not an agent fault, so the stop is quiet; a FIFO
+/// hiccup never stops it.
 pub(crate) fn run_loop(control: File, events: Option<File>, writer: &mut File, agent: &mut Agent) {
     let control_fd = control.as_raw_fd();
     let events_fd = events.as_ref().map(|f| f.as_raw_fd());
@@ -107,7 +109,11 @@ pub(crate) fn run_loop(control: File, events: Option<File>, writer: &mut File, a
             match control.fill() {
                 Ok(true) => {
                     for line in control.by_ref() {
-                        handle_control_line(&line, writer, agent);
+                        // A reply that cannot be written means the control channel is
+                        // broken; stop rather than spin replying into a dead fd.
+                        if handle_control_line(&line, writer, agent).is_err() {
+                            return;
+                        }
                     }
                 }
                 _ => return, // EOF or read error on the control channel: stop.
@@ -121,28 +127,30 @@ pub(crate) fn run_loop(control: File, events: Option<File>, writer: &mut File, a
             if matches!(events.fill(), Ok(true)) {
                 for line in events.by_ref() {
                     seq += 1;
-                    write_line(writer, &Reply::from_event(seq, parse_event(&line)));
+                    // Events go out over the same control channel; a failed write
+                    // means it is broken, so stop.
+                    if write_line(writer, &Reply::from_event(seq, parse_event(&line))).is_err() {
+                        return;
+                    }
                 }
             }
         }
     }
 }
 
-/// Handle one complete control (ttyS1) line: decode a [`Request`], dispatch, reply.
-/// Byte-for-byte the former inline behavior.
-fn handle_control_line(line: &[u8], writer: &mut File, agent: &mut Agent) {
+/// Handle one complete control (ttyS1) line: decode a [`Request`], dispatch, and
+/// write the reply. An empty (whitespace-only) frame is ignored. Returns the reply
+/// write's result so the caller can stop on a broken control channel.
+fn handle_control_line(line: &[u8], writer: &mut File, agent: &mut Agent) -> io::Result<()> {
     if tdvmm_proto::trim_frame(line).is_empty() {
-        return;
+        return Ok(());
     }
     let req: Request = match decode_line(line) {
         Ok(r) => r,
-        Err(e) => {
-            write_line(writer, &bad_request(e.to_string()));
-            return;
-        }
+        Err(e) => return write_line(writer, &bad_request(e.to_string())),
     };
     let reply = agent.handle(&req);
-    write_line(writer, &reply);
+    write_line(writer, &reply)
 }
 
 fn bad_request(detail: impl AsRef<str>) -> Reply {
@@ -174,9 +182,11 @@ pub(crate) fn parse_event(line: &[u8]) -> GuestEvent {
     }
 }
 
-pub(crate) fn write_line<W: Write>(w: &mut W, reply: &Reply) {
-    if let Ok(bytes) = encode_line(reply) {
-        let _ = w.write_all(&bytes);
-        let _ = w.flush();
-    }
+/// Encode and write one framed reply line, flushing it. A serialize failure (a bug
+/// — every [`Reply`] is serializable) surfaces as an I/O error rather than being
+/// dropped, so no reply is ever silently lost.
+pub(crate) fn write_line<W: Write>(w: &mut W, reply: &Reply) -> io::Result<()> {
+    let bytes = encode_line(reply).map_err(io::Error::other)?;
+    w.write_all(&bytes)?;
+    w.flush()
 }

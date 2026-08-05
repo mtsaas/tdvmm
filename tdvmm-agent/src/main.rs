@@ -1,5 +1,4 @@
-//! `tdvmm-agent` — the guest-side control-channel executor (Rust rewrite of the
-//! former `guest/agent/main.go`, ported behavior-for-behavior).
+//! `tdvmm-agent` — the guest-side control-channel executor.
 //!
 //! A tiny STATIC (musl) binary baked into every `.tdvmm`, running OUTSIDE the
 //! workload containers. It is the guest end of the modeled control channel: the
@@ -26,6 +25,7 @@
 
 use std::fs::OpenOptions;
 use std::os::fd::AsRawFd;
+use std::process::ExitCode;
 
 use tdvmm_proto::Reply;
 
@@ -45,40 +45,44 @@ pub(crate) const BUILD: &str = match option_env!("TDVMM_AGENT_BUILD") {
     None => "dev",
 };
 
-fn main() {
+fn main() -> ExitCode {
     // The control channel is ttyS1. Open read+write; the VMM captures our TX and
     // feeds our RX at scheduled virtual times.
     let dev = std::env::var("TDVMM_AGENT_TTY").unwrap_or_else(|_| "/dev/ttyS1".to_string());
     let file = match OpenOptions::new().read(true).write(true).open(&dev) {
         Ok(f) => f,
         Err(e) => {
-            // No control channel: nothing to do. Exit quietly (no wakes).
+            // No control channel configured: nothing to do. Exit quietly (no wakes).
             eprintln!("tdvmm-agent: cannot open {dev}: {e}");
-            return;
+            return ExitCode::SUCCESS;
         }
     };
 
-    // Put ttyS1 in RAW mode. Critical: the default tty line discipline ECHOes
-    // input, which would bounce every received command straight back to the VMM
-    // as spurious "reply" bytes and desync the line-delimited protocol. Raw mode
-    // also drops canonical line-buffering and \n<->\r\n translation, so the bytes
-    // on the wire are exactly what each side wrote. VMIN=1/VTIME=0 => a read
-    // blocks until >=1 byte (no timer armed => fast-forward-transparent).
+    // Raw mode is REQUIRED, not best-effort. The default tty line discipline ECHOes
+    // input, which would bounce every received command straight back to the VMM as
+    // spurious "reply" bytes and desync the line-delimited protocol; it also does
+    // canonical line-buffering and \n<->\r\n translation, so the bytes on the wire
+    // would no longer be what each side wrote. There is no usable fallback, so a
+    // failure here is fatal. (VMIN=1/VTIME=0 => a read blocks until >=1 byte, arming
+    // no timer, so it stays fast-forward-transparent.)
     if let Err(e) = sys::set_raw(file.as_raw_fd()) {
-        eprintln!("tdvmm-agent: setRaw({dev}): errno {e}");
+        eprintln!("tdvmm-agent: cannot set raw mode on {dev}: errno {e}");
+        return ExitCode::FAILURE;
     }
 
+    // The writer half. Without it we cannot reply, so the control channel is
+    // unusable — fail loudly rather than run half-open.
     let mut writer = match file.try_clone() {
         Ok(w) => w,
         Err(e) => {
-            eprintln!("tdvmm-agent: dup {dev}: {e}");
-            return;
+            eprintln!("tdvmm-agent: cannot dup {dev}: {e}");
+            return ExitCode::FAILURE;
         }
     };
     // Event bridge (schema 3): a guest FIFO the workload containers write assertion
     // events to. O_RDWR is load-bearing — the agent's open never blocks, a container
     // `echo > fifo` never blocks, and poll never storms POLLHUP (the agent is always
-    // a writer). An absent FIFO degrades to control-only, byte-for-byte the old path.
+    // a writer). An absent FIFO degrades to control-only.
     let fifo_path = std::env::var("TDVMM_AGENT_FIFO")
         .unwrap_or_else(|_| tdvmm_proto::EVENT_FIFO_PATH.to_string());
     let fifo = match OpenOptions::new().read(true).write(true).open(&fifo_path) {
@@ -91,14 +95,18 @@ fn main() {
 
     let mut agent = Agent::new();
 
-    // Proactive hello: the VMM's harness waits for this to mark the agent ready
-    // (no ping round-trip needed). Carries schema + build (the compat oracle).
-    write_line(&mut writer, &Reply::hello(AGENT_ID, BUILD));
+    // Proactive hello: the VMM's harness waits for this to mark the agent ready (no
+    // ping round-trip needed). Carries schema + build (the compat oracle). If it
+    // cannot be written the control channel is already dead, so give up.
+    if let Err(e) = write_line(&mut writer, &Reply::hello(AGENT_ID, BUILD)) {
+        eprintln!("tdvmm-agent: cannot write hello on {dev}: {e}");
+        return ExitCode::FAILURE;
+    }
 
     // Two-source blocked poll: ttyS1 (control) + the event FIFO. An infinite-timeout
-    // poll arms no timer and generates no wakes, so fast-forward transparency is
-    // preserved exactly as the former blocked read.
+    // poll arms no timer and generates no wakes, so fast-forward transparency holds.
     run_loop(file, fifo, &mut writer, &mut agent);
+    ExitCode::SUCCESS
 }
 
 // ============================================================================
