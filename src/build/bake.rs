@@ -34,6 +34,17 @@ fn die_reject(msg: &str) -> ! {
     std::process::exit(3);
 }
 
+/// Emit the machine-readable `<sha256>  <path>` identity line (sha256sum parity,
+/// for capture/piping) on stdout — but ONLY when stdout is NOT a terminal.
+/// Interactively it just collides with the stderr progress UI, which already
+/// shows the sha; a pipe or redirect still gets the line.
+fn print_artifact_id_line(sha: &str, path: &Path) {
+    use std::io::IsTerminal;
+    if !std::io::stdout().is_terminal() {
+        println!("{sha}  {}", path.display());
+    }
+}
+
 pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     let compose_path = std::fs::canonicalize(&args.compose)
         .map_err(|_| format!("compose file not found: {}", args.compose))?;
@@ -187,10 +198,10 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
                     let size = std::fs::metadata(&out_tdvmm).map(|m| m.len()).unwrap_or(0);
                     ux.progress.print_summary(&out_tdvmm, &tdvmm_sha, size, progress.elapsed(), None);
                     progress.finish();
-                    // stdout: the artifact identity line (parity with the old pack-tdvmm.sh) —
-                    // `suspend` just runs the closure directly once the bar is finished; kept
-                    // for symmetry with the other stdout site below.
-                    ux.progress.suspend(|| println!("{tdvmm_sha}  {}", out_tdvmm.display()));
+                    // stdout: the machine-readable artifact identity line — emitted only when
+                    // stdout is piped/redirected (see print_artifact_id_line). `suspend` runs
+                    // the closure directly once the bar is finished; kept for symmetry below.
+                    ux.progress.suspend(|| print_artifact_id_line(&tdvmm_sha, &out_tdvmm));
                     return Ok(0);
                 }
                 Err(e) => {
@@ -533,12 +544,12 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     ux.progress.detail(format!("   initramfs: {}", out_initramfs.display()));
     ux.progress.detail(format!("   sha256:    {art_sha}"));
     ux.progress.detail(format!("   .tdvmm:     {} (sha256 {tdvmm_sha})", out_tdvmm.display()));
-    // stdout: the artifact identity line (parity with the old pack-tdvmm.sh) —
-    // UNCHANGED by the TTY redesign (progress/chrome is stderr-only). Routed
-    // through `suspend` so a still-ticking step-7 spinner can't interleave
-    // with this raw stdout write (the bar is cleared for the print, then
-    // redrawn) — frozen/non-TTY: `suspend` just calls the closure directly.
-    ux.progress.suspend(|| println!("{tdvmm_sha}  {}", out_tdvmm.display()));
+    // stdout: the machine-readable artifact identity line — emitted only when
+    // stdout is piped/redirected (see print_artifact_id_line); an interactive run
+    // shows the sha in the stderr summary instead. Routed through `suspend` so a
+    // still-ticking step-7 spinner can't interleave with the raw stdout write
+    // (the bar is cleared for the print, then redrawn).
+    ux.progress.suspend(|| print_artifact_id_line(&tdvmm_sha, &out_tdvmm));
 
     // --- 9. populate the bake cache (best-effort; never fails the build) ---
     ux.progress.step(8, TOTAL_STEPS, "cache");
