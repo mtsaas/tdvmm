@@ -52,6 +52,11 @@ struct RawRun {
     /// assertions bridged over the FIFO can accumulate before the verdict.
     #[serde(default)]
     until: Option<String>,
+    /// Open host-mediated egress for this scenario (SOCKS5h over COM4/ttyS3).
+    /// Precedence `scenario < flag`: `--allow-egress` can still force it on, but a
+    /// scenario opting in cannot be forced back off by the flag's absence.
+    #[serde(default)]
+    allow_egress: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -194,6 +199,9 @@ pub struct ScenarioRun {
     pub max_virtual_time: Option<String>,
     /// Wait for a guest `done` event before deciding the verdict (from `run.until`).
     pub until_done: bool,
+    /// Open host-mediated egress (from `run.allow_egress`). Resolved into
+    /// [`crate::cli::EffectiveConfig`] with precedence `scenario < flag`.
+    pub allow_egress: bool,
 }
 
 pub struct PreparedStep {
@@ -567,6 +575,7 @@ impl Scenario {
             mem: r.mem,
             ff: r.ff,
             max_virtual_time: r.max_virtual_time,
+            allow_egress: r.allow_egress,
         });
         // validate a run.max_virtual_time override up front too.
         let run = match run {

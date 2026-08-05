@@ -15,7 +15,7 @@
 
 use std::os::unix::io::RawFd;
 
-/// Which sources were ready when the park returned. Both can be true.
+/// Which sources were ready when the park returned. Any combination can be true.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Wakes {
     pub input: bool,
@@ -24,6 +24,15 @@ pub struct Wakes {
     /// this is not load-bearing (the timerfd is still drained inside `park`).
     #[allow(dead_code)]
     pub timer: bool,
+    /// Whether the `--allow-egress` backend's epoll fd signalled (a socket or the
+    /// resolver became ready). Informational, like [`Wakes::timer`]: the FF gate
+    /// and the real-wait loop re-pump the egress backend at the boundary on EVERY
+    /// wake and re-evaluate quiescence there, so servicing does not branch on this
+    /// flag — pumping unconditionally can never miss a readiness. It is asserted in
+    /// the park-wake test as direct evidence the egress wake source fires.
+    /// `false` whenever no egress fd was supplied to [`Parker::park`].
+    #[allow(dead_code)]
+    pub egress: bool,
 }
 
 pub struct Parker {
@@ -88,38 +97,53 @@ impl Parker {
         Ok(fds[0].revents & (libc::POLLIN | libc::POLLHUP) != 0)
     }
 
-    /// Sleep until console input arrives (if stdin is still open), or
-    /// `timeout_ns` from now elapses (whichever first). `None` means "no timer".
-    /// A `Some(0)` deadline is already due and returns immediately as a timer
-    /// wake. If stdin is closed and there is no timer, this blocks forever — but
-    /// an idle guest always has its next tick armed, so that does not arise.
-    pub fn park(&self, timeout_ns: Option<u64>) -> std::io::Result<Wakes> {
+    /// Sleep until console input arrives (if stdin is still open), the optional
+    /// `egress_fd` signals, or `timeout_ns` from now elapses (whichever first).
+    /// `None` timeout means "no timer". A `Some(0)` deadline is already due and
+    /// returns immediately as a timer wake. `egress_fd` is the `--allow-egress`
+    /// backend's epoll fd (`Some` only while egress is on and non-quiescent); it
+    /// is the ONE extra wake source egress adds — no new primitive, no doorbell.
+    /// If stdin is closed and there is no timer, this blocks forever — but an idle
+    /// guest always has its next tick armed, so that does not arise.
+    pub fn park(&self, timeout_ns: Option<u64>, egress_fd: Option<RawFd>) -> std::io::Result<Wakes> {
         match timeout_ns {
             Some(0) => {
                 self.disarm();
                 return Ok(Wakes {
                     input: false,
                     timer: true,
+                    egress: false,
                 });
             }
             Some(ns) => self.arm(ns),
             None => self.disarm(),
         }
 
-        // Always wait on the timerfd; add stdin only while it is open.
+        // Pack the active pollfds contiguously from index 0 (ppoll reads the first
+        // `nfds`): the timerfd is always present; stdin is added only while open;
+        // the egress epoll fd only when supplied. Remember each one's slot so the
+        // right revents are read back.
+        let zero = libc::pollfd { fd: -1, events: 0, revents: 0 };
         let mut fds = [
-            libc::pollfd {
-                fd: self.timer_fd,
-                events: libc::POLLIN,
-                revents: 0,
-            },
-            libc::pollfd {
-                fd: self.stdin_fd,
-                events: libc::POLLIN,
-                revents: 0,
-            },
+            libc::pollfd { fd: self.timer_fd, events: libc::POLLIN, revents: 0 },
+            zero,
+            zero,
         ];
-        let nfds = if self.stdin_open { 2 } else { 1 };
+        let mut nfds = 1usize;
+        let stdin_slot = if self.stdin_open {
+            fds[nfds] = libc::pollfd { fd: self.stdin_fd, events: libc::POLLIN, revents: 0 };
+            let i = nfds;
+            nfds += 1;
+            Some(i)
+        } else {
+            None
+        };
+        let egress_slot = egress_fd.map(|fd| {
+            fds[nfds] = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+            let i = nfds;
+            nfds += 1;
+            i
+        });
 
         // Block indefinitely; the armed timerfd provides the timeout. NULL
         // sigmask == leave the signal mask unchanged.
@@ -145,12 +169,16 @@ impl Parker {
         let timer = fds[0].revents & libc::POLLIN != 0;
         // POLLHUP flags a closed stdin (pipe writer gone); treat it as input so
         // the caller performs the read, sees EOF, and closes stdin for us.
-        let input =
-            self.stdin_open && (fds[1].revents & (libc::POLLIN | libc::POLLHUP)) != 0;
+        let input = stdin_slot
+            .is_some_and(|i| fds[i].revents & (libc::POLLIN | libc::POLLHUP) != 0);
+        // The egress epoll fd signals readable when any registered socket or the
+        // resolver eventfd is ready; POLLHUP/POLLERR on it also warrant a pump.
+        let egress = egress_slot
+            .is_some_and(|i| fds[i].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0);
         if timer {
             self.drain_timer();
         }
-        Ok(Wakes { input, timer })
+        Ok(Wakes { input, timer, egress })
     }
 
     fn arm(&self, ns: u64) {

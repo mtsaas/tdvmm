@@ -860,6 +860,7 @@ impl ScenarioEngine {
             scenario: self.scn.source_path.clone(),
             scenario_sha256: self.scn.source_sha256.clone(),
             fast_forward: self.meta.fast_forward,
+            egress: self.meta.egress,
             duration_wall_s: round3(wall_s),
             virtual_seconds: round3(ff.virtual_seconds),
             ff: ff.clone(),

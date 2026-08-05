@@ -63,6 +63,25 @@ pub const SERIAL_IRQ: u32 = 4;
 pub const SERIAL2_PORT_BASE: u16 = 0x2f8;
 pub const SERIAL2_IRQ: u32 = 3;
 
+/// The fourth 16550 UART (COM4 / ttyS3) — the `--allow-egress` transport.
+/// Standard PC wiring: base port 0x2e8, ISA IRQ3 — SHARED with COM2 (both are
+/// identity-routed to IO-APIC pin 3 by the MP table, so no routing change is
+/// needed). A guest-side forwarder opens ttyS3 and the host `EgressBackend`
+/// (`crate::egress`) terminates the proxied TCP. The guest kernel exposes ttyS3
+/// via `CONFIG_SERIAL_8250_NR_UARTS=4` / `RUNTIME_UARTS=4` (recorded in
+/// `guest/kernel/egress-com4.config`). COM3 (ttyS2) is intentionally left
+/// unbacked (open bus): NR_UARTS=4 is the smallest cap that includes the COM4
+/// slot. When `--allow-egress` is off, COM4 is not instantiated, 0x2e8 stays
+/// open bus, and ttyS3 never registers — byte-identical to the closed world.
+pub const SERIAL4_PORT_BASE: u16 = 0x2e8;
+/// COM4's ISA line. IRQ3 is SHARED with COM2 (ttyS1): Linux registers IRQ3 with
+/// `IRQF_SHARED` and its one 8250 handler walks the per-IRQ port chain, servicing
+/// whichever UART on the line asserted. That correctness rests on IRQ3 carrying
+/// ONLY 8250 ports (COM2 + COM4) — a non-8250 device parked on IRQ3 would not be
+/// in the 8250 chain and its edge would be lost (or spuriously acked). IRQ3 must
+/// therefore stay 8250-only; route any future device to a different line.
+pub const SERIAL4_IRQ: u32 = 3;
+
 /// POST diagnostic port (checkpoint codes). We silently swallow writes here so
 /// early-boot BIOS-style probing does not fault out.
 pub const POST_PORT: u16 = 0x80;

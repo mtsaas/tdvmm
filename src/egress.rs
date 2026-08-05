@@ -51,18 +51,15 @@
 //!
 //! ## Effects seam
 //!
-//! [`EgressBackend::pump`] takes the guest bytes newly captured from the UART and
-//! returns a [`PumpReport`]; it never touches the LAPIC. Feeding the RX FIFO and
-//! raising IRQ3 for the frames in `tx_pending` is the caller's job (the VMM
-//! wiring), which is why `pump` reports whether new frames became available
-//! toward the guest rather than delivering them itself.
-
-// The whole module is wired into the crate but called from nowhere yet. P3 is the
-// VMM integration (construction, boundary pumps, the phase gate) that consumes
-// this public surface; until then it is exercised only by this module's own tests
-// and would otherwise read as dead in a non-test build. Remove this attribute as
-// part of P3, once the backend has real call sites.
-#![allow(dead_code)]
+//! The pure [`EgressBackend`] never touches the LAPIC: [`EgressBackend::pump`]
+//! takes the guest bytes newly captured from the UART and updates the session
+//! state and `tx_pending`. Feeding the RX FIFO and raising IRQ3 for the frames in
+//! `tx_pending` is done by [`EgressChannel`] — the COM4 UART wrapper that owns the
+//! backend, mirroring how [`crate::control::ControlChannel`] wraps COM2. The
+//! channel drains only as many host→guest bytes into the FIFO as it will accept;
+//! the rest stay in `tx_pending`, so `E > 0` (non-quiescent) holds until every
+//! byte has actually been handed to the guest. All of it runs on the vCPU thread
+//! at loop boundaries (single-writer).
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
@@ -70,9 +67,16 @@ use std::io;
 use std::net::{SocketAddr, Shutdown, TcpStream, ToSocketAddrs};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use tdvmm_proto::egress::{decode, encode, EgressCodecError, EgressFrame, EgressReason, EGRESS_MAX_PAYLOAD};
+
+use crate::arch;
+use crate::ioapic::Ioapic;
+use crate::lapic::Lapic;
+use crate::serial::{self, ControlSerial, EventFdTrigger};
 
 /// Per-session host→guest flow-control window: the host buffers at most this many
 /// unsent bytes read from a socket, and stops reading (drops `EPOLLIN`) once the
@@ -318,15 +322,6 @@ enum Disposition {
     Remove,
 }
 
-/// What [`EgressBackend::pump`] made available for the caller to deliver. The
-/// backend never raises the IRQ itself (it has no LAPIC); the caller feeds the
-/// FIFO from `tx_pending` and raises IRQ3 when this reports new frames.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct PumpReport {
-    /// New frames became available toward the guest during this pump.
-    pub frames_toward_guest: bool,
-}
-
 // ============================================================================
 // The backend
 // ============================================================================
@@ -437,25 +432,44 @@ impl EgressBackend {
         self.tx_pending.drain(..take).collect()
     }
 
+    /// Return bytes taken by [`drain_to_guest`](Self::drain_to_guest) that the RX
+    /// FIFO could not accept, to the FRONT of the pending queue — so they are the
+    /// next bytes offered and, crucially, keep counting toward `tx_pending` (thus
+    /// toward `E`) until the guest actually drains room for them.
+    pub fn unshift_to_guest(&mut self, bytes: &[u8]) {
+        for &b in bytes.iter().rev() {
+            self.tx_pending.push_front(b);
+        }
+    }
+
+    /// Whether any host→guest bytes are still staged in `tx_pending`.
+    pub fn has_frames_for_guest(&self) -> bool {
+        !self.tx_pending.is_empty()
+    }
+
+    /// Count of live streams — the open-session count named in the long-gate WARN.
+    pub fn open_session_count(&self) -> usize {
+        self.sessions.len()
+    }
+
     /// The one effects function. Absorbs `from_guest` (bytes newly captured from
     /// the UART), parses whole frames, advances every session (resolve → connect →
     /// established → close), performs non-blocking socket I/O through the
     /// connector, harvests finished resolutions, and enqueues host→guest frames —
     /// applying the per-session window and resetting streams that overrun.
     ///
-    /// It never touches the LAPIC: the returned [`PumpReport`] tells the caller
-    /// whether to feed the FIFO and raise IRQ3.
+    /// It never touches the LAPIC: the caller ([`EgressChannel`]) drains
+    /// `tx_pending` into the FIFO and raises IRQ3.
     ///
     /// # Errors
     ///
     /// [`EgressError::Frame`] if the guest byte stream loses framing (the channel
     /// must then be torn down); [`EgressError::Io`] on an epoll failure.
-    pub fn pump(&mut self, from_guest: &[u8]) -> Result<PumpReport, EgressError> {
-        let before = self.tx_pending.len();
+    pub fn pump(&mut self, from_guest: &[u8]) -> Result<(), EgressError> {
         self.ingest_and_parse(from_guest)?;
         self.harvest_resolves()?;
         self.service_sessions()?;
-        Ok(PumpReport { frames_toward_guest: self.tx_pending.len() > before })
+        Ok(())
     }
 
     /// Absorb new guest bytes, split off every whole frame, and act on each.
@@ -800,6 +814,256 @@ pub fn ff_jump_allowed(egress: Option<&EgressBackend>) -> bool {
     }
 }
 
+/// The always-on phase-gate tripwire (INV-E1), asserted immediately before every
+/// `vtsc.bump_offset`. Panics — aborting the run, release included, exactly like
+/// the queue-discipline assert — if a fast-forward jump was about to skip real
+/// time while external egress state is open. Under normal operation the gating
+/// branch parks at real rate until quiescent so this never fires; it is the
+/// last-line detector that stays live even when `TDVMM_EGRESS_UNSAFE_JUMPS`
+/// disables the gate (that env skips the park, NOT this check). The message names
+/// the live quiescence terms so a breach is diagnosable from the abort alone.
+pub fn assert_ff_jump_legal(egress: Option<&EgressBackend>) {
+    assert!(
+        ff_jump_allowed(egress),
+        "egress gate breached: a fast-forward jump was about to skip real time \
+         while external egress state is open ({})",
+        egress.map(EgressBackend::state_summary).unwrap_or_default(),
+    );
+}
+
+// ============================================================================
+// EgressChannel — the COM4 / ttyS3 UART wrapper over the backend
+// ============================================================================
+
+/// After the fast-forward has been gated by egress for this long (contiguous
+/// real time), warn — the "guest is holding a connection open" signature.
+const GATE_WARN_AFTER: Duration = Duration::from_secs(30);
+/// Minimum spacing between long-gate WARNs, so a long-held connection warns
+/// periodically instead of every gated interval.
+const GATE_WARN_COOLDOWN: Duration = Duration::from_secs(30);
+
+/// Rate-limited tracker for the long-gate WARN. Telemetry only — it never affects
+/// control flow (mirrors [`crate::telemetry::FfState`]'s jump-rate WARN).
+/// `span_start` marks when the current contiguous gated stretch began; a quiescent
+/// pump clears it. The testable core is [`GateWarn::warn_at`].
+#[derive(Default)]
+struct GateWarn {
+    span_start: Option<Instant>,
+    last_warn: Option<Instant>,
+}
+
+impl GateWarn {
+    /// A gated interval just occurred: open a span if none is active.
+    fn note(&mut self, now: Instant) {
+        self.span_start.get_or_insert(now);
+    }
+
+    /// Egress went quiescent: the gated span (if any) has ended.
+    fn clear(&mut self) {
+        self.span_start = None;
+    }
+
+    /// The WARN message iff the current gated span has exceeded [`GATE_WARN_AFTER`]
+    /// and the cooldown since the last WARN has elapsed. Pure of I/O so it is
+    /// unit-testable with synthetic instants.
+    fn warn_at(&mut self, now: Instant, open_sessions: usize, gated_real_s: f64) -> Option<String> {
+        let start = *self.span_start.get_or_insert(now);
+        if now.duration_since(start) < GATE_WARN_AFTER {
+            return None;
+        }
+        let cooled = self
+            .last_warn
+            .is_none_or(|t| now.duration_since(t) >= GATE_WARN_COOLDOWN);
+        if !cooled {
+            return None;
+        }
+        self.last_warn = Some(now);
+        Some(format!(
+            "[tdvmm][WARN] fast-forward has been gated by egress for {:.0}s \
+             ({open_sessions} open session(s), {gated_real_s:.0}s real gated total) — \
+             the guest is holding a connection open; NOT stopping (bound the run with \
+             --wall-timeout / --max-virtual-time, or close the connection).",
+            now.duration_since(start).as_secs_f64(),
+        ))
+    }
+}
+
+/// The COM4 / ttyS3 device the guest talks egress over: the pure [`EgressBackend`]
+/// wrapped with a `vm-superio` 16550 UART, the exact shape
+/// [`crate::control::ControlChannel`] wraps COM2. This is the effects seam the
+/// module doc names — the backend stays LAPIC-free; this type feeds the RX FIFO
+/// and raises IRQ3. vCPU-thread-owned; every guest-visible effect happens in
+/// [`pump`](Self::pump) at a loop boundary (single-writer).
+pub struct EgressChannel {
+    backend: EgressBackend,
+    serial: ControlSerial,
+    drain: EventFdTrigger,
+    /// Guest → host captured bytes: the raw mux stream the guest wrote to ttyS3
+    /// (not line-delimited — a binary frame stream, drained whole each pump).
+    tx: Arc<Mutex<Vec<u8>>>,
+    /// `TDVMM_EGRESS_UNSAFE_JUMPS=1`: skip the phase-gate park (NOT the assert).
+    /// Read once at construction; consulted only by the FF gating branch to enable
+    /// the negative-control test that proves the always-on tripwire is live.
+    unsafe_jumps: bool,
+    gate_warn: GateWarn,
+}
+
+impl EgressChannel {
+    /// Build the COM4 channel over the real resolver + TCP connector.
+    ///
+    /// # Errors
+    ///
+    /// [`EgressError::Io`] if the backend (epoll/eventfd/resolver) or the UART
+    /// cannot be created.
+    pub fn new() -> Result<Self, EgressError> {
+        Self::wrap(EgressBackend::new()?)
+    }
+
+    /// Wrap a prebuilt backend in a fresh COM4 UART (the seam the tests use).
+    fn wrap(backend: EgressBackend) -> Result<Self, EgressError> {
+        let (serial, drain, tx) =
+            serial::new_control_serial().map_err(|e| EgressError::io("creating COM4 UART", e))?;
+        Ok(Self {
+            backend,
+            serial,
+            drain,
+            tx,
+            unsafe_jumps: std::env::var_os("TDVMM_EGRESS_UNSAFE_JUMPS").is_some(),
+            gate_warn: GateWarn::default(),
+        })
+    }
+
+    /// Whether `port` is one of COM4's eight I/O ports.
+    pub fn handles(port: u16) -> bool {
+        (arch::SERIAL4_PORT_BASE..arch::SERIAL4_PORT_BASE + 8).contains(&port)
+    }
+
+    /// Service a guest PIO write to COM4 (THR: the guest forwarder emitting a mux
+    /// frame; captured into `tx` for the next [`pump`](Self::pump)).
+    pub fn pio_write(&mut self, port: u16, byte: u8, lapic: &mut Lapic, ioapic: &Ioapic) {
+        let _ = self.serial.write((port - arch::SERIAL4_PORT_BASE) as u8, byte);
+        self.after_uart_io(lapic, ioapic);
+    }
+
+    /// Service a guest PIO read from COM4 (RBR/status: the forwarder draining the
+    /// RX FIFO or probing the UART).
+    pub fn pio_read(&mut self, port: u16, lapic: &mut Lapic, ioapic: &Ioapic) -> u8 {
+        let v = self.serial.read((port - arch::SERIAL4_PORT_BASE) as u8);
+        self.after_uart_io(lapic, ioapic);
+        v
+    }
+
+    /// After any UART register access, deliver the IRQ3 edge iff the model asserted
+    /// an interrupt — the exact COM2 discipline (`control.rs`), on the SHARED line.
+    fn after_uart_io(&mut self, lapic: &mut Lapic, ioapic: &Ioapic) {
+        if self.drain.drain().is_ok() {
+            crate::raise_irq(lapic, ioapic, arch::SERIAL4_IRQ);
+        }
+    }
+
+    /// The one boundary effects function. Absorbs what the guest wrote to ttyS3,
+    /// advances the backend (resolves, sockets, framing), then feeds as many
+    /// host→guest bytes as the RX FIFO accepts and raises IRQ3 if any moved —
+    /// modelling `control.rs`'s pump on the shared line. Bytes that do not fit stay
+    /// in the backend's `tx_pending` (so `is_quiescent()` stays false) and stream
+    /// out on later pumps as the guest drains the FIFO.
+    ///
+    /// # Errors
+    ///
+    /// [`EgressError::Frame`] if the guest's mux stream loses framing;
+    /// [`EgressError::Io`] on a backend epoll failure.
+    pub fn pump(&mut self, lapic: &mut Lapic, ioapic: &Ioapic) -> Result<(), EgressError> {
+        let from_guest = std::mem::take(&mut *self.tx.lock().unwrap());
+        self.backend.pump(&from_guest)?;
+
+        let mut sent = false;
+        loop {
+            let cap = self.serial.fifo_capacity();
+            if cap == 0 || !self.backend.has_frames_for_guest() {
+                break;
+            }
+            let chunk = self.backend.drain_to_guest(cap);
+            match self.serial.enqueue_raw_bytes(&chunk) {
+                Ok(n) if n > 0 => {
+                    if n < chunk.len() {
+                        // Partial accept: return the tail so it stays counted in
+                        // tx_pending and retries next pump. The FIFO is now full.
+                        self.backend.unshift_to_guest(&chunk[n..]);
+                        sent = true;
+                        break;
+                    }
+                    sent = true;
+                }
+                _ => {
+                    // Nothing accepted (or an error): return the whole chunk.
+                    self.backend.unshift_to_guest(&chunk);
+                    break;
+                }
+            }
+        }
+        if sent {
+            self.after_uart_io(lapic, ioapic);
+        }
+        // A quiescent pump ends the current gated span (for the long-gate WARN).
+        if self.backend.is_quiescent() {
+            self.gate_warn.clear();
+        }
+        Ok(())
+    }
+
+    // ---- the phase-gate surface (read on the vCPU thread at the park boundary) --
+
+    /// Whether egress holds no live external state (`E == 0`).
+    pub fn is_quiescent(&self) -> bool {
+        self.backend.is_quiescent()
+    }
+
+    /// The pure backend, for the always-on gate assert ([`assert_ff_jump_legal`]).
+    pub fn backend(&self) -> &EgressBackend {
+        &self.backend
+    }
+
+    /// The single epoll fd to place in the park's poll set while non-quiescent.
+    pub fn epoll_fd(&self) -> RawFd {
+        self.backend.epoll_fd()
+    }
+
+    /// A snapshot of the counters for the run report.
+    pub fn stats(&self) -> EgressStats {
+        self.backend.stats()
+    }
+
+    /// Whether `TDVMM_EGRESS_UNSAFE_JUMPS=1` is set (skip the gate park, not the
+    /// assert). Consulted only by the FF gating branch.
+    pub fn unsafe_jumps(&self) -> bool {
+        self.unsafe_jumps
+    }
+
+    /// Stamp one real-rate interval the phase gate imposed while non-quiescent, and
+    /// open the long-gate WARN span if this begins a gated stretch.
+    pub fn note_gated_interval(&mut self, real_ns: u64) {
+        self.backend.note_gated_interval(real_ns);
+        self.gate_warn.note(Instant::now());
+    }
+
+    /// Emit the rate-limited WARN if fast-forward has been gated for over 30 real
+    /// seconds contiguously, naming the open-session count.
+    pub fn maybe_warn_long_gate(&mut self) {
+        let sessions = self.backend.open_session_count();
+        let gated_real_s = self.backend.stats().gated_real_ns as f64 / 1e9;
+        if let Some(msg) = self.gate_warn.warn_at(Instant::now(), sessions, gated_real_s) {
+            crate::log_line(format_args!("{msg}"));
+        }
+    }
+
+    /// Free space in the COM4 RX FIFO (64 bytes when empty). A value below 64 means
+    /// host→guest bytes are staged for the guest to read. Test-only observer.
+    #[cfg(test)]
+    fn rx_fifo_free(&mut self) -> usize {
+        self.serial.fifo_capacity()
+    }
+}
+
 /// Copy a decoded frame out of the parse buffer into an owned form. `OPEN_OK` /
 /// `OPEN_ERR` are host→guest-only, so receiving them from the guest is flagged
 /// [`OwnedFrame::Unexpected`].
@@ -1114,8 +1378,15 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
     use std::collections::HashMap;
+    use std::io::Write as _;
+    use std::net::TcpListener;
     use std::rc::Rc;
     use tdvmm_proto::egress::EGRESS_VERSION;
+
+    use crate::control::ControlChannel;
+    use crate::ioapic::IOAPIC_BASE;
+    use crate::park::Parker;
+    use crate::vtsc::{TscFrequency, VirtualClock};
 
     // ---- the test double -----------------------------------------------------
 
@@ -1543,5 +1814,279 @@ mod tests {
         assert_eq!(answers.len(), 1);
         assert_eq!(answers[0].stream, StreamId(7));
         assert!(answers[0].addr.is_none());
+    }
+
+    // ---- T3a/T3b: the always-on gate assert (the shipped tripwire) ------------
+
+    #[test]
+    fn assert_ff_jump_legal_allows_off_and_quiescent() {
+        // Egress off (None) is always legal, and a fresh (quiescent) backend is too.
+        assert_ff_jump_legal(None);
+        let (b, _m) = setup();
+        assert_ff_jump_legal(Some(&b));
+    }
+
+    #[test]
+    #[should_panic(expected = "egress gate breached")]
+    fn assert_ff_jump_legal_panics_on_a_nonquiescent_backend() {
+        // A single open session must trip the always-on tripwire. This is T3a: the
+        // detector is a shipped test, not just a claim.
+        let (mut b, _m) = setup();
+        b.pump(&open(1)).unwrap(); // Resolving -> non-quiescent
+        assert!(!b.is_quiescent());
+        assert_ff_jump_legal(Some(&b)); // must panic
+    }
+
+    #[test]
+    #[should_panic(expected = "egress gate breached")]
+    fn t3b_a_real_open_session_trips_the_tripwire() {
+        // T3b negative control, driven HOST-side (no guest forwarder yet): a REAL
+        // TCP session to a loopback listener makes the backend non-quiescent, and
+        // the always-on assert — which fires even when TDVMM_EGRESS_UNSAFE_JUMPS
+        // skips the gate — aborts. Proves the tripwire catches a live connection.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut ch = EgressChannel::new().unwrap();
+        let mut parker = Parker::new().unwrap();
+        let (mut lapic, ioapic) = armed_pin3();
+        write_guest_frame(&mut ch, &mut lapic, &ioapic, &framed(EgressFrame::Open {
+            stream: 1,
+            port,
+            host: b"127.0.0.1",
+        }));
+        let _server = drive_to_established(&mut ch, &mut parker, &mut lapic, &ioapic, &listener);
+        assert!(!ch.is_quiescent(), "a live TCP session must be non-quiescent");
+        // The gate would normally have parked instead of reaching here; the assert
+        // is the last line even when the gate is skipped.
+        assert_ff_jump_legal(Some(ch.backend())); // must panic
+    }
+
+    // ---- the park-wake proof (host half of the chain) ------------------------
+
+    #[test]
+    fn park_wake_delivers_a_late_egress_response_through_the_epoll_fd() {
+        // The exact P2-checkpoint sequence, host side: a stream is open with NO
+        // host bytes yet, so the park blocks; a late host write makes the backend
+        // epoll fd ready; the park wakes (wakes.egress); the boundary pump frames
+        // the response into the COM4 FIFO and raises IRQ3 — ready for the guest to
+        // read. (The final guest-read hop is the P4 e2e with a real forwarder.)
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut ch = EgressChannel::new().unwrap();
+        let mut parker = Parker::new().unwrap();
+        let (mut lapic, ioapic) = armed_pin3();
+        enable_rx_irq_com4(&mut ch, &mut lapic, &ioapic);
+
+        // Guest opens a stream; drive it to Established over the loopback connect.
+        write_guest_frame(&mut ch, &mut lapic, &ioapic, &framed(EgressFrame::Open {
+            stream: 1,
+            port,
+            host: b"127.0.0.1",
+        }));
+        let server = drive_to_established(&mut ch, &mut parker, &mut lapic, &ioapic, &listener);
+        assert!(!ch.is_quiescent(), "an open session is non-quiescent (gate holds)");
+        let down_before = ch.stats().bytes_down;
+
+        // Park with the egress fd BEFORE any host bytes exist: it must NOT wake on
+        // egress (the guest would be blocked at HLT on a ttyS3 read here).
+        let w = parker.park(Some(150_000_000), Some(ch.epoll_fd())).unwrap();
+        assert!(!w.egress, "park must block until host-side bytes exist");
+
+        // Late host write: the client socket becomes readable -> epoll fd signals.
+        (&server).write_all(b"late-egress-response").unwrap();
+        let w = wait_for_egress_wake(&mut parker, ch.epoll_fd());
+        assert!(w.egress, "the backend epoll fd must wake the park");
+
+        // Boundary pump: frame the response toward the guest + feed FIFO + IRQ3.
+        ch.pump(&mut lapic, &ioapic).unwrap();
+        assert!(ch.stats().bytes_down > down_before, "pump frames the response toward the guest");
+        assert!(ch.rx_fifo_free() < 64, "the framed response is staged in the COM4 RX FIFO");
+        assert_eq!(lapic.deliverable_vector(), Some(GATE_TEST_VECTOR), "IRQ3 is raised for the guest");
+    }
+
+    // ---- concurrent COM2 + COM4 on the shared IRQ3 line ----------------------
+
+    #[test]
+    fn shared_irq3_services_both_com2_and_com4_together() {
+        // Both channels raise IRQ3 (pin 3) and both stage guest-bound bytes in one
+        // pump round — the guest's single shared 8250 handler would then poll both
+        // ttyS1 and ttyS3. The P2 spike proved them separately; this proves them
+        // serviced together from the one line.
+        let (mut lapic, ioapic) = armed_pin3();
+
+        // COM2: a control command -> its FIFO fed + IRQ3 raised. Enable its RX
+        // interrupt first (the guest agent would), so the enqueue asserts the edge.
+        let mut com2 = ControlChannel::new().unwrap();
+        com2.pio_write(crate::arch::SERIAL2_PORT_BASE + 1, 0x01, &mut lapic, &ioapic);
+        let cmd = b"{\"op\":\"ping\"}\n";
+        com2.send_frame(cmd);
+        com2.pump(&mut lapic, &ioapic);
+        assert_eq!(lapic.deliverable_vector(), Some(GATE_TEST_VECTOR), "COM2 asserts IRQ3");
+
+        // COM4: an egress stream reaches Established (OPEN_OK staged toward guest);
+        // its pump feeds the COM4 FIFO + raises the SAME IRQ3 line.
+        let mock = MockConnector::new();
+        let mut com4 = EgressChannel::wrap(
+            EgressBackend::with_connector(Box::new(mock.clone())).unwrap(),
+        )
+        .unwrap();
+        enable_rx_irq_com4(&mut com4, &mut lapic, &ioapic);
+        write_guest_frame(&mut com4, &mut lapic, &ioapic, &open(1));
+        com4.pump(&mut lapic, &ioapic).unwrap(); // dispatch resolve
+        mock.complete_resolve(1, Some(addr()));
+        com4.pump(&mut lapic, &ioapic).unwrap(); // harvest -> connect -> Established -> OPEN_OK -> FIFO + IRQ3
+
+        // The shared line is asserted and COM4's FIFO holds its guest-bound bytes.
+        assert_eq!(lapic.deliverable_vector(), Some(GATE_TEST_VECTOR), "COM4 asserts the SAME IRQ3");
+        assert!(com4.rx_fifo_free() < 64, "COM4 FIFO holds the OPEN_OK toward the guest");
+        // COM2's FIFO still holds its command (both serviced, neither clobbered):
+        // the guest's first RBR read on ttyS1 returns the command's first byte.
+        let first = com2.pio_read(crate::arch::SERIAL2_PORT_BASE, &mut lapic, &ioapic);
+        assert_eq!(first, cmd[0], "COM2 FIFO delivered its command byte to the guest");
+    }
+
+    // ---- FIFO backpressure preserves the quiescence invariant ----------------
+
+    #[test]
+    fn fifo_backpressure_keeps_undelivered_bytes_counted_in_tx_pending() {
+        // A host->guest payload larger than the 64-byte RX FIFO must NOT be dropped
+        // into a side buffer: the un-fed remainder stays in the backend's
+        // tx_pending (a quiescence term), so `E > 0` holds until the guest drains
+        // the FIFO and later pumps deliver the rest. This is the safety property
+        // that lets the channel wrap the backend without hiding host->guest bytes.
+        let (mut lapic, ioapic) = armed_pin3();
+        let mock = MockConnector::new();
+        let mut ch = EgressChannel::wrap(
+            EgressBackend::with_connector(Box::new(mock.clone())).unwrap(),
+        )
+        .unwrap();
+        write_guest_frame(&mut ch, &mut lapic, &ioapic, &open(1));
+        ch.pump(&mut lapic, &ioapic).unwrap();
+        mock.complete_resolve(1, Some(addr()));
+        ch.pump(&mut lapic, &ioapic).unwrap(); // Established (+ OPEN_OK)
+        // Drain the OPEN_OK the guest would have read, so the FIFO starts empty.
+        drain_fifo(&mut ch, &mut lapic, &ioapic);
+        // A big readable payload: framed toward the guest, far exceeding the FIFO.
+        mock.push_recv(1, &[0xAB; 4096]);
+        ch.pump(&mut lapic, &ioapic).unwrap();
+        assert_eq!(ch.rx_fifo_free(), 0, "the RX FIFO is full");
+        assert!(
+            ch.backend().has_frames_for_guest(),
+            "the un-fed remainder stays in tx_pending (E > 0), not a hidden buffer"
+        );
+        assert!(!ch.is_quiescent(), "undelivered host->guest bytes keep egress non-quiescent");
+    }
+
+    // ---- the long-gate WARN core (telemetry only) ----------------------------
+
+    #[test]
+    fn long_gate_warn_fires_after_30s_rate_limited_and_resets_on_clear() {
+        let t0 = Instant::now();
+        let mut gw = GateWarn::default();
+        gw.note(t0);
+        // Under 30s: silent.
+        assert!(gw.warn_at(t0 + Duration::from_secs(29), 1, 29.0).is_none());
+        // Past 30s: one WARN, naming the open-session count.
+        let m = gw.warn_at(t0 + Duration::from_secs(31), 2, 31.0).expect("warn at 31s");
+        assert!(m.contains("gated by egress"));
+        assert!(m.contains("2 open session"));
+        // Within the cooldown: suppressed.
+        assert!(gw.warn_at(t0 + Duration::from_secs(45), 2, 45.0).is_none());
+        // Past the cooldown: warns again.
+        assert!(gw.warn_at(t0 + Duration::from_secs(62), 2, 62.0).is_some());
+        // clear() ends the span: a fresh note starts a new 30s window (times chosen
+        // past the cooldown, so the silence is due to the span reset, not cooldown).
+        gw.clear();
+        gw.note(t0 + Duration::from_secs(120));
+        assert!(gw.warn_at(t0 + Duration::from_secs(125), 1, 125.0).is_none());
+    }
+
+    // ---- shared test scaffolding for the integration tests -------------------
+
+    /// The IO-APIC pin-3 vector the tests program, so `raise_irq(.., IRQ3)` lands a
+    /// deliverable interrupt on the enabled LAPIC.
+    const GATE_TEST_VECTOR: u8 = 0x33;
+
+    /// A LAPIC (enabled) + IO-APIC with pin 3 (IRQ3, shared COM2+COM4) programmed
+    /// to [`GATE_TEST_VECTOR`], edge, unmasked — so a raised IRQ3 is deliverable.
+    fn armed_pin3() -> (Lapic, Ioapic) {
+        let clock = VirtualClock::new(0, TscFrequency::from_hz(1_000_000_000));
+        let mut lapic = Lapic::new(clock, 160, 2);
+        // Enable the LAPIC: SVR (MMIO 0xf0) enable bit (1<<8) + a spurious vector.
+        lapic.mmio_write(0x0f0, (1 << 8) | 0xff);
+        let mut ioapic = Ioapic::new(2);
+        // Program redirection entry for pin 3 (low dword at REDTBL index 0x10+3*2).
+        let idx = 0x10 + 3 * 2;
+        ioapic.mmio_write(IOAPIC_BASE, idx);
+        ioapic.mmio_write(IOAPIC_BASE + 0x10, u32::from(GATE_TEST_VECTOR)); // vector, edge, unmasked
+        ioapic.mmio_write(IOAPIC_BASE, idx + 1);
+        ioapic.mmio_write(IOAPIC_BASE + 0x10, 0);
+        (lapic, ioapic)
+    }
+
+    /// Simulate the guest enabling COM4's RX-data-available interrupt (IER bit 0,
+    /// register offset 1) — the 8250 driver does this when it opens ttyS3. Without
+    /// it, `vm-superio` enqueues RX bytes but never asserts the interrupt, so no
+    /// IRQ3 edge is produced (the same discipline holds for COM2).
+    fn enable_rx_irq_com4(ch: &mut EgressChannel, lapic: &mut Lapic, ioapic: &Ioapic) {
+        ch.pio_write(arch::SERIAL4_PORT_BASE + 1, 0x01, lapic, ioapic);
+    }
+
+    /// Simulate the guest writing `frame` to /dev/ttyS3 byte-by-byte (THR PIO),
+    /// exactly as the forwarder would — captured for the next [`EgressChannel::pump`].
+    fn write_guest_frame(ch: &mut EgressChannel, lapic: &mut Lapic, ioapic: &Ioapic, frame: &[u8]) {
+        for &b in frame {
+            ch.pio_write(arch::SERIAL4_PORT_BASE, b, lapic, ioapic);
+        }
+    }
+
+    /// Drive an opened stream to `Established` over a real loopback connect,
+    /// returning the accepted server-side socket.
+    fn drive_to_established(
+        ch: &mut EgressChannel,
+        parker: &mut Parker,
+        lapic: &mut Lapic,
+        ioapic: &Ioapic,
+        listener: &TcpListener,
+    ) -> std::net::TcpStream {
+        listener.set_nonblocking(true).unwrap();
+        let mut server = None;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            ch.pump(lapic, ioapic).unwrap();
+            if server.is_none() {
+                if let Ok((s, _)) = listener.accept() {
+                    server = Some(s);
+                }
+            }
+            if state(ch.backend(), 1) == Some(SessionState::Established) {
+                if let Some(s) = server.take() {
+                    return s;
+                }
+            }
+            // Wait on the backend epoll fd (resolver eventfd / socket writable) so
+            // the connect completes without busy-spinning.
+            let _ = parker.park(Some(50_000_000), Some(ch.epoll_fd())).unwrap();
+        }
+        panic!("stream did not reach Established within 5s");
+    }
+
+    /// Park (with the egress fd) until an egress wake arrives, or fail after 5s.
+    fn wait_for_egress_wake(parker: &mut Parker, fd: RawFd) -> crate::park::Wakes {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            let w = parker.park(Some(200_000_000), Some(fd)).unwrap();
+            if w.egress {
+                return w;
+            }
+        }
+        panic!("egress wake never arrived");
+    }
+
+    /// Drain the COM4 RX FIFO by simulating guest RBR reads until it is empty.
+    fn drain_fifo(ch: &mut EgressChannel, lapic: &mut Lapic, ioapic: &Ioapic) {
+        while ch.rx_fifo_free() < 64 {
+            let _ = ch.pio_read(arch::SERIAL4_PORT_BASE, lapic, ioapic);
+        }
     }
 }

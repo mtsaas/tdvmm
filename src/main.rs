@@ -449,6 +449,7 @@ fn cmd_test(args: TestArgs) -> Result<i32, Box<dyn std::error::Error>> {
         stack: payload.manifest.stack.clone(),
         artifact_sha256: artifact_sha,
         fast_forward: eff.fast_forward,
+        egress: eff.allow_egress,
         jsonl_path,
         report_path,
     };
@@ -673,6 +674,20 @@ fn boot_and_run(
     // run emits it, so a harness/log can reconstruct exactly what was run and why.
     dlog!("[tdvmm] effective-config: {}", eff.provenance);
 
+    // Egress mode statement — printed ONLY when opened (so a closed-world run's
+    // startup output is byte-identical). Names the one enumerable channel + the
+    // phase-gate contract, and warns that fast-forward is now conditional.
+    if eff.allow_egress {
+        dlog!(
+            "[tdvmm] egress: ON — host-mediated SOCKS5h proxy over COM4/ttyS3 for \
+             guest-initiated TCP; no NIC, no default route (the closed-world topology \
+             is preserved — the only exit is this one channel). Fast-forward is \
+             PHASE-GATED: virtual time advances 1:1 (real rate) whenever a connection \
+             is open and only jumps once egress is quiescent. Wall-clock is the fixed \
+             baked epoch and diverges per jump (TLS/token/time-sensitive flows may fail)."
+        );
+    }
+
     // --- VM ---
     let vm = kvm.create_vm()?;
     vm.set_tss_address(arch::KVM_TSS_ADDRESS as usize)?;
@@ -731,7 +746,14 @@ fn boot_and_run(
     // register storage; no in-kernel LAPIC to program.)
 
     // --- System config (cmdline, MPTable, E820, zero page) ---
-    boot::configure_system(&guest_mem, &eff.cmdline, Some(initrd_cfg), mem_size, 1)?;
+    // Append ` tdvmm.egress=1` to the EFFECTIVE cmdline only when egress is opened,
+    // so the guest init starts the forwarder; off, the cmdline is untouched (INV-E0).
+    let cmdline = if eff.allow_egress {
+        format!("{} tdvmm.egress=1", eff.cmdline)
+    } else {
+        eff.cmdline.clone()
+    };
+    boot::configure_system(&guest_mem, &cmdline, Some(initrd_cfg), mem_size, 1)?;
 
     // --- Serial console ---
     // Under `--logs-dir`, COM1 output is teed into this shared buffer so the
@@ -755,6 +777,7 @@ fn boot_and_run(
         eff.fast_forward,
         eff.max_jump_secs,
         eff.max_virtual_time_secs,
+        eff.allow_egress,
         eff.metrics_out.clone(),
         scenario,
         logs,
@@ -790,6 +813,7 @@ fn run_user_backend(
     fast_forward: bool,
     max_jump_secs: f64,
     max_virtual_time_secs: Option<f64>,
+    allow_egress: bool,
     metrics_out: Option<String>,
     scenario_setup: Option<ScenarioSetup>,
     logs: Option<LogsCapture>,
@@ -823,6 +847,23 @@ fn run_user_backend(
     // Test control channel: the 2nd 16550 (COM2 / ttyS1). Always present so the
     // guest agent's ttyS1 always works; the scenario engine is what is optional.
     let mut com2 = control::ControlChannel::new()?;
+    // Egress transport: COM4 / ttyS3, instantiated ONLY under `--allow-egress`.
+    // When off this is `None`, the PIO dispatch never touches 0x2e8 (open bus),
+    // and the phase gate/park never see an egress fd — byte-identical to the
+    // closed world (INV-E0). When on, it owns the host-side backend + the COM4
+    // UART; the phase gate below holds fast-forward at real rate while any session
+    // is live, and the always-on assert guards every jump.
+    let mut egress: Option<egress::EgressChannel> = if allow_egress {
+        dlog!(
+            "[tdvmm] egress: COM4/ttyS3 @ {:#x} IRQ{} (shared with COM2) instantiated; \
+             fast-forward is phase-gated while a connection is open",
+            arch::SERIAL4_PORT_BASE,
+            arch::SERIAL4_IRQ
+        );
+        Some(egress::EgressChannel::new()?)
+    } else {
+        None
+    };
     // The scenario engine (only for `tdvmm test`). Built here so it has the virtual
     // clock's frequency for its cycles<->duration math.
     let mut engine: Option<scenario::ScenarioEngine> = match scenario_setup {
@@ -968,6 +1009,12 @@ fn run_user_backend(
         //      deciding the verdict). With no scenario, discard agent chatter to
         //      keep the capture buffer bounded.
         com2.pump(&mut lapic, &ioapic);
+        // Egress boundary pump (beside COM2): absorb guest mux bytes, run sockets/
+        // resolves, feed the COM4 FIFO + raise IRQ3. Same single-writer discipline
+        // as COM2. A framing error is a guest protocol violation → abort the run.
+        if let Some(eg) = egress.as_mut() {
+            eg.pump(&mut lapic, &ioapic)?;
+        }
         if let Some(e) = engine.as_mut() {
             let mut finished = false;
             while let Some(line) = com2.poll_line() {
@@ -1065,6 +1112,15 @@ fn run_user_backend(
                     for &b in data {
                         com2.pio_write(port, b, &mut lapic, &ioapic);
                     }
+                } else if let Some(eg) =
+                    egress.as_mut().filter(|_| egress::EgressChannel::handles(port))
+                {
+                    // COM4 / ttyS3 — the guest forwarder writing a mux frame. This
+                    // arm is reached only when `--allow-egress` instantiated the
+                    // channel AND the port is COM4's (else the chain falls through).
+                    for &b in data {
+                        eg.pio_write(port, b, &mut lapic, &ioapic);
+                    }
                 } else if PitStub::handles(port) {
                     for &b in data {
                         pit.write(port, b);
@@ -1092,6 +1148,14 @@ fn run_user_backend(
                     // register. Draining the RX FIFO here frees room for `pump`.
                     for b in data.iter_mut() {
                         *b = com2.pio_read(port, &mut lapic, &ioapic);
+                    }
+                } else if let Some(eg) =
+                    egress.as_mut().filter(|_| egress::EgressChannel::handles(port))
+                {
+                    // COM4 / ttyS3 — the guest forwarder reading a mux frame (RBR)
+                    // or a status/autoconfig register.
+                    for b in data.iter_mut() {
+                        *b = eg.pio_read(port, &mut lapic, &ioapic);
                     }
                 } else if PitStub::handles(port) {
                     for b in data.iter_mut() {
@@ -1191,6 +1255,7 @@ fn run_user_backend(
                     horizon_vtsc,
                     ff_state.as_mut(),
                     &mut com2,
+                    egress.as_mut(),
                     engine.as_mut(),
                 )?;
                 match outcome {
@@ -1254,16 +1319,19 @@ fn run_user_backend(
     diag.stop();
 
     let secs = start.elapsed().as_secs_f64();
+    // Egress counters snapshot for the reports (None when `--allow-egress` is off,
+    // so the summary/metrics keep their closed-world shape — INV-E0).
+    let egress_stats = egress.as_ref().map(egress::EgressChannel::stats);
     if let Some(ff) = ff_state.as_ref() {
         dlog!(
             "{}",
-            ff.human_summary(stop_reason, vtsc_start, clock.vtsc_now(), secs, hlt_count)
+            ff.human_summary(stop_reason, vtsc_start, clock.vtsc_now(), secs, hlt_count, egress_stats)
         );
 
         // Machine-parseable per-run metrics for the comparison harness.
         if let Some(path) = metrics_out.as_deref() {
             let report =
-                ff.metrics_report(stop_reason, vtsc_start, clock.vtsc_now(), secs, hlt_count);
+                ff.metrics_report(stop_reason, vtsc_start, clock.vtsc_now(), secs, hlt_count, egress_stats);
             match std::fs::write(path, &report) {
                 Ok(()) => dlog!("[tdvmm] wrote per-run metrics to {path}"),
                 Err(e) => dlog!("[tdvmm][WARN] could not write --metrics-out {path}: {e}"),
@@ -1274,6 +1342,14 @@ fn run_user_backend(
             "[tdvmm] backend stopped: {hlt_count} HLT exits over {secs:.1}s ({:.1}/s)",
             hlt_count as f64 / secs.max(0.001)
         );
+        // Egress under `--ff off` runs at real rate throughout (no gate), but still
+        // report its counters when present so the observability is symmetric.
+        if let Some(eg) = egress_stats {
+            dlog!(
+                "[tdvmm] egress: {} session(s), {} open failure(s), {}B up / {}B down",
+                eg.sessions_total, eg.opens_failed, eg.bytes_up, eg.bytes_down
+            );
+        }
         // FF off: no jumps to account for; leave a clear stub so a harness that
         // always passes --metrics-out gets a well-formed, unambiguous file.
         if let Some(path) = metrics_out.as_deref() {
@@ -1332,6 +1408,7 @@ fn run_user_backend(
                 &mut parker,
                 ff_state.as_mut(),
                 &mut com2,
+                egress.as_mut(),
                 cap,
             );
         } else {
@@ -1510,15 +1587,17 @@ fn park_until_deliverable(
     horizon: Option<u64>,
     ff: Option<&mut FfState>,
     com2: &mut control::ControlChannel,
+    egress: Option<&mut egress::EgressChannel>,
     engine: Option<&mut scenario::ScenarioEngine>,
 ) -> Result<ParkOutcome, Box<dyn std::error::Error>> {
     match ff {
         Some(ff) => fast_forward_until_deliverable(
             lapic, ioapic, events, serial, serial_drain, parker, clock, vcpu, horizon, ff, com2,
-            engine,
+            egress, engine,
         ),
         None => real_wait_until_deliverable(
-            lapic, ioapic, events, serial, serial_drain, parker, clock, horizon, com2, engine,
+            lapic, ioapic, events, serial, serial_drain, parker, clock, horizon, com2, egress,
+            engine,
         ),
     }
 }
@@ -1562,6 +1641,7 @@ fn real_wait_until_deliverable(
     clock: &VirtualClock,
     horizon: Option<u64>,
     com2: &mut control::ControlChannel,
+    mut egress: Option<&mut egress::EgressChannel>,
     mut engine: Option<&mut scenario::ScenarioEngine>,
 ) -> Result<ParkOutcome, Box<dyn std::error::Error>> {
     loop {
@@ -1573,6 +1653,13 @@ fn real_wait_until_deliverable(
         }
         if let Some(o) = park_scenario_fired(fired, now, lapic, ioapic, com2, &mut engine) {
             return Ok(o);
+        }
+        // Egress boundary pump: service sockets/resolves and feed COM4 + raise IRQ3
+        // BEFORE the deliverable check, so a just-delivered egress frame wakes the
+        // guest through the same unchanged deliverable path. FF is off here, so
+        // there is no jump to gate — egress simply runs at real rate.
+        if let Some(eg) = egress.as_deref_mut() {
+            eg.pump(lapic, ioapic)?;
         }
         if lapic.deliverable_vector().is_some() {
             return Ok(ParkOutcome::Deliverable);
@@ -1586,11 +1673,15 @@ fn real_wait_until_deliverable(
                 clock.freq().cycles_to_ns(dl - now2)
             }
         });
-        let wakes = parker.park(timeout_ns)?;
+        // Add the egress epoll fd to the park's poll set so a late socket/resolver
+        // readiness wakes the wait (the same one extra source the FF gate uses).
+        let egress_fd = egress.as_deref().map(egress::EgressChannel::epoll_fd);
+        let wakes = parker.park(timeout_ns, egress_fd)?;
         if wakes.input {
             service_console_input(parker, serial, serial_drain, lapic, ioapic);
         }
-        // A timer wake loops back: service_timers fires it and we re-check.
+        // A timer OR egress wake loops back: the boundary pump above services
+        // egress next iteration and service_timers fires any due deadline.
     }
 }
 
@@ -1612,6 +1703,7 @@ fn fast_forward_until_deliverable(
     horizon: Option<u64>,
     ff: &mut FfState,
     com2: &mut control::ControlChannel,
+    mut egress: Option<&mut egress::EgressChannel>,
     mut engine: Option<&mut scenario::ScenarioEngine>,
 ) -> Result<ParkOutcome, Box<dyn std::error::Error>> {
     loop {
@@ -1634,8 +1726,45 @@ fn fast_forward_until_deliverable(
         if let Some(o) = park_scenario_fired(fired, now, lapic, ioapic, com2, &mut engine) {
             return Ok(o);
         }
+        // Egress boundary pump (beside COM2, at the FF park boundary): service
+        // sockets/resolves, feed COM4, raise IRQ3 — BEFORE the deliverable check
+        // so a delivered egress frame wakes the guest via the unchanged path. This
+        // is the host half of the park-wake chain: a late socket readiness woke the
+        // gate park below; this pump turns it into an IRQ3 the guest services.
+        if let Some(eg) = egress.as_deref_mut() {
+            eg.pump(lapic, ioapic)?;
+        }
         if lapic.deliverable_vector().is_some() {
             return Ok(ParkOutcome::Deliverable); // unchanged wake path.
+        }
+
+        // THE PHASE GATE (INV-E1/E3). While egress holds live external state a
+        // fast-forward jump would skip real time out from under an open connection,
+        // so we must NOT jump: park at REAL rate (the SAME timeout computation as
+        // the FF-off wait, plus the egress fd) and re-evaluate at the next boundary.
+        // Quiescence is checked ONLY here — at the boundary, AFTER the full pump
+        // above — never mid-service. `TDVMM_EGRESS_UNSAFE_JUMPS=1` skips THIS park
+        // (not the always-on assert below), so the negative-control test can prove
+        // the tripwire is live.
+        if let Some(eg) = egress.as_deref_mut() {
+            if !eg.unsafe_jumps() && !eg.is_quiescent() {
+                let timeout_ns = events.peek_deadline().map(|dl| {
+                    let now2 = clock.vtsc_now();
+                    if dl <= now2 { 0 } else { clock.freq().cycles_to_ns(dl - now2) }
+                });
+                let gate_start = std::time::Instant::now();
+                let wakes = parker.park(timeout_ns, Some(eg.epoll_fd()))?;
+                if wakes.input {
+                    service_console_input(parker, serial, serial_drain, lapic, ioapic);
+                }
+                // Stamp the real-rate interval the gate imposed (feeds the report +
+                // the >30s long-gate WARN). The wake itself is serviced by the
+                // boundary pump at the top of the next iteration (after `continue`).
+                let gated_ns = gate_start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
+                eg.note_gated_interval(gated_ns);
+                eg.maybe_warn_long_gate();
+                continue;
+            }
         }
 
         // The next scheduled event decides the jump target. This is the min of
@@ -1647,8 +1776,9 @@ fn fast_forward_until_deliverable(
                 // Nothing armed and nothing deliverable: there is no virtual-time
                 // deadline to jump to. An idle guest always has its tick armed, so
                 // this is a corner case (e.g. a console-only wait). Fall back to a
-                // real wait on stdin rather than spin.
-                let wakes = parker.park(None)?;
+                // real wait on stdin (plus the egress fd) rather than spin.
+                let egress_fd = egress.as_deref().map(egress::EgressChannel::epoll_fd);
+                let wakes = parker.park(None, egress_fd)?;
                 if wakes.input {
                     service_console_input(parker, serial, serial_drain, lapic, ioapic);
                 }
@@ -1682,6 +1812,13 @@ fn fast_forward_until_deliverable(
             )
             .into());
         }
+
+        // ALWAYS-ON phase-gate assert (INV-E1), release included exactly like the
+        // queue-discipline assert below it. A jump is legal only when egress is off
+        // or quiescent. The gating branch above guarantees quiescence here under
+        // normal operation; this is the last-line tripwire — LIVE even under
+        // TDVMM_EGRESS_UNSAFE_JUMPS (which skips the gate park, not this check).
+        egress::assert_ff_jump_legal(egress.as_deref().map(egress::EgressChannel::backend));
 
         // Advance virtual time: cached offset += delta, write-through to KVM. The
         // offset is monotonically non-decreasing (delta > 0). All clock clones
@@ -1838,6 +1975,7 @@ fn capture_logs(
     parker: &mut park::Parker,
     mut ff: Option<&mut FfState>,
     com2: &mut control::ControlChannel,
+    mut egress: Option<&mut egress::EgressChannel>,
     cap: &LogsCapture,
 ) {
     use tdvmm_proto::{encode_line, Request, MAX_LOGS_CHUNK_BYTES};
@@ -1865,7 +2003,7 @@ fn capture_logs(
     let framed = encode_line(&ping).unwrap();
     match drive_until_reply(
         vcpu, doorbell, serial, serial_drain, clock, lapic, ioapic, pit, pic, events, parker,
-        ff.as_deref_mut(), com2, &framed, ping_id, horizon, wall_deadline,
+        ff.as_deref_mut(), com2, egress.as_deref_mut(), &framed, ping_id, horizon, wall_deadline,
     ) {
         Ok(Some(rep)) => match rep.schema {
             Some(s) if s >= 2 => {}
@@ -1912,7 +2050,7 @@ fn capture_logs(
             let framed = encode_line(&req).unwrap();
             match drive_until_reply(
                 vcpu, doorbell, serial, serial_drain, clock, lapic, ioapic, pit, pic, events, parker,
-                ff.as_deref_mut(), com2, &framed, id, horizon, wall_deadline,
+                ff.as_deref_mut(), com2, egress.as_deref_mut(), &framed, id, horizon, wall_deadline,
             ) {
                 Ok(Some(rep)) => {
                     if rep.ok != Some(true) {
@@ -1982,6 +2120,7 @@ fn drive_until_reply(
     parker: &mut park::Parker,
     mut ff: Option<&mut FfState>,
     com2: &mut control::ControlChannel,
+    mut egress: Option<&mut egress::EgressChannel>,
     framed: &[u8],
     want_id: u64,
     horizon: u64,
@@ -2015,6 +2154,15 @@ fn drive_until_reply(
                 }
             }
             com2.pump(lapic, ioapic);
+        }
+        // Egress boundary pump during capture: a session may still be live while we
+        // pull logs, so service it (feed COM4 + raise IRQ3) each iteration. A
+        // framing error aborts capture (Err) — never a panic. The egress fd is also
+        // in the park below, so a late readiness wakes the capture wait too.
+        if let Some(eg) = egress.as_deref_mut() {
+            if eg.pump(lapic, ioapic).is_err() {
+                return Err(());
+            }
         }
 
         // Sync TPR + inject a deliverable vector (mirrors the main loop exactly).
@@ -2135,7 +2283,7 @@ fn drive_until_reply(
                 }
                 match park_until_deliverable(
                     lapic, ioapic, events, serial, serial_drain, parker, clock, vcpu,
-                    Some(horizon), ff.as_deref_mut(), com2, None,
+                    Some(horizon), ff.as_deref_mut(), com2, egress.as_deref_mut(), None,
                 ) {
                     Ok(ParkOutcome::Deliverable) => {}
                     // The capture budget elapsed while idle: give up this request.

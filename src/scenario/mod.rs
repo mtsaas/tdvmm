@@ -150,6 +150,7 @@ pub(crate) mod testutil {
             stack: "t".into(),
             artifact_sha256: "x".into(),
             fast_forward: true,
+            egress: false,
             jsonl_path: "/dev/null".into(),
             report_path: "/dev/null".into(),
         };

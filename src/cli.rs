@@ -197,6 +197,12 @@ pub(crate) struct CommonRunFlags {
     /// Write the per-run fast-forward metrics block to this path at stop.
     #[arg(long, value_name = "PATH")]
     metrics_out: Option<String>,
+    /// Open host-mediated egress: a SOCKS5h proxy over COM4/ttyS3 for
+    /// guest-initiated TCP. Off by default (the guest stays closed-world). While a
+    /// connection is open, fast-forward is phase-gated (real-rate); the clock only
+    /// jumps once egress is quiescent. NEVER baked into an artifact.
+    #[arg(long)]
+    allow_egress: bool,
 }
 
 #[derive(Args)]
@@ -294,8 +300,14 @@ pub(crate) struct EffectiveConfig {
     pub(crate) max_jump_secs: f64,
     pub(crate) max_virtual_time_secs: Option<f64>,
     pub(crate) metrics_out: Option<String>,
+    /// Whether host-mediated egress is opened for this run. Resolved with
+    /// precedence `scenario < flag` and DELIBERATELY no baked tier — an artifact
+    /// must never gain network access merely by being re-baked (see [`resolve`]).
+    pub(crate) allow_egress: bool,
     /// The formatted per-knob provenance, e.g.
-    /// `mem=3072 (baked) ff=off (flag) horizon=36h (baked) ...`.
+    /// `mem=3072 (baked) ff=off (flag) horizon=36h (baked) ...`. Gains an
+    /// `egress=on (flag|scenario)` token ONLY when egress is opened, so a
+    /// closed-world run's line is byte-identical to before this feature.
     pub(crate) provenance: String,
 }
 
@@ -387,6 +399,24 @@ impl EffectiveConfig {
         // preamble records the proto version so a run log is self-describing.
         prov.push(format!("proto-schema={} (built-in)", tdvmm_proto::SCHEMA));
 
+        // allow-egress: precedence `scenario < flag`, with DELIBERATELY no baked
+        // tier. Egress opens the closed world to guest-initiated network I/O; an
+        // artifact must never gain that merely by being re-baked, so a baked
+        // default is intentionally unrepresentable here (there is no
+        // `RunDefaults.allow_egress` to consult). The `--allow-egress` presence
+        // flag can only turn it ON, never override a scenario's ON back to off.
+        let allow_egress = if f.allow_egress {
+            true // flag
+        } else {
+            scn.map(|s| s.allow_egress).unwrap_or(false) // scenario, else default off
+        };
+        // Provenance token ONLY when opened, so a closed-world run's line is
+        // byte-identical to before this feature (INV-E0).
+        if allow_egress {
+            let src = if f.allow_egress { "flag" } else { "scenario" };
+            prov.push(format!("egress=on ({src})"));
+        }
+
         Ok(EffectiveConfig {
             mem_mib,
             cmdline,
@@ -395,6 +425,7 @@ impl EffectiveConfig {
             max_jump_secs,
             max_virtual_time_secs,
             metrics_out: f.metrics_out.clone(),
+            allow_egress,
             provenance: prov.join(" "),
         })
     }

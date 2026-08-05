@@ -3,6 +3,7 @@
 //! the accounting struct the run loop threads through every jump — plus the
 //! machine-parseable `--metrics-out` report.
 
+use crate::egress::EgressStats;
 use crate::exit::StopReason;
 
 // ---- Δvtsc jump histogram (Step 4 instrumentation) -------------------------
@@ -359,6 +360,7 @@ impl FfState {
         vtsc_now: u64,
         real_secs: f64,
         hlt_count: u64,
+        egress: Option<EgressStats>,
     ) -> String {
         let virt_s = self.virtual_secs_since(vtsc_start, vtsc_now);
         let real_s = real_secs.max(1e-9);
@@ -419,6 +421,24 @@ impl FfState {
                 ("rate", format!("{} /s", group_digits((hlt_count as f64 / real_s) as u64))),
             ],
         );
+        // Egress (only when `--allow-egress` was on): the phase-gate accounting —
+        // how long fast-forward was held at real rate while a connection was open.
+        if let Some(eg) = egress {
+            let gated_s = eg.gated_real_ns as f64 / 1e9;
+            section(
+                &mut s,
+                "Egress (host-mediated)",
+                &[
+                    ("sessions", group_digits(eg.sessions_total)),
+                    ("opens failed", group_digits(eg.opens_failed)),
+                    ("bytes up / down", format!("{} / {}", group_digits(eg.bytes_up), group_digits(eg.bytes_down))),
+                    (
+                        "fast-forward gated",
+                        format!("{gated_s:.1} s of real time over {} interval(s)", group_digits(eg.gated_intervals)),
+                    ),
+                ],
+            );
+        }
         section(
             &mut s,
             "Where real time went",
@@ -444,6 +464,7 @@ impl FfState {
         vtsc_now: u64,
         real_secs: f64,
         hlt_count: u64,
+        egress: Option<EgressStats>,
     ) -> String {
         let virt_s = self.virtual_secs_since(vtsc_start, vtsc_now);
         let real_s = real_secs.max(1e-9);
@@ -456,9 +477,13 @@ impl FfState {
             .map(|e| e.to_string())
             .collect::<Vec<_>>()
             .join(",");
-        format!(
+        // The schema header bumps to 2 ONLY when the egress block is present, so a
+        // closed-world run's metrics file stays byte-identical at schema 1
+        // (INV-E0). A consumer keys off `key value` lines, not the schema number.
+        let schema = if egress.is_some() { 2 } else { 1 };
+        let mut report = format!(
             "# tdvmm fast-forward per-run metrics (machine-parseable; --metrics-out)\n\
-             schema 1\n\
+             schema {schema}\n\
              stop_reason {stop}\n\
              tsc_hz {tsc_hz}\n\
              real_secs {real_s:.6}\n\
@@ -496,7 +521,26 @@ impl FfState {
             hlt_pvh = hlt_count as f64 / vhours,
             labels = HIST_LABELS.join(","),
             counts = self.hist.counts_csv(),
-        )
+        );
+        // Egress block (schema 2): the phase-gate accounting. Appended only when
+        // egress was on, keeping the schema-1 closed-world file untouched.
+        if let Some(eg) = egress {
+            report.push_str(&format!(
+                "egress_sessions_total {}\n\
+                 egress_opens_failed {}\n\
+                 egress_bytes_up {}\n\
+                 egress_bytes_down {}\n\
+                 egress_gated_real_secs {:.6}\n\
+                 egress_gated_intervals {}\n",
+                eg.sessions_total,
+                eg.opens_failed,
+                eg.bytes_up,
+                eg.bytes_down,
+                eg.gated_real_ns as f64 / 1e9,
+                eg.gated_intervals,
+            ));
+        }
+        report
     }
 }
 
@@ -551,7 +595,7 @@ mod tests {
         // The Δs sum to ~50 s of the 60 s virtual span, i.e. ~83% idle skipped.
         ff.record_hop(90_000_000, std::time::Duration::from_nanos(4_800));
 
-        let out = ff.human_summary(StopReason::Horizon, 0, 60_000_000_000, 11.0, 14_539);
+        let out = ff.human_summary(StopReason::Horizon, 0, 60_000_000_000, 11.0, 14_539, None);
 
         for want in [
             "run complete",
@@ -607,9 +651,11 @@ mod tests {
         ff.record_hop(1_000_000_000, std::time::Duration::from_nanos(500));
         let start = 0u64;
         let now = 2_000_000_000u64; // 2s of virtual time elapsed
-        let out = ff.metrics_report(StopReason::Horizon, start, now, 4.0, 7);
-        // Well-formed, greppable key/value lines the harness keys off.
+        let out = ff.metrics_report(StopReason::Horizon, start, now, 4.0, 7, None);
+        // Well-formed, greppable key/value lines the harness keys off. Egress off
+        // => schema stays 1 and NO egress_* keys appear (INV-E0 metrics identity).
         assert!(out.contains("schema 1"));
+        assert!(!out.contains("egress_"), "closed-world metrics must have no egress block:\n{out}");
         assert!(out.contains("stop_reason horizon"));
         assert!(out.contains("jumps 2"));
         assert!(out.contains("virtual_secs 2.000"));
@@ -620,6 +666,21 @@ mod tests {
         // histogram row present with all nine buckets.
         assert!(out.contains("hist_counts "));
         assert_eq!(out.matches(',').count() >= 8, true);
+
+        // With egress on, the schema bumps to 2 and the egress block appears.
+        let eg = EgressStats {
+            sessions_total: 3,
+            opens_failed: 1,
+            bytes_up: 100,
+            bytes_down: 2000,
+            gated_real_ns: 1_500_000_000,
+            gated_intervals: 4,
+        };
+        let out2 = ff.metrics_report(StopReason::Horizon, start, now, 4.0, 7, Some(eg));
+        assert!(out2.contains("schema 2"), "egress on => schema 2:\n{out2}");
+        assert!(out2.contains("egress_sessions_total 3"));
+        assert!(out2.contains("egress_gated_real_secs 1.500000"));
+        assert!(out2.contains("egress_gated_intervals 4"));
     }
 
     #[test]
