@@ -45,6 +45,9 @@ struct StepState {
     label: String,
     note: Option<String>,
     items: Vec<(String, u64)>,
+    /// When this step's `step()` began; its `✓` line renders `start.elapsed()`
+    /// right-aligned as the step's wall-clock duration.
+    start: Instant,
 }
 
 /// One stepped spinner line, or a no-op (plain-line fallback). Every method is
@@ -145,8 +148,9 @@ impl Progress {
     pub fn step(&self, i: u32, n: u32, label: &str) {
         let Some(b) = &self.bar else { return };
         self.flush_current(b);
-        *self.current.borrow_mut() =
-            Some(StepState { i, n, label: label.to_string(), note: None, items: Vec::new() });
+        *self.current.borrow_mut() = Some(StepState {
+            i, n, label: label.to_string(), note: None, items: Vec::new(), start: Instant::now(),
+        });
         b.set_prefix(format!("[{i}/{n}]"));
         b.set_message(label.to_string());
         b.reset_elapsed();
@@ -200,7 +204,8 @@ impl Progress {
     }
 
     /// Persist the pending step's `✓` line (+ note / item sub-list) above the
-    /// bar, if any. A no-op if nothing is pending, or if the bar is inactive.
+    /// bar, if any, with the step's wall-clock duration right-aligned on that
+    /// `✓` line. A no-op if nothing is pending, or if the bar is inactive.
     fn flush_current(&self, b: &ProgressBar) {
         let Some(st) = self.current.borrow_mut().take() else { return };
         let width = term_width();
@@ -212,10 +217,10 @@ impl Progress {
             Some(note) => format!("[{}/{}] {:<LABEL_COL$}{note}", st.i, st.n, st.label),
             None => format!("[{}/{}] {}", st.i, st.n, st.label),
         };
-        // "  " + the mark (1 visible column) + " " = 4 fixed visible columns;
-        // clamp only the plain (colorless) remainder so an ANSI escape is
-        // never split mid-sequence.
-        let mut out = format!("  {mark} {}", clamp(&plain, width.saturating_sub(4)));
+        // Wall time between this step's `step()` and now, right-aligned on this
+        // step's OWN `✓` line — never on the item sub-lines appended below.
+        let dur = human_duration(st.start.elapsed());
+        let mut out = render_step_line(mark, &plain, &dur, width);
         if !st.items.is_empty() {
             let name_w = st.items.iter().map(|(n, _)| n.chars().count()).max().unwrap_or(0) + 4;
             let vals: Vec<String> = st.items.iter().map(|(_, mib)| human_size_short(*mib)).collect();
@@ -340,6 +345,27 @@ fn clamp_lines(s: &str, max: usize) -> String {
     s.lines().map(|l| clamp(l, max)).collect::<Vec<_>>().join("\n")
 }
 
+/// The persistent `  ✓ [i/n] label [note]` line, with `dur` right-aligned to
+/// the terminal `width` (buildkit-style). The 4 fixed leading columns (`"  "` +
+/// the 1-visible-column `mark` + `" "`) plus the clamped, colorless `plain`
+/// remainder never overflow `width`; only `plain` is clamped, so a colored
+/// `mark`'s ANSI escape is never split. `dur` is reserved its own width plus a
+/// one-space minimum gap flush at the right edge; when `plain` is shorter, the
+/// gap grows so `dur` still lands at column `width`. Narrow terminals degrade
+/// gracefully: `plain` shrinks to whatever remains, and if even the mark + gap
+/// + `dur` won't fit, `dur` is dropped rather than wrapping the line.
+fn render_step_line(mark: &str, plain: &str, dur: &str, width: usize) -> String {
+    const PREFIX: usize = 4;
+    let dur_len = dur.chars().count();
+    let left_budget = width.saturating_sub(dur_len + 1);
+    if left_budget <= PREFIX {
+        return format!("  {mark} {}", clamp(plain, width.saturating_sub(PREFIX)));
+    }
+    let plain = clamp(plain, left_budget - PREFIX);
+    let gap = width.saturating_sub(PREFIX + plain.chars().count() + dur_len).max(1);
+    format!("  {mark} {plain}{pad}{dur}", pad = " ".repeat(gap))
+}
+
 /// Render an absolute path relative to the CWD, or `~/…` under `$HOME`, else
 /// the path as-is. TTY display only — NEVER used for stdout, the diagnostics
 /// file (which keeps full absolute paths), or anything hashed.
@@ -391,12 +417,15 @@ fn human_size(bytes: u64) -> String {
     }
 }
 
-/// `1m26s` / `12s`.
+/// `1m26s` / `12.3s` / `0.4s` — reused for BOTH each step's right-aligned
+/// duration and the final summary's `time` field, so the two always agree.
+/// Sub-minute renders one decimal (`0.4s`); a minute or more is whole seconds
+/// (`1m26s`), where the fractional part is noise.
 fn human_duration(d: Duration) -> String {
     let secs = d.as_secs();
     if secs >= 60 {
         format!("{}m{:02}s", secs / 60, secs % 60)
     } else {
-        format!("{secs}s")
+        format!("{:.1}s", d.as_secs_f64())
     }
 }
