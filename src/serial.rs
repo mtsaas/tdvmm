@@ -6,11 +6,16 @@
 //! single-writer invariant holds — there is no off-thread input source.
 
 use std::io::Write;
+use std::os::unix::io::RawFd;
 use std::sync::{Arc, Mutex};
 
 use vm_superio::serial::NoEvents;
 use vm_superio::{Serial, Trigger};
 use vmm_sys_util::eventfd::{EventFd, EFD_NONBLOCK};
+
+/// A shared byte buffer a UART sink appends to on the vCPU thread and a reader
+/// (console scanner / scenario harness) drains elsewhere.
+pub type SharedBuf = Arc<Mutex<Vec<u8>>>;
 
 /// A `vm-superio` `Trigger` backed by an eventfd. When the UART model wants to
 /// raise an interrupt it writes the eventfd; the vCPU thread drains it after
@@ -52,12 +57,12 @@ const CONSOLE_TEE_CAP: usize = 1 << 20;
 /// stream on stdout is byte-identical whether or not a tee is attached — the
 /// "clean machine output" invariant holds by construction.
 pub struct ConsoleOut {
-    tee: Option<Arc<Mutex<Vec<u8>>>>,
+    tee: Option<SharedBuf>,
     /// One-shot: an overflow warns once, not per byte.
     overflowed: bool,
 }
 impl ConsoleOut {
-    pub fn new(tee: Option<Arc<Mutex<Vec<u8>>>>) -> Self {
+    pub fn new(tee: Option<SharedBuf>) -> Self {
         Self {
             tee,
             overflowed: false,
@@ -68,7 +73,9 @@ impl Write for ConsoleOut {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         // Passthrough FIRST; its result is what we return.
         // SAFETY: fd 1 is valid; buf points to `buf.len()` readable bytes.
-        let n = unsafe { libc::write(1, buf.as_ptr() as *const libc::c_void, buf.len()) };
+        let n = unsafe {
+            libc::write(libc::STDOUT_FILENO, buf.as_ptr() as *const libc::c_void, buf.len())
+        };
         if n < 0 {
             return Err(std::io::Error::last_os_error());
         }
@@ -100,7 +107,7 @@ impl Write for ConsoleOut {
 /// environment. `RawTerminal::enable` already gates on the same signal.
 pub fn stdin_is_tty() -> bool {
     // SAFETY: isatty just queries an fd; fd 0 is always valid to query.
-    unsafe { libc::isatty(0) == 1 }
+    unsafe { libc::isatty(libc::STDIN_FILENO) == 1 }
 }
 
 /// Whether `port` is one of COM1's (ttyS0) 8 legacy 16550 PIO registers.
@@ -115,7 +122,7 @@ pub type SharedSerial = Arc<Mutex<Serial<EventFdTrigger, NoEvents, ConsoleOut>>>
 /// `--logs-dir` (COM1 output is copied into it for the console scanner);
 /// `None` is exactly the plain stdout passthrough.
 pub fn new_serial(
-    tee: Option<Arc<Mutex<Vec<u8>>>>,
+    tee: Option<SharedBuf>,
 ) -> std::io::Result<(SharedSerial, EventFdTrigger)> {
     let trigger = EventFdTrigger::new()?;
     let drain_handle = trigger.try_clone()?;
@@ -131,10 +138,10 @@ pub fn new_serial(
 /// vCPU thread; the `Arc<Mutex<..>>` mirrors the COM1 handle shape and is cheap
 /// (tiny traffic).
 pub struct ControlSink {
-    buf: Arc<Mutex<Vec<u8>>>,
+    buf: SharedBuf,
 }
 impl ControlSink {
-    pub fn new(buf: Arc<Mutex<Vec<u8>>>) -> Self {
+    pub fn new(buf: SharedBuf) -> Self {
         Self { buf }
     }
 }
@@ -154,8 +161,7 @@ pub type ControlSerial = Serial<EventFdTrigger, NoEvents, ControlSink>;
 /// Build the control-channel UART (COM2 / ttyS1). Returns the UART, a clone of
 /// its interrupt eventfd (drained on the vCPU thread to convert into IRQ3), and
 /// the shared TX-capture buffer the harness reads replies from.
-pub fn new_control_serial(
-) -> std::io::Result<(ControlSerial, EventFdTrigger, Arc<Mutex<Vec<u8>>>)> {
+pub fn new_control_serial() -> std::io::Result<(ControlSerial, EventFdTrigger, SharedBuf)> {
     let trigger = EventFdTrigger::new()?;
     let drain = trigger.try_clone()?;
     let buf = Arc::new(Mutex::new(Vec::new()));
@@ -166,7 +172,7 @@ pub fn new_control_serial(
 /// Restores terminal settings on drop; puts the tty in raw mode so guest
 /// keystrokes pass through unmodified (no host echo/canonical processing).
 pub struct RawTerminal {
-    fd: i32,
+    fd: RawFd,
     original: Option<libc::termios>,
 }
 
@@ -180,7 +186,7 @@ impl RawTerminal {
         self.original.is_some()
     }
 
-    pub fn enable(fd: i32) -> Self {
+    pub fn enable(fd: RawFd) -> Self {
         // SAFETY: querying/modifying termios on a valid fd.
         unsafe {
             if libc::isatty(fd) != 1 {

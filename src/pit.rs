@@ -42,12 +42,16 @@ use crate::vtsc::{TscFrequency, VirtualClock};
 pub const PIT_FREQ_HZ: u64 = 1_193_182;
 
 const PIT_CH0: u16 = 0x40;
+const PIT_CH1: u16 = 0x41;
 const PIT_CH2: u16 = 0x42;
 const PIT_CTRL: u16 = 0x43;
 const ELCR_MASTER: u16 = 0x4d0;
 const ELCR_SLAVE: u16 = 0x4d1;
 
 /// PIT counter read/write access mode (control-word bits 5:4).
+// Variant names follow the 8254 datasheet ("lobyte only" / "hibyte only" /
+// "lobyte/hibyte"); the shared suffix is the domain term, not noise.
+#[allow(clippy::enum_variant_names)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AccessMode {
     LoByte,
@@ -216,7 +220,7 @@ impl PitStub {
     fn read_at(&mut self, port: u16, now: u64) -> u8 {
         let freq = self.clock.freq();
         match port {
-            PIT_CH0 | 0x41 | PIT_CH2 => {
+            PIT_CH0 | PIT_CH1 | PIT_CH2 => {
                 let idx = (port - PIT_CH0) as usize;
                 self.channels[idx].read_byte(now, freq)
             }
@@ -230,7 +234,7 @@ impl PitStub {
     fn write_at(&mut self, port: u16, value: u8, now: u64) {
         let freq = self.clock.freq();
         match port {
-            PIT_CH0 | 0x41 | PIT_CH2 => {
+            PIT_CH0 | PIT_CH1 | PIT_CH2 => {
                 let idx = (port - PIT_CH0) as usize;
                 self.channels[idx].write_byte(value, now);
             }

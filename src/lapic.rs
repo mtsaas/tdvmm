@@ -165,14 +165,15 @@ impl VecBits {
     }
     /// Highest set vector, or `None` if empty.
     fn highest(&self) -> Option<u8> {
-        for i in (0..8).rev() {
-            let w = self.words[i];
-            if w != 0 {
+        self.words
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|&(_, &w)| w != 0)
+            .map(|(i, &w)| {
                 let bit = 31 - w.leading_zeros();
-                return Some((i as u8) * 32 + bit as u8);
-            }
-        }
-        None
+                (i as u8) * 32 + bit as u8
+            })
     }
 }
 
@@ -263,10 +264,7 @@ impl Lapic {
     /// with `mov %cr8`; CR8 == TPR>>4). MMIO TPR writes go the other way (we push
     /// `tpr>>4` back into `run->cr8` before each entry, see main.rs).
     pub fn sync_tpr_from_cr8(&mut self, cr8: u64) {
-        let tpr = ((cr8 & 0xf) as u32) << 4;
-        if tpr != self.tpr {
-            self.tpr = tpr;
-        }
+        self.tpr = ((cr8 & 0xf) as u32) << 4;
     }
 
     // ---- priority / delivery (textbook PPR) --------------------------------
@@ -387,11 +385,11 @@ impl Lapic {
                 log_unsupported("remote-read register (RRD)", format_args!("read"));
                 0
             }
-            o if (REG_ISR0..REG_ISR0 + 0x80).contains(&o) && o % 0x10 == 0 => {
+            o if (REG_ISR0..REG_ISR0 + 0x80).contains(&o) && o.is_multiple_of(0x10) => {
                 self.isr.words[((o - REG_ISR0) / 0x10) as usize]
             }
-            o if (REG_TMR0..REG_TMR0 + 0x80).contains(&o) && o % 0x10 == 0 => 0, // all edge
-            o if (REG_IRR0..REG_IRR0 + 0x80).contains(&o) && o % 0x10 == 0 => {
+            o if (REG_TMR0..REG_TMR0 + 0x80).contains(&o) && o.is_multiple_of(0x10) => 0, // all edge
+            o if (REG_IRR0..REG_IRR0 + 0x80).contains(&o) && o.is_multiple_of(0x10) => {
                 self.irr.words[((o - REG_IRR0) / 0x10) as usize]
             }
             _ => 0,
@@ -452,7 +450,7 @@ impl Lapic {
         // field destination also resolves to us (accept-all). all-excl-self
         // (3) targets nobody here.
         match dest_shorthand {
-            0 | 1 | 2 => self.raise(vector),
+            0..=2 => self.raise(vector),
             3 => {}
             _ => unreachable!(),
         }

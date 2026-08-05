@@ -152,10 +152,10 @@ const fn size<T>() -> u64 {
 fn mp_size(num_cpus: u8) -> u64 {
     size::<MpfIntel>()
         + size::<MpcTable>()
-        + size::<MpcCpu>() * num_cpus as u64
+        + size::<MpcCpu>() * u64::from(num_cpus)
         + size::<MpcIoapic>()
         + size::<MpcBus>()
-        + size::<MpcIntsrc>() * (GSI_LEGACY_END as u64 + 1)
+        + size::<MpcIntsrc>() * (u64::from(GSI_LEGACY_END) + 1)
         + size::<MpcLintsrc>() * 2
 }
 

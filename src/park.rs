@@ -53,7 +53,7 @@ impl Parker {
         }
         Ok(Self {
             timer_fd: fd,
-            stdin_fd: 0,
+            stdin_fd: libc::STDIN_FILENO,
             stdin_open: true,
         })
     }
@@ -190,8 +190,9 @@ impl Parker {
     }
 
     fn disarm(&self) {
-        let spec: libc::itimerspec = unsafe { std::mem::zeroed() };
-        // SAFETY: valid fd; zeroed it_value disarms the timer.
+        let zero = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        let spec = libc::itimerspec { it_interval: zero, it_value: zero };
+        // SAFETY: valid fd; a zero it_value disarms the timer.
         unsafe {
             libc::timerfd_settime(self.timer_fd, 0, &spec, std::ptr::null_mut());
         }

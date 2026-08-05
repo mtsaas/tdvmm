@@ -99,13 +99,13 @@ fn add_e820_entry(
     size: u64,
     mem_type: u32,
 ) -> Result<(), BootError> {
-    let idx = params.e820_entries as usize;
-    if idx >= params.e820_table.len() {
+    let idx = usize::from(params.e820_entries);
+    let Some(entry) = params.e820_table.get_mut(idx) else {
         return Err(BootError("too many E820 entries".into()));
-    }
-    params.e820_table[idx].addr = addr;
-    params.e820_table[idx].size = size;
-    params.e820_table[idx].r#type = mem_type;
+    };
+    entry.addr = addr;
+    entry.size = size;
+    entry.r#type = mem_type;
     params.e820_entries += 1;
     Ok(())
 }

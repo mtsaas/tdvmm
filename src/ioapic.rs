@@ -27,6 +27,8 @@ const IOAPIC_REG_ID: u32 = 0x00;
 const IOAPIC_REG_VER: u32 = 0x01;
 const IOAPIC_REG_ARB: u32 = 0x02;
 const IOAPIC_REG_REDTBL_BASE: u32 = 0x10;
+// One past the last redirection-table register (two 32-bit registers per RTE).
+const IOAPIC_REG_REDTBL_END: u32 = IOAPIC_REG_REDTBL_BASE + (NUM_RTES as u32) * 2;
 
 // RTE field bits (low dword).
 const RTE_MASK: u64 = 1 << 16;
@@ -82,13 +84,11 @@ impl Ioapic {
             IOAPIC_REG_ID => self.id,
             IOAPIC_REG_VER => IOAPIC_VERSION,
             IOAPIC_REG_ARB => self.id,
-            i if (IOAPIC_REG_REDTBL_BASE..IOAPIC_REG_REDTBL_BASE + (NUM_RTES as u32) * 2)
-                .contains(&i) =>
-            {
+            i if (IOAPIC_REG_REDTBL_BASE..IOAPIC_REG_REDTBL_END).contains(&i) => {
                 let rel = i - IOAPIC_REG_REDTBL_BASE;
                 let entry = (rel / 2) as usize;
                 let rte = self.redtbl[entry];
-                if rel % 2 == 0 {
+                if rel.is_multiple_of(2) {
                     rte as u32
                 } else {
                     (rte >> 32) as u32
@@ -102,13 +102,11 @@ impl Ioapic {
         match index {
             IOAPIC_REG_ID => self.id = val & 0x0f00_0000,
             IOAPIC_REG_VER | IOAPIC_REG_ARB => { /* read-only */ }
-            i if (IOAPIC_REG_REDTBL_BASE..IOAPIC_REG_REDTBL_BASE + (NUM_RTES as u32) * 2)
-                .contains(&i) =>
-            {
+            i if (IOAPIC_REG_REDTBL_BASE..IOAPIC_REG_REDTBL_END).contains(&i) => {
                 let rel = i - IOAPIC_REG_REDTBL_BASE;
                 let entry = (rel / 2) as usize;
                 let rte = &mut self.redtbl[entry];
-                if rel % 2 == 0 {
+                if rel.is_multiple_of(2) {
                     *rte = (*rte & 0xffff_ffff_0000_0000) | u64::from(val);
                 } else {
                     *rte = (*rte & 0x0000_0000_ffff_ffff) | (u64::from(val) << 32);
