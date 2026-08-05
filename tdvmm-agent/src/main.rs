@@ -31,6 +31,7 @@ use tdvmm_proto::Reply;
 
 mod agent;
 mod bridge;
+mod forwarder;
 mod sys;
 
 use agent::Agent;
@@ -46,6 +47,13 @@ pub(crate) const BUILD: &str = match option_env!("TDVMM_AGENT_BUILD") {
 };
 
 fn main() -> ExitCode {
+    // `tdvmm-agent forward` runs the egress SOCKS5h forwarder (COM4/ttyS3) instead
+    // of the control-channel loop. The guest init starts it as a SEPARATE process
+    // only on `tdvmm.egress=1`, so the default (no arg) path is unchanged.
+    if std::env::args().nth(1).as_deref() == Some("forward") {
+        return forwarder::run();
+    }
+
     // The control channel is ttyS1. Open read+write; the VMM captures our TX and
     // feeds our RX at scheduled virtual times.
     let dev = std::env::var("TDVMM_AGENT_TTY").unwrap_or_else(|_| "/dev/ttyS1".to_string());
