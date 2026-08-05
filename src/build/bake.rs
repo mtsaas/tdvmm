@@ -54,13 +54,11 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
         .unwrap();
     let validated = match compose::validate(&doc, &compose_path) {
         Ok(v) => v,
+        // Reject is the loud out-of-subset gate (exit 3); Io/Internal are exit 2.
+        Err(compose::ValidateError::Reject(msg)) => die_reject(&msg),
         Err(e) => {
-            if e.exit_code == 3 {
-                die_reject(&e.message);
-            } else {
-                eprintln!("TDVMM_BAKE_ERROR: {}", e.message);
-                std::process::exit(2);
-            }
+            eprintln!("TDVMM_BAKE_ERROR: {e}");
+            std::process::exit(2);
         }
     };
     for w in &validated.warnings {
@@ -335,8 +333,13 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
         digests.insert(k.clone(), pin.clone());
     }
     let binds_base = "/var/lib/tdvmm-stack/binds";
-    let lock = compose::emit_lock(&doc, &compose_path, &digests, binds_base, &project)
-        .map_err(|e| e.message)?;
+    let lock = compose::emit_lock(compose::EmitLockRequest {
+        doc: &doc,
+        compose_path: &compose_path,
+        digests: &digests,
+        binds_base,
+        project: &project,
+    })?;
     let lock_path = work.join("compose.lock.yml");
     std::fs::write(&lock_path, &lock.lock_yaml)?;
     let lock_sha = sha256_file_hex(&lock_path)?;
