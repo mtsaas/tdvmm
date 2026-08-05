@@ -27,6 +27,21 @@ const HIST_LABELS: [&str; 9] = [
     "<1us", "<10us", "<100us", "<1ms", "<10ms", "<100ms", "<1s", "<10s", ">=10s",
 ];
 
+/// Group a non-negative integer with thousands separators for the human summary
+/// (`14513` -> `14,513`).
+fn group_digits(n: u64) -> String {
+    let s = n.to_string();
+    let b = s.as_bytes();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, &c) in b.iter().enumerate() {
+        if i > 0 && (b.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c as char);
+    }
+    out
+}
+
 /// A Δvtsc histogram: jump counts bucketed by how far they advanced virtual time.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct DeltaHistogram {
@@ -54,6 +69,32 @@ impl DeltaHistogram {
             parts.push(format!("{}:{}", HIST_LABELS[i], c));
         }
         format!("Δvtsc histogram [jumps by advance]: {}", parts.join(" "))
+    }
+
+    /// Render the histogram as aligned, one-bucket-per-line text for the human run
+    /// summary: a right-aligned count and a bar scaled to the busiest bucket, each
+    /// line prefixed with `indent`.
+    fn human_lines(&self, indent: &str) -> String {
+        let max = self.buckets.iter().copied().max().unwrap_or(0);
+        let counts: [String; 9] = std::array::from_fn(|i| group_digits(self.buckets[i]));
+        let label_w = HIST_LABELS.iter().map(|l| l.len()).max().unwrap_or(0);
+        let count_w = counts.iter().map(String::len).max().unwrap_or(0);
+        const BAR_CELLS: u128 = 24;
+        const EIGHTHS: [&str; 8] = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
+        let mut out = String::new();
+        for (i, count) in counts.iter().enumerate() {
+            let eighths = if max == 0 {
+                0
+            } else {
+                u128::from(self.buckets[i]) * BAR_CELLS * 8 / u128::from(max)
+            };
+            let mut bar = "█".repeat((eighths / 8) as usize);
+            bar.push_str(EIGHTHS[(eighths % 8) as usize]);
+            let line = format!("{indent}{:<label_w$}  {count:>count_w$}  {bar}", HIST_LABELS[i]);
+            out.push_str(line.trim_end());
+            out.push('\n');
+        }
+        out
     }
 
     /// The bucket counts as a comma-separated list, for the machine-parseable
@@ -301,6 +342,96 @@ impl FfState {
         self.hop_ns_sum as f64 / 1e9
     }
 
+    /// Virtual seconds fast-forwarded over (the sum of all jump Δs) — the guest's
+    /// idle time that was skipped. The rest of the virtual span ran at real-time rate.
+    pub(crate) fn jumped_secs(&self) -> f64 {
+        self.sum_delta_cycles as f64 / self.tsc_hz as f64
+    }
+
+    /// The end-of-run summary for humans: a sectioned, aligned report of why the
+    /// run stopped, the virtual/real timing, the fast-forward accounting, and the
+    /// Δvtsc histogram. This is the console view; [`metrics_report`] is the stable
+    /// machine-readable form the comparison harness parses.
+    pub(crate) fn human_summary(
+        &self,
+        stop: StopReason,
+        vtsc_start: u64,
+        vtsc_now: u64,
+        real_secs: f64,
+        hlt_count: u64,
+    ) -> String {
+        let virt_s = self.virtual_secs_since(vtsc_start, vtsc_now);
+        let real_s = real_secs.max(1e-9);
+        let jump_real = self.jump_real_secs();
+        let exec_real = (real_s - jump_real).max(0.0);
+        let jumped_s = self.jumped_secs();
+        let idle_pct = if virt_s > 0.0 { (jumped_s / virt_s * 100.0).min(100.0) } else { 0.0 };
+
+        let mut s = String::from("\n[tdvmm] run complete\n");
+        s.push_str("──────────────────────────────────────────────\n\n");
+
+        s.push_str(&format!("  stop reason        {}\n", stop.human()));
+        if matches!(stop, StopReason::Horizon) {
+            s.push_str("                     (a VMM time-budget stop, not the guest exiting)\n");
+        }
+        s.push('\n');
+
+        // Each section aligns its own value column to its widest label.
+        let section = |s: &mut String, title: &str, rows: &[(&str, String)]| {
+            s.push_str(&format!("  {title}\n"));
+            let w = rows.iter().map(|(l, _)| l.len()).max().unwrap_or(0);
+            for (label, value) in rows {
+                s.push_str(&format!("    {label:<w$}  {value}\n"));
+            }
+            s.push('\n');
+        };
+
+        section(
+            &mut s,
+            "Time",
+            &[
+                ("virtual", format!("{virt_s:.1} s")),
+                ("real", format!("{real_s:.1} s")),
+                ("speedup", format!("{:.1}×", virt_s / real_s)),
+            ],
+        );
+        section(
+            &mut s,
+            "Fast-forward",
+            &[
+                ("jumps", group_digits(self.jumps)),
+                ("rate", format!("{} /s", group_digits((self.jumps as f64 / real_s) as u64))),
+                ("idle skipped", format!("{jumped_s:.1} s of {virt_s:.1} s virtual ({idle_pct:.0}% idle)")),
+                (
+                    "largest jump",
+                    format!("{:.3} s   (per-jump limit {:.0} s)", self.max_delta_secs(), self.max_jump_secs),
+                ),
+                ("per-hop mean", format!("{:.1} us", self.mean_hop_ns() as f64 / 1000.0)),
+                ("per-hop p99", format!("{:.1} us", self.hop_p99_ns() as f64 / 1000.0)),
+                ("per-hop max", format!("{:.1} us", self.hop_ns_max as f64 / 1000.0)),
+            ],
+        );
+        section(
+            &mut s,
+            "Guest halts",
+            &[
+                ("hlt exits", group_digits(hlt_count)),
+                ("rate", format!("{} /s", group_digits((hlt_count as f64 / real_s) as u64))),
+            ],
+        );
+        section(
+            &mut s,
+            "Where real time went",
+            &[
+                ("executing guest", format!("{exec_real:.3} s   ({:.1}%)", exec_real / real_s * 100.0)),
+                ("fast-forwarding", format!("{jump_real:.3} s   ({:.3}%)", jump_real / real_s * 100.0)),
+            ],
+        );
+        s.push_str("  Δvtsc histogram — jumps by how far each advanced virtual time\n");
+        s.push_str(&self.hist.human_lines("    "));
+        s
+    }
+
     /// Build the machine-parseable per-run metrics block (`--metrics-out`). Every
     /// field the comparison harness needs: hop count + rate, speedup, the per-hop
     /// cost mean/p99/max, the real-vs-virtual accounting (the busy-wait tripwire),
@@ -395,6 +526,52 @@ mod tests {
         assert_eq!(ff.jumps, 2);
         assert_eq!(ff.max_delta_cycles, 300);
         assert_eq!(ff.mean_hop_ns(), 300); // (200 + 400) / 2
+    }
+
+    #[test]
+    fn human_summary_renders_sections_and_grouped_counts() {
+        // 1 GHz so 1 cycle == 1 ns; a realistic idle-guest run whose Δ buckets
+        // reproduce a typical horizon stop.
+        let mut ff = FfState::new(1_000_000_000, 300.0);
+        let cheap = std::time::Duration::from_nanos(300);
+        let spread = [
+            (500u64, 8u32),      // <1us
+            (5_000, 27),         // <10us
+            (50_000, 5_643),     // <100us
+            (300_000, 3_323),    // <1ms
+            (5_000_000, 4_459),  // <10ms
+            (25_000_000, 1_052), // <100ms
+        ];
+        for (delta, n) in spread {
+            for _ in 0..n {
+                ff.record_hop(delta, cheap);
+            }
+        }
+        // One expensive, largest jump: Δ = 0.090 s at a 4.8 us hop cost (the tail).
+        // The Δs sum to ~50 s of the 60 s virtual span, i.e. ~83% idle skipped.
+        ff.record_hop(90_000_000, std::time::Duration::from_nanos(4_800));
+
+        let out = ff.human_summary(StopReason::Horizon, 0, 60_000_000_000, 11.0, 14_539);
+
+        for want in [
+            "run complete",
+            "stop reason",
+            "Fast-forward",
+            "idle skipped",
+            "Δvtsc histogram",
+            "14,513",  // total jumps, thousands-separated
+            "5,643",   // busiest bucket
+            "% idle)", // the idle-fraction annotation
+        ] {
+            assert!(out.contains(want), "summary missing {want:?}:\n{out}");
+        }
+        // The confusing line and old jargon are gone.
+        assert!(!out.contains("real CPU per virtual hour"), "confusing line leaked:\n{out}");
+        assert!(!out.contains("real-exec ms"), "old jargon leaked:\n{out}");
+        assert!(!out.contains(" · "), "dot-separated cram leaked:\n{out}");
+
+        // Printed under `--nocapture` so the layout can be eyeballed.
+        eprintln!("{out}");
     }
 
     #[test]

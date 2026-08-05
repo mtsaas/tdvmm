@@ -68,6 +68,17 @@ impl StopReason {
             StopReason::Scenario => "scenario",
         }
     }
+
+    /// A plain-language description of the stop, for the human run summary.
+    pub(crate) fn human(self) -> &'static str {
+        match self {
+            StopReason::GuestShutdown => "guest shut down (triple fault or reboot)",
+            StopReason::GuestSystemEvent => "guest requested reset or shutdown",
+            StopReason::GuestHalt => "guest halted (poweroff)",
+            StopReason::Horizon => "--max-virtual-time horizon reached",
+            StopReason::Scenario => "scenario reached a verdict",
+        }
+    }
 }
 
 /// The result of a full boot+run: why it stopped, and the process exit code. For

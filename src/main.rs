@@ -948,7 +948,7 @@ fn run_user_backend(
                 break;
             }
             stop_reason = StopReason::Horizon;
-            report_horizon(ff_state.as_ref(), start);
+            report_horizon();
             break;
         }
         if fired.scenario {
@@ -1203,7 +1203,7 @@ fn run_user_backend(
                             break;
                         }
                         stop_reason = StopReason::Horizon;
-                        report_horizon(ff_state.as_ref(), start);
+                        report_horizon();
                         break;
                     }
                     ParkOutcome::ScenarioDone => {
@@ -1253,42 +1253,10 @@ fn run_user_backend(
     diag.stop();
 
     let secs = start.elapsed().as_secs_f64();
-    dlog!(
-        "[tdvmm] userspace backend stopped: {hlt_count} HLT exits over {secs:.1}s \
-         ({:.1}/s)",
-        hlt_count as f64 / secs.max(0.001)
-    );
     if let Some(ff) = ff_state.as_ref() {
-        let virt_s = ff.virtual_secs_since(vtsc_start, clock.vtsc_now());
-        let real_s = secs.max(1e-9);
         dlog!(
-            "[tdvmm] FAST-FORWARD SUMMARY: {} jumps; virtual {:.1}s in real {:.1}s = \
-             {:.1}x speedup; per-hop cost mean {:.1}us / max {:.1}us; \
-             largest single jump Δ = {:.3}s (bound {}s)",
-            ff.jumps,
-            virt_s,
-            real_s,
-            virt_s / real_s,
-            ff.mean_hop_ns() as f64 / 1000.0,
-            ff.hop_ns_max as f64 / 1000.0,
-            ff.max_delta_secs(),
-            ff.max_jump_secs,
-        );
-        dlog!("[tdvmm] {}", ff.hist.summary());
-        dlog!(
-            "[tdvmm] per-hop cost p99 {:.1}us; real-vs-virtual: {:.1}% executing / \
-             {:.3}% jumping ({:.1} real-exec ms per virtual-hour — busy-wait tripwire)",
-            ff.hop_p99_ns() as f64 / 1000.0,
-            {
-                let jr = ff.jump_real_secs();
-                (secs - jr).max(0.0) / secs.max(1e-9) * 100.0
-            },
-            ff.jump_real_secs() / secs.max(1e-9) * 100.0,
-            {
-                let jr = ff.jump_real_secs();
-                let vh = (ff.virtual_secs_since(vtsc_start, clock.vtsc_now()) / 3600.0).max(1e-12);
-                (secs - jr).max(0.0) * 1000.0 / vh
-            },
+            "{}",
+            ff.human_summary(stop_reason, vtsc_start, clock.vtsc_now(), secs, hlt_count)
         );
 
         // Machine-parseable per-run metrics for the comparison harness.
@@ -1300,17 +1268,23 @@ fn run_user_backend(
                 Err(e) => dlog!("[tdvmm][WARN] could not write --metrics-out {path}: {e}"),
             }
         }
-    } else if let Some(path) = metrics_out.as_deref() {
+    } else {
+        dlog!(
+            "[tdvmm] backend stopped: {hlt_count} HLT exits over {secs:.1}s ({:.1}/s)",
+            hlt_count as f64 / secs.max(0.001)
+        );
         // FF off: no jumps to account for; leave a clear stub so a harness that
         // always passes --metrics-out gets a well-formed, unambiguous file.
-        let _ = std::fs::write(
-            path,
-            format!(
-                "# tdvmm per-run metrics (fast-forward OFF — no jump accounting)\n\
-                 schema 1\nstop_reason {}\nfast_forward off\n",
-                stop_reason.as_str()
-            ),
-        );
+        if let Some(path) = metrics_out.as_deref() {
+            let _ = std::fs::write(
+                path,
+                format!(
+                    "# tdvmm per-run metrics (fast-forward OFF — no jump accounting)\n\
+                     schema 1\nstop_reason {}\nfast_forward off\n",
+                    stop_reason.as_str()
+                ),
+            );
+        }
     }
 
     // ---- End-of-run virtual-time SNAPSHOT (Fable guardrail 2: FF-neutrality) ----
@@ -1404,26 +1378,14 @@ fn run_user_backend(
     })
 }
 
-/// Print the `--max-virtual-time` diagnostic dump at a horizon stop: total jump
-/// count, jump rate, largest Δ, and the Δvtsc histogram (its tail is the wedge
-/// signature). Distinguishes this VMM policy stop from a guest-initiated one.
-fn report_horizon(ff: Option<&FfState>, start: std::time::Instant) {
+/// Announce a `--max-virtual-time` horizon stop at the moment it fires, so the log
+/// marks the transition. The full jump/timing breakdown and the Δvtsc histogram
+/// are in the end-of-run summary that follows.
+fn report_horizon() {
     dlog!(
-        "\n[tdvmm] STOP: --max-virtual-time horizon reached — VMM virtual-time budget \
-         (a deterministic (vtsc, StopRun) queue event, NOT a guest-initiated stop)."
+        "\n[tdvmm] stopping: --max-virtual-time horizon reached \
+         (a deterministic (vtsc, StopRun) queue event, not a guest-initiated stop)."
     );
-    if let Some(ff) = ff {
-        let real_s = start.elapsed().as_secs_f64().max(1e-9);
-        dlog!(
-            "[tdvmm] HORIZON DIAGNOSTIC: {} jumps in {:.2}s real = {:.0} jumps/s; \
-             max single Δ {:.3}s; {}",
-            ff.jumps,
-            real_s,
-            ff.jumps as f64 / real_s,
-            ff.max_delta_secs(),
-            ff.hist.summary(),
-        );
-    }
 }
 
 /// Reconcile the event queue to the LAPIC's single armed deadline (the LAPIC is
