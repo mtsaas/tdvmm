@@ -38,7 +38,7 @@ printf '%-18s %-8s %-6s %s\n' "CASE" "EXPECT" "RESULT" "DIAGNOSTIC"
 echo "-------------------------------------------------------------------------------"
 while read -r file expect needle; do
   [ -n "${file:-}" ] || continue
-  out="$("$BIN" build --validate-only "$CORPUS/$file" 2>&1 >/dev/null)"; rc=$?
+  out="$("$BIN" build reject-probe --validate-only "$CORPUS/$file" 2>&1 >/dev/null)"; rc=$?
   diag="$(printf '%s' "$out" | grep -E 'TDVMM_BAKE_(REJECT|WARN)' | head -1)"
   pass=0
   if [ "$expect" = "reject" ]; then

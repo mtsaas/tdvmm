@@ -28,17 +28,19 @@ Three commands do everything:
 
 ## 1. Build a stack
 
-Point `tdvmm build` at any supported `compose.yml`. We'll use the bundled demo (Postgres
-+ Redis + a small gRPC api/worker/client):
+Give `tdvmm build` a name for the stack and a supported `compose.yml`. We'll use the
+bundled demo (Postgres + Redis + a small gRPC api/worker/client):
 
 ```sh
-tdvmm build guest/stacks/demo/compose.yml
+tdvmm build demo guest/stacks/demo/compose.yml
 # -> ~/.tdvmm/artifacts/demo.tdvmm
 ```
 
 That resolves each image to a digest, pulls and packs it, bakes a kernel and an in-RAM
 root filesystem, and writes one file under `~/.tdvmm/artifacts/`. Same inputs always
-produce the same bytes. (`-o path.tdvmm` writes it wherever you want.)
+produce the same bytes. The first argument is the stack name (`demo` here) — the store
+key you'll later `tdvmm run <name>` and see in `tdvmm ls`; it must be a single path
+component. (`-o path.tdvmm` changes only where the file is written, not the stored name.)
 
 See everything you've built with `tdvmm ls`:
 

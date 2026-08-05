@@ -51,7 +51,7 @@ if [ ! -x "$BIN" ]; then
 fi
 if [ ! -f "$TDVMM" ]; then
   echo "[smoke] baking $STACK -> $TDVMM"
-  "$BIN" build "$ROOT/guest/stacks/$STACK/compose.yml" -o "$TDVMM" \
+  "$BIN" build "$STACK" "$ROOT/guest/stacks/$STACK/compose.yml" -o "$TDVMM" \
     || { echo "SMOKE FAIL: bake error"; exit 3; }
 fi
 

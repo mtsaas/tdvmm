@@ -22,7 +22,7 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 STACK="${STACK:-spinner}"
 
 cargo build --release --manifest-path "$ROOT/Cargo.toml"
-"$ROOT/target/release/tdvmm" build "$ROOT/guest/stacks/$STACK/compose.yml"
+"$ROOT/target/release/tdvmm" build "$STACK" "$ROOT/guest/stacks/$STACK/compose.yml"
 exec "$ROOT/target/release/tdvmm" run "$STACK" \
   --ff off \
   --cmdline "console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable" \

@@ -17,7 +17,7 @@ use crate::{DEFAULT_CMDLINE, DEFAULT_MAX_JUMP_SECS, DEFAULT_MEM_MIB};
                   Durations (--max-virtual-time): a bare number is seconds, or use a \
                   suffix (ms, s, m, h), e.g. 500ms, 30s, 5m, 2h.",
     after_help = "Examples:\n  \
-                  tdvmm build guest/stacks/insert-trim/compose.yml\n  \
+                  tdvmm build insert-trim guest/stacks/insert-trim/compose.yml\n  \
                   tdvmm run insert-trim\n  \
                   tdvmm test insert-trim --scenario guest/stacks/insert-trim/insert-trim.yml\n  \
                   tdvmm ls",
@@ -41,7 +41,7 @@ pub(crate) enum Cmd {
     /// A host build tool (needs podman + network): pulls and digest-pins each image,
     /// squashes them into an offline seed store, and packs a self-contained .tdvmm.
     /// The content-hash cache makes an unchanged stack near-instant to re-bake.
-    #[command(after_help = "Example:\n  tdvmm build guest/stacks/insert-trim/compose.yml -o insert-trim.tdvmm")]
+    #[command(after_help = "Example:\n  tdvmm build insert-trim guest/stacks/insert-trim/compose.yml -o insert-trim.tdvmm")]
     Build(BuildCliArgs),
     /// Run a .tdvmm stack (offline).
     ///
@@ -124,19 +124,22 @@ pub(crate) struct EgressTestServerArgs {
     pub(crate) args: Vec<String>,
 }
 
-/// `tdvmm build` args (clap). Mirrors bake-stack.sh's flags.
+/// `tdvmm build` args (clap).
 #[derive(Args)]
 pub(crate) struct BuildCliArgs {
+    /// Artifact / stack name (the store key): written as `<name>.tdvmm` and the
+    /// name `tdvmm run/test/inspect/verify <name>` later resolves. Must be a single
+    /// path component (`[A-Za-z0-9._-]`, never `.`/`..`).
+    #[arg(value_name = "name", value_parser = parse_stack_name)]
+    pub(crate) name: String,
     /// Path to the compose.yml to bake.
     #[arg(value_name = "compose.yml")]
     pub(crate) compose: String,
-    /// Output .tdvmm path (default <cache-dir>/artifacts/<stack>.tdvmm, where
-    /// <cache-dir> is --cache-dir > $TDVMM_CACHE_DIR > $HOME/.tdvmm).
+    /// Output .tdvmm path (default <cache-dir>/artifacts/<name>.tdvmm, where
+    /// <cache-dir> is --cache-dir > $TDVMM_CACHE_DIR > $HOME/.tdvmm). Overrides
+    /// only the output PATH; the stored/manifest name stays `<name>`.
     #[arg(short, long, value_name = "PATH")]
     pub(crate) out: Option<String>,
-    /// Stack name (default: the compose file's parent directory name).
-    #[arg(long, value_name = "STR")]
-    pub(crate) name: Option<String>,
     /// Guest RAM in MiB (default 3072).
     #[arg(long, value_name = "MiB")]
     pub(crate) mem: Option<u64>,
@@ -299,6 +302,28 @@ fn parse_onoff(s: &str) -> Result<bool, String> {
         "on" | "1" | "true" => Ok(true),
         "off" | "0" | "false" => Ok(false),
         _ => Err(format!("expected on|off (got {s:?})")),
+    }
+}
+
+/// clap value parser for `tdvmm build`'s required `<name>` positional: the value
+/// becomes a `<name>.tdvmm` filename in the store and a store-resolvable name
+/// (`tdvmm run <name>`), so it must be a single safe path component. Accepts a
+/// non-empty `[A-Za-z0-9._-]+` that is not `.` or `..`; rejects everything else
+/// (path separators, spaces, …) via the shared `is_safe_path_component` rule
+/// (also behind `sanitize_service_filename`). Rejecting a path here doubles as the
+/// migration guard for the retired one-arg `tdvmm build ./compose.yml` form.
+fn parse_stack_name(s: &str) -> Result<String, String> {
+    if crate::is_safe_path_component(s) {
+        return Ok(s.to_owned());
+    }
+    let rule = "a stack name must be a single path component ([A-Za-z0-9._-], not '.'/'..')";
+    // A value containing a separator is almost certainly a forgotten or transposed
+    // name — the compose path landing where the name now belongs. Point the user at
+    // the new argument order. (A bare `compose.yaml` with no `/` is a valid name.)
+    if s.contains('/') {
+        Err(format!("{rule} — did you mean `tdvmm build <name> {s}`?"))
+    } else {
+        Err(rule.to_owned())
     }
 }
 
@@ -470,5 +495,42 @@ mod tests {
         assert_eq!(parse_duration_secs("-5s"), None);
         assert_eq!(parse_duration_secs("abc"), None);
         assert_eq!(parse_duration_secs(""), None);
+    }
+
+    #[test]
+    fn stack_name_accepts_safe_and_rejects_unsafe() {
+        use super::parse_stack_name;
+        // Safe single path components pass through unchanged — dots are allowed, so
+        // a bare `compose.yaml` (no separator) is a VALID name.
+        assert_eq!(parse_stack_name("insert-trim").unwrap(), "insert-trim");
+        assert_eq!(parse_stack_name("web_app.v2").unwrap(), "web_app.v2");
+        assert_eq!(parse_stack_name("compose.yaml").unwrap(), "compose.yaml");
+        // Empty, dot-dirs, separators, and stray characters are rejected.
+        for bad in ["", ".", "..", "a/b", "../x", "has space", "tab\tx"] {
+            assert!(parse_stack_name(bad).is_err(), "should reject {bad:?}");
+        }
+        // Migration guard: a stale one-arg `tdvmm build ./compose.yml` puts a PATH
+        // (with a `/`) where the name now belongs — rejected, with a hint toward the
+        // new `tdvmm build <name> <compose>` form.
+        for path in ["./compose.yml", "guest/stacks/demo/compose.yml"] {
+            let err = parse_stack_name(path).unwrap_err();
+            assert!(err.contains("tdvmm build <name>"), "hint missing for {path:?}: {err}");
+        }
+        // A plain invalid name (not a path) gets the rule but NOT the path hint.
+        let err = parse_stack_name("has space").unwrap_err();
+        assert!(!err.contains("did you mean"), "no path hint for a non-path name: {err}");
+    }
+
+    #[test]
+    fn build_takes_name_then_compose_positionally() {
+        use super::{Cli, Cmd};
+        use clap::Parser;
+        // Correct order: name first, compose path second.
+        let cli = Cli::try_parse_from(["tdvmm", "build", "demo", "x.yml"]).unwrap();
+        let Cmd::Build(args) = cli.cmd else { panic!("expected build subcommand") };
+        assert_eq!(args.name, "demo");
+        assert_eq!(args.compose, "x.yml");
+        // Stale one-arg form: the path lands in the name slot and is rejected.
+        assert!(Cli::try_parse_from(["tdvmm", "build", "./x.yml"]).is_err());
     }
 }

@@ -79,9 +79,9 @@ for stack in "${STACKS[@]}"; do
   #     (OP-1b folds the whole bake into the binary; the initramfs IS now bit-repro).
   #     Bake to the canonical <stack>.tdvmm basename (so the committed stack.lock's
   #     recorded artifact filename is unchanged), then copy each result aside to compare.
-  "$BIN" build "$compose" -o "$TMP/$stack.tdvmm" --cache-dir "$CACHE" >/dev/null 2>"$TMP/packA.err" || { echo "  FAIL: build A"; tail -5 "$TMP/packA.err"; overall=1; continue; }
+  "$BIN" build "$stack" "$compose" -o "$TMP/$stack.tdvmm" --cache-dir "$CACHE" >/dev/null 2>"$TMP/packA.err" || { echo "  FAIL: build A"; tail -5 "$TMP/packA.err"; overall=1; continue; }
   cp "$TMP/$stack.tdvmm" "$A"
-  "$BIN" build "$compose" -o "$TMP/$stack.tdvmm" --cache-dir "$CACHE" >/dev/null 2>"$TMP/packB.err" || { echo "  FAIL: build B"; tail -5 "$TMP/packB.err"; overall=1; continue; }
+  "$BIN" build "$stack" "$compose" -o "$TMP/$stack.tdvmm" --cache-dir "$CACHE" >/dev/null 2>"$TMP/packB.err" || { echo "  FAIL: build B"; tail -5 "$TMP/packB.err"; overall=1; continue; }
   cp "$TMP/$stack.tdvmm" "$B"
   shA="$(sha256sum "$A" | awk '{print $1}')"; shB="$(sha256sum "$B" | awk '{print $1}')"
   if [ "$shA" = "$shB" ]; then echo "  (1) BIT-REPRODUCIBLE OK: two builds -> identical .tdvmm ($shA)"; else echo "  (1) FAIL: .tdvmm differs ($shA != $shB)"; ok=0; fi

@@ -1,4 +1,4 @@
-//! `tdvmm build <compose.yml>` (OP-1b) — the whole bake pipeline, folded into the
+//! `tdvmm build <name> <compose.yml>` (OP-1b) — the whole bake pipeline, folded into the
 //! binary. It replaced the now-removed `guest/bake-stack.sh` (orchestrator),
 //! `guest/bake_compose.py` (→ [`crate::compose`]), `guest/pack-tdvmm.sh` (→
 //! [`crate::artifact`] via this module's `pack_tdvmm`), and `guest/initramfs-alpine/{build_rootfs.sh,
@@ -96,7 +96,9 @@ const DEFAULT_CMDLINE: &str = "console=ttyS0 reboot=t panic=1 pci=off no_timer_c
 pub struct BuildArgs {
     pub compose: String,
     pub out: Option<String>,
-    pub name: Option<String>,
+    /// The required stack/artifact name (first positional). Validated at the CLI
+    /// boundary by `parse_stack_name`.
+    pub name: String,
     pub mem: Option<u64>,
     pub working_set: Option<u64>,
     pub squash_threshold: Option<u64>,

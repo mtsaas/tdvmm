@@ -50,6 +50,10 @@ case "$COMPOSE_ABS" in
   *) die "compose file must live under \$HOME so the podman-machine VM can see it: $COMPOSE_ABS" ;;
 esac
 
+# The stack name is the compose file's folder — `tdvmm build` now takes it as the
+# required first positional (name, then compose path).
+STACK="$(basename "$(dirname "$COMPOSE_ABS")")"
+
 # 3. podman + a running machine.
 command -v podman >/dev/null 2>&1 || die "podman not found (install Podman Desktop or 'brew install podman')"
 MACHINE="${TDVMM_MACHINE:-}"
@@ -73,10 +77,9 @@ podman machine ssh "$MACHINE" "test -x '$TDVMM_LINUX_BIN'" \
 echo "macos-build: baking $COMPOSE_ABS inside podman machine '$MACHINE'..."
 passthrough=""
 for a in "$@"; do passthrough+=" $(printf '%q' "$a")"; done
-podman machine ssh "$MACHINE" "TDVMM_CACHE_DIR='$HOME/.tdvmm' '$TDVMM_LINUX_BIN' build '$COMPOSE_ABS'$passthrough"
+podman machine ssh "$MACHINE" "TDVMM_CACHE_DIR='$HOME/.tdvmm' '$TDVMM_LINUX_BIN' build '$STACK' '$COMPOSE_ABS'$passthrough"
 
 # 6. Where it landed (shared back to the Mac) + the reproducibility check.
-STACK="$(basename "$(dirname "$COMPOSE_ABS")")"
 ART="$HOME/.tdvmm/artifacts/$STACK.tdvmm"
 echo "macos-build: done."
 if [ -f "$ART" ]; then

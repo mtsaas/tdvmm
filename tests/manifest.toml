@@ -227,7 +227,7 @@ tier = "T3"
 tags = ["needs-bake"]
 timeout = 900
 requires = ""
-cmd = "mkdir -p .tdvmm-test-results && ./target/release/tdvmm build guest/stacks/demo/compose.yml -o .tdvmm-test-results/demo.tdvmm && ./target/release/tdvmm test .tdvmm-test-results/demo.tdvmm --scenario guest/stacks/demo/demo.yml --wall-timeout 800 --logs-dir /tmp/demo-logs"
+cmd = "mkdir -p .tdvmm-test-results && ./target/release/tdvmm build demo guest/stacks/demo/compose.yml -o .tdvmm-test-results/demo.tdvmm && ./target/release/tdvmm test .tdvmm-test-results/demo.tdvmm --scenario guest/stacks/demo/demo.yml --wall-timeout 800 --logs-dir /tmp/demo-logs"
 desc = "flagship demo: full virtual day of the gRPC stack + fault/recovery -> PASS, per-service logs"
 
 [[test]]

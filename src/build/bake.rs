@@ -38,10 +38,10 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     let compose_path = std::fs::canonicalize(&args.compose)
         .map_err(|_| format!("compose file not found: {}", args.compose))?;
     let compose_dir = compose_path.parent().unwrap().to_path_buf();
-    let stack_name = args
-        .name
-        .clone()
-        .unwrap_or_else(|| compose_dir.file_name().unwrap().to_string_lossy().into_owned());
+    // The name is the required first positional (validated at the CLI boundary by
+    // `parse_stack_name`, so it is a safe single path component). No folder-derived
+    // default: `tdvmm build <name> <compose>` states the store key outright.
+    let stack_name = args.name.clone();
     let project = format!("tdvmm_{stack_name}");
 
     // --- parse + validate (the loud static gate) ---

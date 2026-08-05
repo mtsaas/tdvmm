@@ -571,7 +571,7 @@ fn cmd_ls(args: LsArgs) -> Result<i32, Box<dyn std::error::Error>> {
     let entries = artifact::list_store()?;
     if entries.is_empty() {
         println!(
-            "no artifacts in {} (build one with `tdvmm build <compose.yml>`)",
+            "no artifacts in {} (build one with `tdvmm build <name> <compose.yml>`)",
             artifact::store_dir().display()
         );
         return Ok(0);
@@ -1901,22 +1901,24 @@ fn read_console_input(serial: &serial::SharedSerial) -> Option<usize> {
 // --logs-dir: post-verdict per-service log capture
 // =====================================================================
 
+/// True when `s` is a single safe path component: non-empty, not `.`/`..`, and
+/// every byte in `[A-Za-z0-9._-]` (so never a path separator). The shared rule
+/// behind both `sanitize_service_filename` (guest log files) and the build's
+/// `parse_stack_name` (the stack name).
+pub(crate) fn is_safe_path_component(s: &str) -> bool {
+    !s.is_empty()
+        && s != "."
+        && s != ".."
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
 /// Validate a guest-supplied service name for use as a `<name>.log` filename.
 /// Container/service names are HOSTILE guest data, so accept only a strict
-/// `[A-Za-z0-9._-]+` single path component — never empty, never `.`/`..`, never a
-/// path separator. Returns `None` (skip that service) for anything else.
+/// `[A-Za-z0-9._-]+` single path component. Returns `None` (skip that service)
+/// for anything else.
 pub(crate) fn sanitize_service_filename(name: &str) -> Option<String> {
-    if name.is_empty() || name == "." || name == ".." {
-        return None;
-    }
-    if name
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
-    {
-        Some(name.to_string())
-    } else {
-        None
-    }
+    is_safe_path_component(name).then(|| name.to_string())
 }
 
 /// Reformat raw k8s-file log bytes into a readable `<ts> <stream> <message>` per

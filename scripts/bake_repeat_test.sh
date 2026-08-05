@@ -16,6 +16,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 COMPOSE="${1:-$ROOT/guest/stacks/insert-trim/compose.yml}"
+# The stack name is the compose file's folder — `tdvmm build` takes it as the
+# required first positional (name, then compose path).
 NAME="$(basename "$(dirname "$COMPOSE")")"
 LOCK="$ROOT/guest/stacks/$NAME/compose.lock.yml"
 MAN="$ROOT/guest/stacks/$NAME/stack.lock"
@@ -30,12 +32,12 @@ compared() { grep -v -e '^#' -e '^initramfs_sha256' -e '^tdvmm_sha256' "$1"; }
 # unconditionally (a content-hash cache HIT would trivially return the same file
 # and prove nothing). This exercises the real pull/squash/build/assemble each time.
 echo "== bake #1 (--no-cache, full re-bake) =="
-"$ROOT/target/release/tdvmm" build --no-cache "$COMPOSE" >/tmp/bake1.log 2>&1 || { echo "BAKE1 FAILED"; tail -30 /tmp/bake1.log; exit 1; }
+"$ROOT/target/release/tdvmm" build --no-cache "$NAME" "$COMPOSE" >/tmp/bake1.log 2>&1 || { echo "BAKE1 FAILED"; tail -30 /tmp/bake1.log; exit 1; }
 L1="$(sha256sum "$LOCK" | awk '{print $1}')"; M1="$(compared "$MAN")"; A1="$(awk '/^initramfs_sha256/{print $2}' "$MAN")"
 cp "$LOCK" /tmp/lock1.yml
 
 echo "== bake #2 (--no-cache, full re-bake) =="
-"$ROOT/target/release/tdvmm" build --no-cache "$COMPOSE" >/tmp/bake2.log 2>&1 || { echo "BAKE2 FAILED"; tail -30 /tmp/bake2.log; exit 1; }
+"$ROOT/target/release/tdvmm" build --no-cache "$NAME" "$COMPOSE" >/tmp/bake2.log 2>&1 || { echo "BAKE2 FAILED"; tail -30 /tmp/bake2.log; exit 1; }
 L2="$(sha256sum "$LOCK" | awk '{print $1}')"; M2="$(compared "$MAN")"; A2="$(awk '/^initramfs_sha256/{print $2}' "$MAN")"
 
 echo

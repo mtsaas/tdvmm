@@ -64,7 +64,7 @@ run_stack() {
   local tdvmm="$OUTDIR/$name.tdvmm"
   local log="$TMP/$label.log" metrics="$TMP/$label.metrics"
   if [ ! -f "$tdvmm" ]; then
-    if ! "$BIN" build "$STACKS_DIR/$name/compose.yml" -o "$tdvmm" >"$TMP/$label.bake.log" 2>&1; then
+    if ! "$BIN" build "$name" "$STACKS_DIR/$name/compose.yml" -o "$tdvmm" >"$TMP/$label.bake.log" 2>&1; then
       echo "fail:bake '$name' (see $TMP/$label.bake.log)"; return
     fi
   fi

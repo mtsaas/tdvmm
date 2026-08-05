@@ -173,7 +173,7 @@ for stack in "${STACKS[@]}"; do
 
   if [ "$BAKE" = "1" ] || [ ! -f "$tdvmm" ]; then
     echo "[corpus] baking $stack -> $tdvmm ..."
-    if ! "$BIN" build "$compose" -o "$tdvmm" >"$TMP/$stack.bake.log" 2>&1; then
+    if ! "$BIN" build "$stack" "$compose" -o "$tdvmm" >"$TMP/$stack.bake.log" 2>&1; then
       echo "  FAIL: bake error (tail):"; tail -20 "$TMP/$stack.bake.log" | sed 's/^/    /'
       RESULT[$stack]="fail:bake"; overall=1; continue
     fi
