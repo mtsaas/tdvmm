@@ -173,7 +173,8 @@ pub fn cmd_assemble_initramfs(config: &str) -> Result<i32, Box<dyn std::error::E
     combined.extend_from_slice(&stack_seg);
     cpio::gzip_to(&combined, &cfg.out)?;
 
-    // copy packages.lock next to the (now-retired) build script location.
+    // copy packages.lock to the cache-side ledger (the host also folds it into the
+    // base-runtime cache entry on a MISS).
     let pl = cfg.work.join("packages.lock");
     if pl.is_file() {
         std::fs::copy(&pl, &cfg.packages_lock_out)?;

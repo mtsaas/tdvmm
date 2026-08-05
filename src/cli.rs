@@ -175,7 +175,7 @@ pub(crate) struct BuildAgentArgs {
 /// `tdvmm build-kernel` args.
 #[derive(Args)]
 pub(crate) struct BuildKernelArgs {
-    /// Output path for the vmlinux (default: guest/kernel/vmlinux-<version>).
+    /// Output path for the vmlinux (default: <cache-dir>/kernel/vmlinux-<version>).
     #[arg(short, long, value_name = "PATH")]
     pub(crate) out: Option<String>,
     /// Cache directory (kernel source tarball + built kernel land here).

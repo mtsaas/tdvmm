@@ -97,9 +97,11 @@ fn write_kernel_lock(here: &Path, k: &KernelLock) -> Result<(), Box<dyn std::err
     Ok(())
 }
 
-/// Ensure the guest kernel is present at `guest/kernel/vmlinux-<version>` and
+/// Ensure the guest kernel is present at `<cache>/kernel/vmlinux-<version>` and
 /// matches kernel.lock. PRIMARY: fetch the pinned release asset (sha-verified).
-/// FALLBACK: reproducible container build (sha-verified). Returns the path.
+/// FALLBACK: reproducible container build (sha-verified). Returns the path. The
+/// kernel.lock + config are still READ from `here` (`guest/kernel/`); only the
+/// built/fetched vmlinux OUTPUT lands in the (disposable) cache dir.
 pub(super) fn ensure_kernel(
     here: &Path,
     cache_dir: &Path,
@@ -107,7 +109,9 @@ pub(super) fn ensure_kernel(
     ux: &Ux,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let kl = read_kernel_lock(here)?;
-    let out = here.join(format!("kernel/vmlinux-{}", kl.version));
+    let kernel_dir = cache_dir.join("kernel");
+    std::fs::create_dir_all(&kernel_dir)?;
+    let out = kernel_dir.join(format!("vmlinux-{}", kl.version));
     if kl.sha256.is_empty() {
         return Err(
             "kernel.lock has no KERNEL_SHA256; run `tdvmm build-kernel --record` first".into(),
@@ -311,7 +315,7 @@ pub fn cmd_build_kernel(args: BuildKernelArgs) -> Result<i32, Box<dyn std::error
             .out
             .clone()
             .map(PathBuf::from)
-            .unwrap_or_else(|| here.join(format!("kernel/vmlinux-{}", kl.version)));
+            .unwrap_or_else(|| cache_dir.join("kernel").join(format!("vmlinux-{}", kl.version)));
         build_kernel_container(&here, &cache_dir, &kl, &out, &ux)?;
         // record source + kernel shas.
         let tarball = cache_dir.join("kernel-src").join(format!("linux-{}.tar.xz", kl.version));

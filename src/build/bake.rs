@@ -158,24 +158,31 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     // path is NOT part of the cache key: identical inputs bake identical bytes
     // regardless of where they land.
     //
-    // DEFAULT outputs land under the resolved cache root's `artifacts/` dir (NOT
-    // the source tree): an installed `tdvmm` must not write build outputs into the
-    // repo. `-o <path>` still fully overrides the `.tdvmm` destination. The
-    // intermediate cpio is build debris, not a deliverable, so it lands under
-    // `bake/` (beside the content-hash cache) — keeping `artifacts/` all `.tdvmm`.
-    // Its basename is unchanged and stack.lock records only the basename, so the
-    // `.tdvmm` bytes stay byte-identical.
+    // DEFAULT outputs land under the resolved cache root (NOT the source tree): an
+    // installed `tdvmm` must not write build outputs into the repo, and reusing an
+    // example stack name must never clobber a committed lock golden. `-o <path>`
+    // still fully overrides the `.tdvmm` destination. Layout:
+    //   artifacts/<name>.tdvmm              the deliverable (all .tdvmm, nothing else)
+    //   bake/initramfs-alpine-<name>.cpio.gz  the intermediate cpio (build debris)
+    //   ledgers/<name>.{compose.lock.yml,stack.lock,packages.lock}  the per-bake
+    //                                       ledgers (were written into guest/stacks/…
+    //                                       + guest/initramfs-alpine/packages.lock).
+    // Every basename recorded INSIDE the artifact is unchanged (stack.lock records
+    // only basenames), so the `.tdvmm` bytes stay byte-identical wherever this lands.
     let artifacts_dir = cache_dir.join("artifacts");
     std::fs::create_dir_all(&artifacts_dir)?;
     let bake_out_dir = cache_dir.join("bake");
     std::fs::create_dir_all(&bake_out_dir)?;
+    let ledgers_dir = cache_dir.join("ledgers");
+    std::fs::create_dir_all(&ledgers_dir)?;
     let out_tdvmm = match &args.out {
         Some(o) => PathBuf::from(o),
         None => artifacts_dir.join(format!("{stack_name}.tdvmm")),
     };
     let out_initramfs = bake_out_dir.join(format!("initramfs-alpine-{stack_name}.cpio.gz"));
-    let committed_lock = here.join("stacks").join(&stack_name).join("compose.lock.yml");
-    let stack_lock_path = here.join("stacks").join(&stack_name).join("stack.lock");
+    let lock_out = ledgers_dir.join(format!("{stack_name}.compose.lock.yml"));
+    let stack_lock_out = ledgers_dir.join(format!("{stack_name}.stack.lock"));
+    let packages_lock_out = ledgers_dir.join(format!("{stack_name}.packages.lock"));
 
     // ---- content-hash bake cache -------------------------------------------
     // The key covers EVERY input that affects the output bytes: the whole compose
@@ -204,11 +211,13 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
             diag.push_str("bake_cache_status: HIT (reused)\n");
             ux.progress.detail(format!("== BAKE CACHE HIT ==  key={}", &c.key[..16]));
             ux.progress.detail(format!("   reusing baked artifacts (skipped pull/squash/assemble): {}", c.dir.display()));
-            match cache_restore(c, &out_tdvmm, &out_initramfs, &committed_lock, &stack_lock_path) {
+            match cache_restore(c, &out_tdvmm, &out_initramfs, &lock_out, &stack_lock_out) {
                 Ok(tdvmm_sha) => {
                     ux.progress.detail(format!("   .tdvmm:     {} (sha256 {tdvmm_sha})", out_tdvmm.display()));
                     let size = std::fs::metadata(&out_tdvmm).map(|m| m.len()).unwrap_or(0);
                     ux.progress.print_summary(&out_tdvmm, &tdvmm_sha, size, progress.elapsed(), None);
+                    // Maintainer-only: refresh the committed lock fixtures from this bake.
+                    maybe_regen_fixtures(&here, &stack_name, &lock_out, &stack_lock_out, &packages_lock_out, &ux);
                     progress.finish();
                     // stdout: the machine-readable artifact identity line — emitted only when
                     // stdout is piped/redirected (see print_artifact_id_line). `suspend` runs
@@ -272,10 +281,15 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     // the image phase and overlap the whole middle of the bake.
     let agent_bin = work.join("tdvmm-agent");
     let mirror = std::env::var("ALPINE_MIRROR").unwrap_or_else(|_| DEFAULT_MIRROR.to_string());
-    let tarball = alpine_dir.join(MINIROOTFS);
+    // sha-verified download caches live under the cache dir (NOT the source tree):
+    // an installed `tdvmm` has no writable repo. The pins that DESCRIBE them
+    // (compose-engine.lock) are still read from `alpine_dir`. `fetch_verify`
+    // create_dir_all's the destination parent, so `downloads/` is made on demand.
+    let downloads_dir = cache_dir.join("downloads");
+    let tarball = downloads_dir.join(MINIROOTFS);
     let mini_url = format!("{mirror}/{ALPINE_BRANCH}/releases/x86_64/{MINIROOTFS}");
     let (compose_version, compose_sha256) = read_compose_lock(&alpine_dir)?;
-    let compose_cache = alpine_dir.join(format!("docker-compose-{compose_version}"));
+    let compose_cache = downloads_dir.join(format!("docker-compose-{compose_version}"));
     let compose_url = format!("https://github.com/docker/compose/releases/download/{compose_version}/docker-compose-linux-x86_64");
 
     // Paths shared by the overlapped middle (the scope below) and the serial
@@ -534,7 +548,7 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
         stack_binds: binds_stage.clone(),
         stack_mem: mem_mib,
         out: out_initramfs.clone(),
-        packages_lock_out: alpine_dir.join("packages.lock"),
+        packages_lock_out: packages_lock_out.clone(),
         base_hit,
         base_segment: base_segment.clone(),
         base_packages_lock: base_pl_cached.clone(),
@@ -549,7 +563,7 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
 
     // MISS: store the freshly-emitted base segment (+ its package set) for reuse.
     if !base_hit {
-        if let Err(e) = base_cache_store(&base_entry, &base_segment, &alpine_dir.join("packages.lock")) {
+        if let Err(e) = base_cache_store(&base_entry, &base_segment, &packages_lock_out) {
             ux.progress.println(format!("{}: could not populate base-runtime cache ({e})", compose::WARN));
         } else {
             ux.progress.detail(format!("   base cached: {} (key {})", base_entry.display(), &base_key[..16]));
@@ -561,10 +575,10 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     // --- 7. write stack.lock (the reproducibility ledger — declared inputs only,
     //        NO host-probed values; Fable guardrail §3) ---
     ux.progress.step(7, TOTAL_STEPS, "pack artifact");
-    write_stack_lock(&here, &stack_name, &project, mem_mib, est_mib, &lock_sha, &art_sha, &agent_sha, &out_initramfs, &records, &plain_refs, &plain_pin, &seedpins, &validated, &builders)?;
+    write_stack_lock(&stack_lock_out, &stack_name, &project, mem_mib, est_mib, &lock_sha, &art_sha, &agent_sha, &out_initramfs, &records, &plain_refs, &plain_pin, &seedpins, &validated, &builders)?;
 
-    // stash the emitted lock next to the manifest.
-    std::fs::copy(&lock_path, &committed_lock)?;
+    // stash the emitted lock beside the artifact in the cache ledgers dir.
+    std::fs::copy(&lock_path, &lock_out)?;
 
     // --- 8. pack the single-file .tdvmm artifact ---
     ux.progress.detail("== pack .tdvmm artifact ==");
@@ -590,7 +604,7 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     let tdvmm_sha = written.sha256_hex;
     let tdvmm_len = written.len;
     // append the artifact identity to the ledger.
-    append_stack_lock_tdvmm(&here, &stack_name, &tdvmm_sha, &out_tdvmm)?;
+    append_stack_lock_tdvmm(&stack_lock_out, &tdvmm_sha, &out_tdvmm)?;
     diag.push_str(&format!(
         "initramfs: {} sha256={art_sha}\ntdvmm: {} sha256={tdvmm_sha}\n",
         out_initramfs.display(), out_tdvmm.display(),
@@ -611,7 +625,7 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     // --- 9. populate the bake cache (best-effort; never fails the build) ---
     ux.progress.step(8, TOTAL_STEPS, "cache");
     if let Some(c) = &cache {
-        match cache_store(c, &out_tdvmm, &out_initramfs, &committed_lock, &stack_lock_path, &tdvmm_sha) {
+        match cache_store(c, &out_tdvmm, &out_initramfs, &lock_out, &stack_lock_out, &tdvmm_sha) {
             Ok(true) => {
                 ux.progress.detail(format!("   cached:    {} (key {})", c.dir.display(), &c.key[..16]));
                 diag.push_str(&format!("bake_cache_stored: {} (key {})\n", c.dir.display(), c.key));
@@ -627,6 +641,9 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     //         relocated, not lost. Disposable; best-effort. ---
     let diag_path = write_bake_diagnostics(&cache_dir, &stack_name, &host_podman_version, &builders, &diag, ux.progress);
 
+    // Maintainer-only: refresh the committed lock fixtures from this bake.
+    maybe_regen_fixtures(&here, &stack_name, &lock_out, &stack_lock_out, &packages_lock_out, &ux);
+
     // TTY: the aligned final summary block (Fix: the bar is cleared FIRST, so
     // the step counter deterministically reaches [8/8] with no stale spinner
     // frame). A no-op in frozen mode — the plain `DONE` block above already
@@ -634,6 +651,50 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     ux.progress.print_summary(&out_tdvmm, &tdvmm_sha, tdvmm_len, progress.elapsed(), diag_path.as_deref());
 
     Ok(0)
+}
+
+/// Maintainer-only fixture regeneration. A normal `tdvmm build` NEVER writes into
+/// the repo — the per-bake ledgers land in the cache ledgers dir. But the committed
+/// `guest/stacks/<name>/{compose.lock.yml,stack.lock}` are TEST FIXTURES that unit
+/// tests compare byte-for-byte, and a real bake is the only way to regenerate the
+/// `stack.lock` fixtures (the `compose.lock.yml` fixtures also have the pure-unit
+/// `TDVMM_REGEN_LOCKS=1 cargo test` path). So when `TDVMM_REGEN_LOCKS` is set, copy
+/// this bake's freshly-written cache ledgers back over the committed fixtures — the
+/// two stack locks plus the committed `guest/initramfs-alpine/packages.lock`
+/// reference (skipped on a cache HIT, where packages.lock isn't restored).
+/// Best-effort + explicitly opt-in: a maintainer runs it from a checkout, so `here`
+/// (the repo `guest/` dir) is present.
+fn maybe_regen_fixtures(
+    here: &Path,
+    stack: &str,
+    lock_out: &Path,
+    stack_lock_out: &Path,
+    packages_lock_out: &Path,
+    ux: &Ux,
+) {
+    if std::env::var_os("TDVMM_REGEN_LOCKS").is_none() {
+        return;
+    }
+    let stack_dir = here.join("stacks").join(stack);
+    let mut targets = vec![
+        (lock_out, stack_dir.join("compose.lock.yml")),
+        (stack_lock_out, stack_dir.join("stack.lock")),
+    ];
+    if packages_lock_out.is_file() {
+        targets.push((packages_lock_out, here.join("initramfs-alpine/packages.lock")));
+    }
+    for (from, to) in &targets {
+        let r = to
+            .parent()
+            .map(std::fs::create_dir_all)
+            .unwrap_or(Ok(()))
+            .and_then(|()| std::fs::copy(from, to).map(|_| ()));
+        if let Err(e) = r {
+            ux.progress.println(format!("TDVMM_REGEN_LOCKS: could not write {} ({e})", to.display()));
+            return;
+        }
+    }
+    ux.progress.println(format!("TDVMM_REGEN_LOCKS: regenerated committed lock fixtures for {stack}"));
 }
 
 /// Write host-probed + relocated bake diagnostics to a side file under the

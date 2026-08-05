@@ -4,8 +4,8 @@
 //! byte-identical `.tdvmm`; see artifact_test gate 1), so a build whose inputs are
 //! unchanged can REUSE the prior outputs and skip the whole pull/squash/assemble
 //! pipeline. The cache key hashes EVERY input that affects the output bytes; a hit
-//! restores the `.tdvmm`, the per-stack initramfs (+ sha sidecar), and the committed
-//! compose.lock.yml + stack.lock. `--no-cache` forces a full rebuild (still stored,
+//! restores the `.tdvmm`, the per-stack initramfs (+ sha sidecar), and the per-stack
+//! compose.lock.yml + stack.lock ledgers. `--no-cache` forces a full rebuild (still stored,
 //! so later runs hit); nightly bake-repeatability uses it to re-bake unconditionally.
 
 use std::path::{Path, PathBuf};
@@ -16,7 +16,7 @@ use super::util::{now_nanos, sha256_file_hex};
 
 /// Cache-entry format version. Bump when the cached fileset or key inputs change
 /// in a way older entries can't satisfy.
-pub(super) const CACHE_VERSION: u32 = 3;
+pub(super) const CACHE_VERSION: u32 = 4;
 
 pub(super) struct CacheCtx {
     /// The per-key entry directory: <cache-root>/<key>.
@@ -77,7 +77,9 @@ pub(super) fn compute_cache_key(
     let engine_sha = sha256_file_hex(&alpine_dir.join("compose-engine.lock"))
         .map_err(|x| format!("hashing compose-engine.lock: {x}"))?;
     // the stack dir: compose.yml + build contexts + bind sources + service source,
-    // EXCLUDING this bake's own committed outputs.
+    // EXCLUDING the lock ledgers (the bake writes those to the cache, but a corpus
+    // stack keeps committed compose.lock.yml/stack.lock fixtures in this same dir —
+    // they must not perturb the key).
     let stack_tree = tree_hash(compose_dir, &["compose.lock.yml", "stack.lock"])
         .map_err(|x| format!("hashing stack dir: {x}"))?;
     // Fable Part B/guardrail §3: the DECLARED builder-image digests replace the old
@@ -125,10 +127,10 @@ pub(super) fn cache_restore(
     c: &CacheCtx,
     out_tdvmm: &Path,
     out_initramfs: &Path,
-    committed_lock: &Path,
+    lock_out: &Path,
     stack_lock: &Path,
 ) -> std::io::Result<String> {
-    for p in [out_tdvmm, out_initramfs, committed_lock] {
+    for p in [out_tdvmm, out_initramfs, lock_out, stack_lock] {
         if let Some(parent) = p.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -139,7 +141,7 @@ pub(super) fn cache_restore(
         c.dir.join("initramfs.cpio.gz.sha256"),
         format!("{}.sha256", out_initramfs.display()),
     )?;
-    std::fs::copy(c.dir.join("compose.lock.yml"), committed_lock)?;
+    std::fs::copy(c.dir.join("compose.lock.yml"), lock_out)?;
     std::fs::copy(c.dir.join("stack.lock"), stack_lock)?;
     Ok(std::fs::read_to_string(c.dir.join("tdvmm_sha256"))?
         .trim()
@@ -152,7 +154,7 @@ pub(super) fn cache_store(
     c: &CacheCtx,
     out_tdvmm: &Path,
     out_initramfs: &Path,
-    committed_lock: &Path,
+    lock_out: &Path,
     stack_lock: &Path,
     tdvmm_sha: &str,
 ) -> std::io::Result<bool> {
@@ -171,7 +173,7 @@ pub(super) fn cache_store(
     } else {
         std::fs::write(tmp.join("initramfs.cpio.gz.sha256"), b"")?;
     }
-    std::fs::copy(committed_lock, tmp.join("compose.lock.yml"))?;
+    std::fs::copy(lock_out, tmp.join("compose.lock.yml"))?;
     std::fs::copy(stack_lock, tmp.join("stack.lock"))?;
     std::fs::write(tmp.join("tdvmm_sha256"), format!("{tdvmm_sha}\n"))?;
     // atomic publish; if another builder won the race, drop our temp.
