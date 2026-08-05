@@ -6,7 +6,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::artifact;
 use crate::compose;
 use crate::engine;
 use crate::ui;
@@ -17,7 +16,7 @@ use super::fsops::copy_tree;
 use super::images::{bake_one, build_one, squash_base_name, ImgRecord};
 use super::initramfs::AssembleConfig;
 use super::kernel::ensure_kernel;
-use super::pack::pack_tdvmm;
+use super::pack::{pack_tdvmm, PackInputs};
 use super::pins::{collect_builder_pins, fetch_verify, read_compose_lock, read_rootfs_builder_pin};
 use super::seed::{SeedConfig, SeedSquash};
 use super::stack_lock::{append_stack_lock_tdvmm, write_stack_lock};
@@ -498,9 +497,27 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
 
     // --- 8. pack the single-file .tdvmm artifact ---
     ux.progress.detail("== pack .tdvmm artifact ==");
-    let tdvmm_bytes = pack_tdvmm(&self_exe, &records, &compose_version, &compose_sha256, &stack_name, &project, mem_mib, est_mib, &builders, &agent_sha, &agent_build_hash, &kernel, &out_initramfs, &lock_path)?;
-    std::fs::write(&out_tdvmm, &tdvmm_bytes)?;
-    let tdvmm_sha = artifact::sha256_hex(&tdvmm_bytes);
+    let sealed = pack_tdvmm(PackInputs {
+        self_exe: &self_exe,
+        records: &records,
+        compose_version: &compose_version,
+        compose_sha256: &compose_sha256,
+        stack: &stack_name,
+        project: &project,
+        mem_mib,
+        est_mib,
+        builders: &builders,
+        agent_sha: &agent_sha,
+        agent_build_hash: &agent_build_hash,
+        kernel_path: &kernel,
+        initramfs_path: &out_initramfs,
+        lock_path: &lock_path,
+    })?;
+    let out_file = std::fs::File::create(&out_tdvmm)
+        .map_err(|e| format!("creating {}: {e}", out_tdvmm.display()))?;
+    let written = sealed.write_to(std::io::BufWriter::new(out_file))?;
+    let tdvmm_sha = written.sha256_hex;
+    let tdvmm_len = written.len;
     // append the artifact identity to the ledger.
     append_stack_lock_tdvmm(&here, &stack_name, &tdvmm_sha, &out_tdvmm)?;
     diag.push_str(&format!(
@@ -543,7 +560,7 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     // the step counter deterministically reaches [8/8] with no stale spinner
     // frame). A no-op in frozen mode — the plain `DONE` block above already
     // covers it byte-for-byte.
-    ux.progress.print_summary(&out_tdvmm, &tdvmm_sha, tdvmm_bytes.len() as u64, progress.elapsed(), diag_path.as_deref());
+    ux.progress.print_summary(&out_tdvmm, &tdvmm_sha, tdvmm_len, progress.elapsed(), diag_path.as_deref());
 
     Ok(0)
 }

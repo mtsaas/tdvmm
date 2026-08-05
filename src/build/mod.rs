@@ -1,7 +1,7 @@
 //! `tdvmm build <compose.yml>` (OP-1b) — the whole bake pipeline, folded into the
 //! binary. It replaced the now-removed `guest/bake-stack.sh` (orchestrator),
 //! `guest/bake_compose.py` (→ [`crate::compose`]), `guest/pack-tdvmm.sh` (→
-//! [`crate::artifact::pack`]), and `guest/initramfs-alpine/{build_rootfs.sh,
+//! [`crate::artifact`] via this module's `pack_tdvmm`), and `guest/initramfs-alpine/{build_rootfs.sh,
 //! prebake_images.sh,zero_cpio_inodes.py}` (→ [`crate::cpio`] + this module).
 //!
 //! Per Fable's OP-1b design:

@@ -309,13 +309,10 @@ fn cmd_boot(args: BootArgs) -> Result<i32, Box<dyn std::error::Error>> {
 fn cmd_run(args: RunArgs) -> Result<i32, Box<dyn std::error::Error>> {
     // Resolve a store NAME (e.g. `tigerbeetle`) or a path to a concrete file.
     let artifact_path = artifact::resolve(&args.artifact)?;
-    let artifact_path = artifact_path
-        .to_str()
-        .ok_or("artifact path is not valid UTF-8")?;
 
     // Load the artifact's members into memory (NO temp-dir extraction): manifest
     // + kernel + initramfs + compose.lock (the last for the on-load verify).
-    let payload = artifact::read_for_run(artifact_path)?;
+    let payload = artifact::read_for_run(&artifact_path)?;
 
     // Member-hash verify on load is DEFAULT-ON (`--no-verify` to skip): recompute
     // each payload member's sha256 and compare to the manifest, so a corrupted or
@@ -323,11 +320,11 @@ fn cmd_run(args: RunArgs) -> Result<i32, Box<dyn std::error::Error>> {
     if args.no_verify {
         dlog!("[tdvmm] run: member-hash verify SKIPPED (--no-verify)");
     } else {
-        verify_payload_or_bail(artifact_path, &payload)?;
+        verify_payload_or_bail(&payload)?;
         dlog!(
             "[tdvmm] run: {} member hashes verified against manifest (identity {})",
             payload.manifest.members.len(),
-            &artifact::file_sha256_hex(artifact_path)?[..16],
+            &artifact::file_sha256_hex(&artifact_path)?[..16],
         );
     }
 
@@ -374,13 +371,7 @@ fn cmd_test(args: TestArgs) -> Result<i32, Box<dyn std::error::Error>> {
     // Resolve a store NAME or a path; a resolution miss is an infra error (exit 2),
     // matching this verb's error style.
     let artifact_path = match artifact::resolve(&args.artifact) {
-        Ok(p) => match p.to_str() {
-            Some(s) => s.to_string(),
-            None => {
-                dlog!("[tdvmm][test] infrastructure error: artifact path is not valid UTF-8");
-                return Ok(EXIT_TEST_INFRA);
-            }
-        },
+        Ok(p) => p,
         Err(e) => {
             dlog!("[tdvmm][test] infrastructure error: {e}");
             return Ok(EXIT_TEST_INFRA);
@@ -396,7 +387,7 @@ fn cmd_test(args: TestArgs) -> Result<i32, Box<dyn std::error::Error>> {
         }
     };
     if !args.no_verify {
-        if let Err(e) = verify_payload_or_bail(&artifact_path, &payload) {
+        if let Err(e) = verify_payload_or_bail(&payload) {
             dlog!("[tdvmm][test] infrastructure error: {e}");
             return Ok(EXIT_TEST_INFRA);
         }
@@ -516,42 +507,21 @@ fn cmd_test(args: TestArgs) -> Result<i32, Box<dyn std::error::Error>> {
     Ok(out.exit_code)
 }
 
-/// Recompute the run payload's member hashes and bail (error) on any mismatch —
-/// the default-ON on-load integrity check for `run`.
-fn verify_payload_or_bail(
-    path: &str,
-    payload: &artifact::RunPayload,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let m = &payload.manifest;
-    let checks = [
-        (artifact::MEMBER_COMPOSE_LOCK, &payload.compose_lock),
-        (artifact::MEMBER_KERNEL, &payload.kernel),
-        (artifact::MEMBER_INITRAMFS, &payload.initramfs),
-    ];
-    for (name, bytes) in checks {
-        let expected = m
-            .member(name)
-            .ok_or_else(|| format!("{path}: manifest has no hash for member {name:?}"))?;
-        let actual = artifact::sha256_hex(bytes);
-        if actual != expected.sha256 {
-            return Err(format!(
-                "{path}: member {name:?} hash MISMATCH (manifest {}, actual {}) — \
-                 artifact is corrupt or tampered; refusing to boot (pass --no-verify to override)",
-                expected.sha256, actual
-            )
-            .into());
-        }
-    }
-    Ok(())
+/// The default-ON on-load integrity check for `run`: recompute the payload's
+/// member hashes against the manifest and refuse to boot on any mismatch.
+fn verify_payload_or_bail(payload: &artifact::RunPayload) -> Result<(), Box<dyn std::error::Error>> {
+    payload.verify_members().map_err(|e| {
+        format!("{e} — artifact is corrupt or tampered; refusing to boot (pass --no-verify to override)")
+            .into()
+    })
 }
 
 // ---- `tdvmm inspect`: print manifest.json (manifest member only) -------------
 
 fn cmd_inspect(path: &str) -> Result<i32, Box<dyn std::error::Error>> {
     let resolved = artifact::resolve(path)?;
-    let path = resolved.to_str().ok_or("artifact path is not valid UTF-8")?;
     // Reads ONLY the first member (manifest.json) — never the big kernel/initramfs.
-    let manifest = artifact::read_manifest(path)?;
+    let manifest = artifact::read_manifest(&resolved)?;
     let json = manifest.to_canonical_json()?;
     // manifest.json to stdout verbatim (a machine can pipe it to jq).
     use std::io::Write;
@@ -563,10 +533,9 @@ fn cmd_inspect(path: &str) -> Result<i32, Box<dyn std::error::Error>> {
 
 fn cmd_verify(path: &str) -> Result<i32, Box<dyn std::error::Error>> {
     let resolved = artifact::resolve(path)?;
-    let path = resolved.to_str().ok_or("artifact path is not valid UTF-8")?;
-    let report = artifact::verify(path)?;
+    let report = artifact::verify(&resolved)?;
     // Identity first (always printed, even on failure — it names the file checked).
-    println!("tdvmm-artifact: {path}");
+    println!("tdvmm-artifact: {}", resolved.display());
     println!("sha256 (identity): {}", report.file_sha256);
     for c in &report.checks {
         println!(
@@ -614,9 +583,7 @@ fn cmd_ls(args: LsArgs) -> Result<i32, Box<dyn std::error::Error>> {
     for e in &entries {
         let when = fmt_mtime(e.modified);
         if args.digest {
-            let sha = artifact::file_sha256_hex(
-                e.path.to_str().ok_or("artifact path is not valid UTF-8")?,
-            )?;
+            let sha = artifact::file_sha256_hex(&e.path)?;
             println!(
                 "{:<name_w$}  {:>8}  {when:<16}  {}",
                 e.name,

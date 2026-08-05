@@ -30,7 +30,7 @@ libc = "0.2"
 # OP-1a: the .tdvmm single-file artifact (format v1). clap = the run/inspect/verify/
 # boot subcommand CLI; serde/serde_json = the manifest (de)serialize; sha2 = member
 # hashing + the whole-file identity. The canonical (deterministic) tar encode/decode
-# is hand-rolled in `artifact.rs` — full control over byte layout for the
+# is hand-rolled in `src/artifact/tar.rs` — full control over byte layout for the
 # bit-reproducible guarantee, and cheap single-member reads for `inspect`.
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
