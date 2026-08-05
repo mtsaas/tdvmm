@@ -1,0 +1,16 @@
+# tdvmm egress T3c -- adversarial dribble. The endpoint drips the body one byte per
+# real interval; the idle gaps must not be fast-forwarded past the guest's read
+# timeout. The probe emits `t3c_dribble_completed` (ok iff the whole body arrived
+# within --max-time).
+name: egress-t3c-dribble
+run:
+  cmdline: "console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable tdvmm.stack=1 tdvmm.egress_mode=t3c tdvmm.egress_maxtime=30"
+  until: done
+steps:
+  - name: wait-probe-up
+    at: 0s
+    wait_for:
+      probe: { exec: { container: probe, cmd: "true" } }
+      until: exit_zero
+      every: 5s
+      timeout: 3m

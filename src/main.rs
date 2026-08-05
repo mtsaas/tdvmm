@@ -45,6 +45,7 @@ mod cpuid;
 mod diag;
 mod doorbell;
 mod egress;
+mod egress_test_server;
 mod engine;
 mod events;
 mod exit;
@@ -273,6 +274,7 @@ fn dispatch() -> Result<i32, Box<dyn std::error::Error>> {
         }),
         Cmd::SeedBuild { config } => build::cmd_seed_build(&config),
         Cmd::AssembleInitramfs { config } => build::cmd_assemble_initramfs(&config),
+        Cmd::EgressTestServer(args) => Ok(egress_test_server::run(&args.behavior, &args.args)),
         Cmd::Boot(args) => cmd_boot(args),
         Cmd::Run(args) => cmd_run(args),
         Cmd::Test(args) => cmd_test(args),

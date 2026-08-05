@@ -355,8 +355,24 @@ reasons, both from the closed-world design:
    keystroke that "should have" arrived during the skipped hour, because there is
    no network uplink and the console is operator-only.
 2. **No in-flight host work.** In a closed, RAM-only world there is no disk or
-   network request that could complete "in the skipped past." (This is the one
-   rule that is *designed for but not yet exercised* — see the gap in §12.)
+   network request that could complete "in the skipped past." The optional
+   `--allow-egress` network channel is the *first* thing that can put real host
+   work in flight, and it is exactly where this rule is now enforced (below).
+
+**The phase gate (`--allow-egress`).** When you open the network, the guest can
+have a TCP connection the host is mediating on its behalf — real work outstanding
+in real time. Skipping the clock forward then would let the guest see a response
+"arrive in the past," which is precisely the hazard reason 2 forbids. So egress
+adds a **phase gate**: the host proxy owns the connection table, and a jump is
+allowed *only* while that table is empty (no open session, nothing mid-resolve, no
+bytes in flight). While anything is open, `park.rs` falls back to waiting at real
+rate — virtual time advances 1:1, exactly like `--ff off` — and resumes skipping
+the instant the connection drains. An always-on assertion sits immediately before
+every `tsc_offset += Δ`: if a jump were ever about to skip real time with external
+state open, the run aborts rather than fake a result. This is the general shape of
+the rule §12 describes for future host I/O (a disk), made concrete for the network
+channel: **never jump the clock while a host operation the guest is waiting on is
+still outstanding.**
 
 **Measured result:** the workload set to insert a row every 3600 virtual seconds
 runs at **~950× real time** — 24 virtual hours in ~90 seconds of wall clock —
@@ -561,12 +577,14 @@ hardware:
 
 **Adjacent future work:**
 
-- **virtio-blk** (a real disk device). This is what will finally exercise the one
-  rule fast-forward is *built for but hasn't had to enforce*: **never jump the
-  clock while a host operation the guest is waiting on is still outstanding**, or
-  the guest would see a completion "in the past." In today's RAM-only world there
-  is no host I/O, so the rule has nothing to fence against. It's noted as an
-  explicit, accepted gap.
+- **virtio-blk** (a real disk device). The rule fast-forward must enforce here —
+  **never jump the clock while a host operation the guest is waiting on is still
+  outstanding**, or the guest would see a completion "in the past" — is now live
+  for the network: the optional `--allow-egress` channel enforces it with a phase
+  gate (§8), the first real host work fast-forward has had to fence against. A disk
+  device would reuse the same discipline: gate the jump on outstanding I/O. In the
+  default RAM-only, no-egress world there is still no host I/O, so with the flag off
+  the rule has nothing to fence against and the closed-world path is unchanged.
 - **Snapshot / replay**, and eventually **multiple cooperating VMs**.
 
 ---

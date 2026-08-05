@@ -106,6 +106,22 @@ pub(crate) enum Cmd {
         #[arg(long, value_name = "PATH")]
         config: String,
     },
+    /// [internal] A scripted loopback endpoint for the egress safety suite: binds an
+    /// ephemeral `127.0.0.1` port, prints it, and serves the given behavior.
+    #[command(name = "__egress-test-server", hide = true)]
+    EgressTestServer(EgressTestServerArgs),
+}
+
+/// `tdvmm __egress-test-server` args: a behavior name and its positional params
+/// (`delay-then-respond <secs>` | `dribble <bytes> <interval_ms>` | `hold-open <secs>`).
+#[derive(Args)]
+pub(crate) struct EgressTestServerArgs {
+    /// The scripted behavior to serve.
+    #[arg(value_name = "BEHAVIOR")]
+    pub(crate) behavior: String,
+    /// The behavior's positional parameters.
+    #[arg(value_name = "ARG", num_args = 0..)]
+    pub(crate) args: Vec<String>,
 }
 
 /// `tdvmm build` args (clap). Mirrors bake-stack.sh's flags.

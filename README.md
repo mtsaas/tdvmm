@@ -163,6 +163,37 @@ world: `image:` and `build:` services, service-name networking, healthchecks and
 closed world (host networking, absolute host binds, external networks,
 always-pull) are rejected at build time with a clear message.
 
+## Opening the network (`--allow-egress`)
+
+By default the guest is sealed: no route out, no way to reach the internet. That
+is what makes fast-forward safe — nothing outside can be waiting on the guest.
+
+When a service genuinely needs to call out (an API, a webhook), add
+`--allow-egress` to `run`/`test`. It opens **one** door: a proxy the guest reaches
+at its bridge gateway on port 1080. A container opts in explicitly with
+`ALL_PROXY=socks5h://<gateway>:1080` in its own compose — nothing is rewritten
+behind your back, and it is never baked into an artifact (you must pass the flag
+every time).
+
+```
+tdvmm run demo --allow-egress
+```
+
+Three things to know:
+
+- **It slows down while a connection is open.** Fast-forward can't skip time the
+  guest is really spending on the wire, so virtual time runs at real speed until
+  the connection closes and then resumes skipping. Prefer short requests and
+  `Connection: close`; a connection held open (keep-alive) keeps the run at real
+  speed.
+- **The wall clock is fake.** The guest boots at a fixed date and every fast-
+  forward jump moves it further from the truth, so TLS, tokens, and other
+  time-sensitive calls may fail. Egress is for talking to services that don't care
+  what year the guest thinks it is.
+- **You give up exact repeatability for that run.** A run that reached outside is
+  no longer a self-contained, re-playable artifact; the run report records
+  `egress=on` so it's never a surprise.
+
 ## Learn more
 
 - **`GETTING_STARTED.md`** — a step-by-step walkthrough: build a stack, run it,
