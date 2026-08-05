@@ -184,7 +184,7 @@ run_case --max-virtual-time 60s \
 echo "  VMM exit code=$RUN_RC after ${RUN_WALL}s (want 3 = horizon stop, NOT 124 = spin)"
 if [ "$RUN_RC" -eq 3 ] && grep -q 'max-virtual-time horizon reached' "$RUN_LOG"; then
   echo "  PASS: the horizon cleanly terminated the reboot=k wedge instead of spinning."
-  grep -m1 'HORIZON DIAGNOSTIC' "$RUN_LOG" | sed 's/^/    /'
+  grep -m1 'stopping: --max-virtual-time' "$RUN_LOG" | sed 's/^/    /'
 else
   echo "  FAIL: expected a horizon stop (3) but VMM exited with $RUN_RC."
   tail -8 "$RUN_LOG" | sed 's/^/    /'

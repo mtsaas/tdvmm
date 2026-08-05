@@ -201,7 +201,7 @@ for stack in "${STACKS[@]}"; do
 
   # ---- FF summary + per-hop <=500us mean ------------------------------------
   echo "  [fast-forward + per-hop <=${GATE_HOP_US}us mean]"
-  grep -E 'FAST-FORWARD SUMMARY' "$log" | tail -1 | sed 's/^/    /'
+  grep -E 'speedup|idle skipped|per-hop mean' "$log" | sed 's/^/    /'
   hm="$(m "$stack" hop_ns_mean)"; [ -z "$hm" ] && hm=0
   sp="$(m "$stack" speedup)"
   us=$(awk "BEGIN{printf \"%.3f\", $hm/1000}")

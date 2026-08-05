@@ -126,7 +126,12 @@ hour 2: submitted 10 orders via gRPC -> 19 total orders (cache=19)
 hour 3: submitted 11 orders via gRPC -> 30 total orders (cache=30)
 ...
 hour 18: submitted 13 orders via gRPC -> 200 total orders (cache=200)
-[tdvmm] FAST-FORWARD SUMMARY: virtual 3600s in real ~33s = ~104x speedup
+[tdvmm] run complete
+  ...
+  Time
+    virtual   3600.0 s
+    real      ~33 s
+    speedup   ~104×
 ```
 
 That's ~19 of the workload's hourly batch cycles — a live Postgres + Redis + gRPC

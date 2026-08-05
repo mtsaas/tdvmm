@@ -38,7 +38,7 @@ JSONL="$TMP/insert-trim.jsonl"; REPORT="$TMP/insert-trim.report.json"
 "$BIN" test "$TDVMM" --scenario "$SCN" --jsonl "$JSONL" --report "$REPORT" \
   --wall-timeout 300 >"$TMP/g1.out" 2>&1
 code=$?
-sed 's/^/    /' "$TMP/g1.out" | grep -E 'VERDICT|steps:|assertion|rowcount|ready|effective-config|FAST-FORWARD SUMMARY' | tail -20
+sed 's/^/    /' "$TMP/g1.out" | grep -E 'VERDICT|steps:|assertion|rowcount|ready|effective-config|speedup' | tail -20
 [ "$code" -eq 0 ] && ok "exit 0" || bad "expected exit 0, got $code"
 [ -f "$JSONL" ] && grep -q '"type":"run_end"' "$JSONL" && ok "JSONL run log produced" || bad "no JSONL run log"
 [ -f "$REPORT" ] && grep -q '"verdict": "pass"' "$REPORT" && ok "JSON report verdict=pass" || bad "report not pass"
