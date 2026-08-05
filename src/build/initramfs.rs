@@ -124,31 +124,47 @@ fn assemble_stack_tree(cfg: &AssembleConfig, rootfs: &Path) -> Result<(), Box<dy
     Ok(())
 }
 
-pub fn cmd_assemble_initramfs(config: &str) -> Result<i32, Box<dyn std::error::Error>> {
-    let cfg: AssembleConfig = serde_json::from_slice(&std::fs::read(config)?)?;
-
-    // --- base runtime segment (Fable Part D): reuse if cached, else build+emit ---
-    let base_seg: Vec<u8> = if cfg.base_hit {
+/// The base-runtime cpio segment (Fable Part D): read the cached one on a HIT,
+/// else build the base tree and emit — also writing the fresh segment to
+/// `cfg.base_segment` for the host to store in the base cache.
+fn base_segment(cfg: &AssembleConfig) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    if cfg.base_hit {
         eprintln!("   [base] cache HIT — reusing base-runtime segment (skipped apk/overlay)");
         // restore the base's package set (stack-independent).
         if cfg.base_packages_lock.is_file() {
             let _ = std::fs::copy(&cfg.base_packages_lock, cfg.work.join("packages.lock"));
         }
-        std::fs::read(&cfg.base_segment)?
+        Ok(std::fs::read(&cfg.base_segment)?)
     } else {
         eprintln!("   [base] cache MISS — building base-runtime tree");
         let base_root = cfg.work.join("rootfs-base");
-        assemble_base_tree(&cfg, &base_root)?;
+        assemble_base_tree(cfg, &base_root)?;
         let seg = cpio::rootfs_segment(&base_root)?;
-        // hand the fresh segment to the host to store in the base cache.
         std::fs::write(&cfg.base_segment, &seg)?;
-        seg
-    };
+        Ok(seg)
+    }
+}
 
-    // --- stack-specific segment (always built fresh; cheap relative to the base) ---
-    let stack_root = cfg.work.join("rootfs-stack");
-    assemble_stack_tree(&cfg, &stack_root)?;
-    let stack_seg = cpio::rootfs_segment(&stack_root)?;
+pub fn cmd_assemble_initramfs(config: &str) -> Result<i32, Box<dyn std::error::Error>> {
+    let cfg: AssembleConfig = serde_json::from_slice(&std::fs::read(config)?)?;
+
+    // The base and stack segments come from independent trees in separate
+    // scratch dirs, so build them concurrently — the stack segment (always
+    // fresh) on its own thread, the base (cached read, or the full tree build
+    // on a MISS) here. The concatenation below keeps its FIXED order (nodes +
+    // base + stack), so completion order never reaches the initramfs bytes.
+    // Thread errors travel as Strings (`Box<dyn Error>` is not `Send`).
+    let (base_res, stack_res) = std::thread::scope(|s| {
+        let stack_t = s.spawn(|| -> Result<Vec<u8>, String> {
+            let stack_root = cfg.work.join("rootfs-stack");
+            assemble_stack_tree(&cfg, &stack_root).map_err(|e| e.to_string())?;
+            cpio::rootfs_segment(&stack_root).map_err(|e| e.to_string())
+        });
+        let base = base_segment(&cfg);
+        (base, stack_t.join().unwrap_or_else(|_| Err("stack-segment thread panicked".into())))
+    });
+    let base_seg = base_res?;
+    let stack_seg = stack_res?;
 
     // --- assemble: nodes + base + stack, then gzip -9 -n (Fable guardrail §4:
     //     the bytes come ONLY from tdvmm's own normalizing cpio emitter) ---

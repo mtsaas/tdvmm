@@ -29,10 +29,10 @@
 //! rule): it cannot outlive a bake, so it can never coexist with a running
 //! VM's raw-tty console.
 
-use std::cell::RefCell;
 use std::io::IsTerminal;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use indicatif::{ProgressBar, ProgressStyle};
@@ -59,8 +59,10 @@ pub struct Progress {
     /// bypasses indicatif's own template coloring).
     color: bool,
     /// TTY-only: the step currently owning the spinner, so the NEXT `step()`
-    /// (or `finish_steps()`) persists its checkmark line first.
-    current: RefCell<Option<StepState>>,
+    /// (or `finish_steps()`) persists its checkmark line first. A `Mutex`, not
+    /// a `RefCell`: the bake pipeline shares one `Progress` across its worker
+    /// threads (parallel image bakes / the overlapped agent build).
+    current: Mutex<Option<StepState>>,
     /// Wall-clock start, for the final summary's `time` field.
     start: Instant,
 }
@@ -95,7 +97,7 @@ impl Progress {
     pub fn new(no_progress_flag: bool) -> Progress {
         let color = std::env::var_os("NO_COLOR").is_none();
         if !enabled(no_progress_flag) {
-            return Progress { bar: None, color, current: RefCell::new(None), start: Instant::now() };
+            return Progress { bar: None, color, current: Mutex::new(None), start: Instant::now() };
         }
         let bar = ProgressBar::new_spinner();
         let template = if color {
@@ -107,7 +109,7 @@ impl Progress {
             bar.set_style(style);
         }
         bar.enable_steady_tick(Duration::from_millis(120));
-        Progress { bar: Some(bar), color, current: RefCell::new(None), start: Instant::now() }
+        Progress { bar: Some(bar), color, current: Mutex::new(None), start: Instant::now() }
     }
 
     /// Always-disabled instance: for commands that share bake-pipeline helpers
@@ -115,7 +117,13 @@ impl Progress {
     /// progress UI is `build`-only (scope lock). Its `println` still falls
     /// back to plain `eprintln!`, so those commands' output is unchanged.
     pub fn disabled() -> Progress {
-        Progress { bar: None, color: false, current: RefCell::new(None), start: Instant::now() }
+        Progress { bar: None, color: false, current: Mutex::new(None), start: Instant::now() }
+    }
+
+    /// Lock the current-step slot, shrugging off poisoning: this is TTY render
+    /// state only, and a panicked bake thread must not be able to wedge it.
+    fn lock_current(&self) -> MutexGuard<'_, Option<StepState>> {
+        self.current.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Whether the bar is actually showing (used by the orchestrator to pick
@@ -148,7 +156,7 @@ impl Progress {
     pub fn step(&self, i: u32, n: u32, label: &str) {
         let Some(b) = &self.bar else { return };
         self.flush_current(b);
-        *self.current.borrow_mut() = Some(StepState {
+        *self.lock_current() = Some(StepState {
             i, n, label: label.to_string(), note: None, items: Vec::new(), start: Instant::now(),
         });
         b.set_prefix(format!("[{i}/{n}]"));
@@ -162,7 +170,7 @@ impl Progress {
         if self.bar.is_none() {
             return;
         }
-        if let Some(st) = self.current.borrow_mut().as_mut() {
+        if let Some(st) = self.lock_current().as_mut() {
             st.note = Some(text.into());
         }
     }
@@ -174,7 +182,7 @@ impl Progress {
         if self.bar.is_none() {
             return;
         }
-        if let Some(st) = self.current.borrow_mut().as_mut() {
+        if let Some(st) = self.lock_current().as_mut() {
             st.items.push((name.into(), size_mib));
         }
     }
@@ -207,7 +215,7 @@ impl Progress {
     /// bar, if any, with the step's wall-clock duration right-aligned on that
     /// `✓` line. A no-op if nothing is pending, or if the bar is inactive.
     fn flush_current(&self, b: &ProgressBar) {
-        let Some(st) = self.current.borrow_mut().take() else { return };
+        let Some(st) = self.lock_current().take() else { return };
         let width = term_width();
         let mark = if self.color { "\x1b[32m\u{2713}\x1b[0m" } else { "\u{2713}" };
         // The note column is fixed (matches the mockup): long enough for the

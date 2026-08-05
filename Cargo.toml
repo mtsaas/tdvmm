@@ -48,6 +48,10 @@ tar = "=0.4.44"
 # `tdvmm` ONLY — FORBIDDEN in tdvmm-agent/tdvmm-proto (their dep trees are
 # Fable-locked). Pinned to an exact version.
 indicatif = "=0.18.6"
+# Data-parallel file reads/hashes in the bake pipeline (cpio payload pre-read,
+# cache-key tree hashing). Output ORDER never comes from rayon: every consumer
+# fills fixed slots or re-sorts, so the emitted bytes stay serial-identical.
+rayon = "1"
 # The line-JSON control-channel wire types, shared with the guest tdvmm-agent.
 tdvmm-proto = { path = "tdvmm-proto" }
 

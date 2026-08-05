@@ -13,7 +13,7 @@ use super::agent::build_agent;
 use super::base::{base_cache_store, build_base_rootfs, compute_base_key};
 use super::cache::{cache_is_hit, cache_restore, cache_store, compute_cache_key, resolve_cache_dir};
 use super::fsops::copy_tree;
-use super::images::{bake_one, build_one, squash_base_name, ImgRecord};
+use super::images::{bake_all, bake_one, build_one, squash_base_name, ImgRecord};
 use super::initramfs::AssembleConfig;
 use super::kernel::ensure_kernel;
 use super::pack::{pack_tdvmm, PackInputs};
@@ -43,6 +43,18 @@ fn print_artifact_id_line(sha: &str, path: &Path) {
     if !std::io::stdout().is_terminal() {
         println!("{sha}  {}", path.display());
     }
+}
+
+/// What the overlapped middle of the bake — stages 3-5, with the agent build
+/// and the two pinned downloads running alongside under one thread scope —
+/// hands the serial assemble/pack tail.
+struct MidBake {
+    agent_build_hash: String,
+    agent_sha: String,
+    selftest_pin: String,
+    seedpins: HashMap<String, String>,
+    lock_sha: String,
+    est_mib: u64,
 }
 
 pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
@@ -246,175 +258,220 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
         ux.progress.detail(format!("   builds: {}", tags.join(" ")));
     }
 
-    // --- 2. bake each image into a scratch vfs store ---
+    // Shared scratch vfs store for the SERIAL bakes (service builds + the
+    // busybox self-test). The user-declared images bake in parallel below, each
+    // against its OWN store (see `images::bake_all`) — podman locks a store per
+    // child process, so a shared --root can't take concurrent writers.
     let bstore = work.join("build-storage");
     let brun = work.join("build-run");
     std::fs::create_dir_all(&bstore)?;
     std::fs::create_dir_all(&brun)?;
 
+    // Stage-6 inputs resolved EARLY (all cheap: env/lock-file reads + path/URL
+    // formatting) so the agent build + the two pinned downloads can start with
+    // the image phase and overlap the whole middle of the bake.
+    let agent_bin = work.join("tdvmm-agent");
+    let mirror = std::env::var("ALPINE_MIRROR").unwrap_or_else(|_| DEFAULT_MIRROR.to_string());
+    let tarball = alpine_dir.join(MINIROOTFS);
+    let mini_url = format!("{mirror}/{ALPINE_BRANCH}/releases/x86_64/{MINIROOTFS}");
+    let (compose_version, compose_sha256) = read_compose_lock(&alpine_dir)?;
+    let compose_cache = alpine_dir.join(format!("docker-compose-{compose_version}"));
+    let compose_url = format!("https://github.com/docker/compose/releases/download/{compose_version}/docker-compose-linux-x86_64");
+
+    // Paths shared by the overlapped middle (the scope below) and the serial
+    // assemble/pack tail after it.
+    let store = work.join("seed").join("storage");
+    let runroot = work.join("seedrun");
+    let lock_path = work.join("compose.lock.yml");
+    let binds_stage = work.join("binds");
+
+    // Ordered accumulators. Everything lands in STABLE input order (fixed
+    // slots / serial merges) — completion order must never reach these, or the
+    // manifest/lock/seed bytes would drift (the byte-identity guardrail).
     let mut records: Vec<ImgRecord> = Vec::new(); // ordered, dupes allowed (RAM total)
     let mut plain_refs: Vec<String> = Vec::new();
     let mut plain_pin: HashMap<String, String> = HashMap::new();
-    // squash/build outputs to load into the seed: (key, local_tag, tar_path)
-    let mut squash_tars: Vec<(String, String, PathBuf)> = Vec::new();
-    let mut total_img_mib: u64 = 0;
 
-    for reff in &validated.images {
-        bake_one(&bstore, &brun, &conf, reff, squash_threshold_mib, &work, &mut records, &mut plain_refs, &mut plain_pin, &mut squash_tars, &mut total_img_mib, &ux)?;
-        // TTY: the aligned sub-list entry (name + size) for this user-declared
-        // image; a no-op in frozen mode. The self-test busybox pull (below)
-        // deliberately has no entry — it isn't part of the stack the user asked
-        // to build.
-        if let Some(r) = records.last() {
-            ux.progress.item(squash_base_name(reff), r.size_mib);
+    // Stages 3-5 under one thread scope: the reproducible agent build (a full
+    // musl recompile that used to run alone in stage 6) and the two pinned
+    // downloads proceed alongside the image bakes + seed store + lock emission,
+    // joining exactly where their outputs are first needed. Errors are `Send`
+    // inside the scope (thread results cross the joins); the `map_err` closure
+    // below coerces back to the plain boxed error this function returns.
+    let mid = std::thread::scope(|s| -> Result<MidBake, Box<dyn std::error::Error + Send + Sync>> {
+        let agent_t = s.spawn(|| build_agent(&here, &agent_bin, &ux).map_err(|e| e.to_string()));
+        let mini_t = s.spawn(|| fetch_verify(&tarball, &mini_url, MINIROOTFS_SHA256, &ux).map_err(|e| e.to_string()));
+        let compose_t = s.spawn(|| fetch_verify(&compose_cache, &compose_url, &compose_sha256, &ux).map_err(|e| e.to_string()));
+
+        // --- 2. bake the user-declared images (parallel, per-image stores),
+        //        then the service builds + the self-test busybox (serial,
+        //        shared store), merging every output in stable input order ---
+        let n_images = validated.images.len();
+        // squash/build outputs to load into the seed: (key, local_tag, tar_path)
+        let mut squash_tars: Vec<(String, String, PathBuf)> = Vec::new();
+        let mut total_img_mib: u64 = 0;
+        for (i, baked) in bake_all(&validated.images, &conf, squash_threshold_mib, &work, &ux)?.into_iter().enumerate() {
+            total_img_mib += baked.record.size_mib;
+            if let Some((reff, canon)) = baked.plain {
+                plain_pin.insert(reff.clone(), canon);
+                plain_refs.push(reff);
+            }
+            if let Some(tar) = baked.squash {
+                squash_tars.push(tar);
+            }
+            // TTY: the aligned sub-list entry (name + size) for this user-declared
+            // image; a no-op in frozen mode. The self-test busybox pull (below)
+            // deliberately has no entry — it isn't part of the stack the user asked
+            // to build.
+            ux.progress.item(squash_base_name(&validated.images[i]), baked.record.size_mib);
+            records.push(baked.record);
         }
-    }
-    if !validated.builds.is_empty() {
-        ux.progress.detail("== build build: services (host-side) ==");
-        for b in &validated.builds {
-            build_one(&bstore, &brun, &conf, b, &work, &mut records, &mut squash_tars, &mut total_img_mib, &ux)?;
-            if let Some(r) = records.last() {
-                ux.progress.item(b.service.clone(), r.size_mib);
+        if !validated.builds.is_empty() {
+            ux.progress.detail("== build build: services (host-side) ==");
+            for (j, b) in validated.builds.iter().enumerate() {
+                let baked = build_one(&bstore, &brun, &conf, b, n_images + j, &work, &ux)?;
+                total_img_mib += baked.record.size_mib;
+                if let Some(tar) = baked.squash {
+                    squash_tars.push(tar);
+                }
+                ux.progress.item(b.service.clone(), baked.record.size_mib);
+                records.push(baked.record);
             }
         }
-    }
-    ux.progress.detail("== bake self-test image (busybox, plain) ==");
-    bake_one(&bstore, &brun, &conf, BUSYBOX_REF, squash_threshold_mib, &work, &mut records, &mut plain_refs, &mut plain_pin, &mut squash_tars, &mut total_img_mib, &ux)?;
-    let selftest_pin = plain_pin.get(BUSYBOX_REF).cloned().unwrap_or_default();
-    for r in &records {
-        diag.push_str(&format!(
-            "image: policy={} upstream={} content_id={} size_mib={}\n",
-            r.policy, r.upstream, r.content_id, r.size_mib
-        ));
-    }
+        ux.progress.detail("== bake self-test image (busybox, plain) ==");
+        let baked = bake_one(&bstore, &brun, &conf, BUSYBOX_REF, squash_threshold_mib, n_images + validated.builds.len(), &work, &ux)?;
+        total_img_mib += baked.record.size_mib;
+        if let Some((reff, canon)) = baked.plain {
+            plain_pin.insert(reff.clone(), canon);
+            plain_refs.push(reff);
+        }
+        if let Some(tar) = baked.squash {
+            squash_tars.push(tar);
+        }
+        records.push(baked.record);
+        let selftest_pin = plain_pin.get(BUSYBOX_REF).cloned().unwrap_or_default();
+        for r in &records {
+            diag.push_str(&format!(
+                "image: policy={} upstream={} content_id={} size_mib={}\n",
+                r.policy, r.upstream, r.content_id, r.size_mib
+            ));
+        }
 
-    // --- 3. build the seed store (podman unshare) ---
-    ux.progress.step(4, TOTAL_STEPS, "seed store");
-    ux.progress.detail("== build seed store ==");
-    let seed = work.join("seed");
-    let store = seed.join("storage");
-    let runroot = work.join("seedrun");
-    std::fs::create_dir_all(&store)?;
-    std::fs::create_dir_all(&runroot)?;
+        // --- 3. build the seed store (podman unshare) ---
+        ux.progress.step(4, TOTAL_STEPS, "seed store");
+        ux.progress.detail("== build seed store ==");
+        std::fs::create_dir_all(&store)?;
+        std::fs::create_dir_all(&runroot)?;
 
-    let seed_cfg = SeedConfig {
-        store: store.clone(),
-        runroot: runroot.clone(),
-        conf: conf.clone(),
-        plains: plain_refs.clone(),
-        squash: squash_tars.iter().map(|(k, t, p)| SeedSquash {
-            key: k.clone(),
-            local_tag: t.clone(),
-            tar: p.clone(),
-        }).collect(),
-        seedpins_out: work.join("seedpins.json"),
-    };
-    let seed_cfg_path = work.join("seed-config.json");
-    std::fs::write(&seed_cfg_path, serde_json::to_vec(&seed_cfg)?)?;
-    run(engine::unshare(&conf)
-        .arg(&self_exe)
-        .arg("__seed-build")
-        .arg("--config")
-        .arg(&seed_cfg_path), ux.mode)?;
-    // relocatable store: drop libpod state (records an absolute graphroot).
-    let _ = std::fs::remove_dir_all(store.join("libpod"));
-    let _ = std::fs::remove_file(store.join("db.sql"));
+        let seed_cfg = SeedConfig {
+            store: store.clone(),
+            runroot: runroot.clone(),
+            conf: conf.clone(),
+            plains: plain_refs.clone(),
+            squash: squash_tars.iter().map(|(k, t, p)| SeedSquash {
+                key: k.clone(),
+                local_tag: t.clone(),
+                tar: p.clone(),
+            }).collect(),
+            seedpins_out: work.join("seedpins.json"),
+        };
+        let seed_cfg_path = work.join("seed-config.json");
+        std::fs::write(&seed_cfg_path, serde_json::to_vec(&seed_cfg)?)?;
+        run(engine::unshare(&conf)
+            .arg(&self_exe)
+            .arg("__seed-build")
+            .arg("--config")
+            .arg(&seed_cfg_path), ux.mode)?;
+        // relocatable store: drop libpod state (records an absolute graphroot).
+        let _ = std::fs::remove_dir_all(store.join("libpod"));
+        let _ = std::fs::remove_file(store.join("db.sql"));
 
-    // seed pins (key -> pinned repo@sha256), resolved inside the unshare.
-    let seedpins: HashMap<String, String> =
-        serde_json::from_slice(&std::fs::read(work.join("seedpins.json"))?)?;
-    for r in records.iter_mut() {
-        if r.policy == "squash" || r.policy == "build" {
-            if let Some(pin) = seedpins.get(&r.key) {
-                r.pinned = pin.clone();
+        // seed pins (key -> pinned repo@sha256), resolved inside the unshare.
+        let seedpins: HashMap<String, String> =
+            serde_json::from_slice(&std::fs::read(work.join("seedpins.json"))?)?;
+        for r in records.iter_mut() {
+            if r.policy == "squash" || r.policy == "build" {
+                if let Some(pin) = seedpins.get(&r.key) {
+                    r.pinned = pin.clone();
+                }
             }
         }
-    }
 
-    // --- 4. emit compose.lock.yml + materialize binds ---
-    ux.progress.step(5, TOTAL_STEPS, "compose.lock + binds");
-    ux.progress.detail("== emit compose.lock.yml ==");
-    let mut digests: HashMap<String, String> = HashMap::new();
-    for reff in &plain_refs {
-        if let Some(canon) = plain_pin.get(reff) {
-            digests.insert(reff.clone(), canon.clone());
+        // --- 4. emit compose.lock.yml + materialize binds ---
+        ux.progress.step(5, TOTAL_STEPS, "compose.lock + binds");
+        ux.progress.detail("== emit compose.lock.yml ==");
+        let mut digests: HashMap<String, String> = HashMap::new();
+        for reff in &plain_refs {
+            if let Some(canon) = plain_pin.get(reff) {
+                digests.insert(reff.clone(), canon.clone());
+            }
         }
-    }
-    for (k, pin) in &seedpins {
-        digests.insert(k.clone(), pin.clone());
-    }
-    let binds_base = "/var/lib/tdvmm-stack/binds";
-    let lock = compose::emit_lock(compose::EmitLockRequest {
-        doc: &doc,
-        compose_path: &compose_path,
-        digests: &digests,
-        binds_base,
-        project: &project,
-    })?;
-    let lock_path = work.join("compose.lock.yml");
-    std::fs::write(&lock_path, &lock.lock_yaml)?;
-    let lock_sha = sha256_file_hex(&lock_path)?;
-    diag.push_str(&format!("compose_lock_sha256: {lock_sha}\n"));
+        for (k, pin) in &seedpins {
+            digests.insert(k.clone(), pin.clone());
+        }
+        let binds_base = "/var/lib/tdvmm-stack/binds";
+        let lock = compose::emit_lock(compose::EmitLockRequest {
+            doc: &doc,
+            compose_path: &compose_path,
+            digests: &digests,
+            binds_base,
+            project: &project,
+        })?;
+        std::fs::write(&lock_path, &lock.lock_yaml)?;
+        let lock_sha = sha256_file_hex(&lock_path)?;
+        diag.push_str(&format!("compose_lock_sha256: {lock_sha}\n"));
 
-    // materialize relative binds into a staging tree.
-    let binds_stage = work.join("binds");
-    std::fs::create_dir_all(&binds_stage)?;
-    for (src, dest_rel) in &lock.bind_manifest {
-        let dest = binds_stage.join(dest_rel);
-        std::fs::create_dir_all(dest.parent().unwrap())?;
-        copy_tree(Path::new(src), &dest)
-            .map_err(|e| format!("materialize bind {src}: {e}"))?;
-        ux.progress.detail(format!("   materialized  {src}  ->  {binds_base}/{dest_rel}"));
-        diag.push_str(&format!("bind: {src} -> {binds_base}/{dest_rel}\n"));
-    }
+        // materialize relative binds into a staging tree.
+        std::fs::create_dir_all(&binds_stage)?;
+        for (src, dest_rel) in &lock.bind_manifest {
+            let dest = binds_stage.join(dest_rel);
+            std::fs::create_dir_all(dest.parent().unwrap())?;
+            copy_tree(Path::new(src), &dest)
+                .map_err(|e| format!("materialize bind {src}: {e}"))?;
+            ux.progress.detail(format!("   materialized  {src}  ->  {binds_base}/{dest_rel}"));
+            diag.push_str(&format!("bind: {src} -> {binds_base}/{dest_rel}\n"));
+        }
 
-    // --- 5. RAM estimate ---
-    let est_mib = ((2.5 * total_img_mib as f64) + working_set_mib as f64 + 512.0).ceil() as u64;
-    ux.progress.detail("== RAM estimate ==");
-    ux.progress.detail(format!("   total image size: {total_img_mib} MiB;  estimate >= {est_mib} MiB (2.5x img + {working_set_mib} ws + 512 base)"));
-    diag.push_str(&format!("ram_estimate: total_img_mib={total_img_mib} estimate_mib={est_mib} configured_mib={mem_mib}\n"));
-    if mem_mib < est_mib {
-        ux.progress.println(format!("{}: configured guest RAM {mem_mib} MiB is below the estimate {est_mib} MiB.", compose::WARN));
-    } else {
-        ux.progress.detail(format!("   configured {mem_mib} MiB >= estimate {est_mib} MiB (OK)"));
-    }
-    if mem_mib > VMM_MAX_MEM_MIB {
-        ux.progress.println(format!("{}: {mem_mib} MiB exceeds the {VMM_MAX_MEM_MIB} MiB (1 TiB) sanity cap — did you pass bytes instead of MiB?", compose::WARN));
-    }
+        // --- 5. RAM estimate ---
+        let est_mib = ((2.5 * total_img_mib as f64) + working_set_mib as f64 + 512.0).ceil() as u64;
+        ux.progress.detail("== RAM estimate ==");
+        ux.progress.detail(format!("   total image size: {total_img_mib} MiB;  estimate >= {est_mib} MiB (2.5x img + {working_set_mib} ws + 512 base)"));
+        diag.push_str(&format!("ram_estimate: total_img_mib={total_img_mib} estimate_mib={est_mib} configured_mib={mem_mib}\n"));
+        if mem_mib < est_mib {
+            ux.progress.println(format!("{}: configured guest RAM {mem_mib} MiB is below the estimate {est_mib} MiB.", compose::WARN));
+        } else {
+            ux.progress.detail(format!("   configured {mem_mib} MiB >= estimate {est_mib} MiB (OK)"));
+        }
+        if mem_mib > VMM_MAX_MEM_MIB {
+            ux.progress.println(format!("{}: {mem_mib} MiB exceeds the {VMM_MAX_MEM_MIB} MiB (1 TiB) sanity cap — did you pass bytes instead of MiB?", compose::WARN));
+        }
 
-    // --- 6. assemble the per-stack initramfs ---
-    ux.progress.step(6, TOTAL_STEPS, "assemble initramfs");
-    ux.progress.detail("== assemble initramfs (Rust rootfs + cpio) ==");
-    // (out_initramfs computed early, above, for the cache path)
+        // --- 6. assemble the per-stack initramfs ---
+        ux.progress.step(6, TOTAL_STEPS, "assemble initramfs");
+        ux.progress.detail("== assemble initramfs (Rust rootfs + cpio) ==");
+        // (out_initramfs computed early, above, for the cache path)
 
-    // build the tdvmm-agent (static musl, reproducible) in the pinned builder
-    // container, before the unshare. Returns the embedded build hash (the compat
-    // oracle reported by ping/hello); its file sha256 goes in the ledger + anchors.
-    let agent_bin = work.join("tdvmm-agent");
-    let agent_build_hash = build_agent(&here, &agent_bin, &ux)?;
-    let agent_sha = sha256_file_hex(&agent_bin)?;
-    // TTY: deliberately NOT shown on the step line — it's diagnostic (relocated
-    // to `diag` below), not routine build progress.
-    ux.progress.detail(format!("   tdvmm-agent: sha256 {agent_sha}  build {agent_build_hash}"));
-    diag.push_str(&format!("agent_sha256: {agent_sha}\nagent_build_hash: {agent_build_hash}\n"));
+        // Join the tdvmm-agent build (static musl, reproducible, in the pinned
+        // builder container — spawned at the top of this scope). Yields the
+        // embedded build hash (the compat oracle reported by ping/hello); its
+        // file sha256 goes in the ledger + anchors and feeds the base key.
+        let agent_build_hash = agent_t.join().map_err(|_| "tdvmm-agent build thread panicked")??;
+        let agent_sha = sha256_file_hex(&agent_bin)?;
+        // TTY: deliberately NOT shown on the step line — it's diagnostic (relocated
+        // to `diag` below), not routine build progress.
+        ux.progress.detail(format!("   tdvmm-agent: sha256 {agent_sha}  build {agent_build_hash}"));
+        diag.push_str(&format!("agent_sha256: {agent_sha}\nagent_build_hash: {agent_build_hash}\n"));
 
-    // fetch + verify the pinned minirootfs + compose binary (cached in alpine_dir).
-    let mirror = std::env::var("ALPINE_MIRROR").unwrap_or_else(|_| DEFAULT_MIRROR.to_string());
-    let tarball = alpine_dir.join(MINIROOTFS);
-    fetch_verify(
-        &tarball,
-        &format!("{mirror}/{ALPINE_BRANCH}/releases/x86_64/{MINIROOTFS}"),
-        MINIROOTFS_SHA256,
-        &ux,
-    )?;
-    let (compose_version, compose_sha256) = read_compose_lock(&alpine_dir)?;
-    let compose_cache = alpine_dir.join(format!("docker-compose-{compose_version}"));
-    fetch_verify(
-        &compose_cache,
-        &format!("https://github.com/docker/compose/releases/download/{compose_version}/docker-compose-linux-x86_64"),
-        &compose_sha256,
-        &ux,
-    )?;
+        // Join the pinned minirootfs + compose-binary downloads (fetched and
+        // sha-verified in their threads, cached in alpine_dir): both must be on
+        // disk before the base build / base key / assemble read them.
+        mini_t.join().map_err(|_| "minirootfs fetch thread panicked")??;
+        compose_t.join().map_err(|_| "compose fetch thread panicked")??;
+
+        Ok(MidBake { agent_build_hash, agent_sha, selftest_pin, seedpins, lock_sha, est_mib })
+    })
+    .map_err(|e| -> Box<dyn std::error::Error> { e })?;
+    let MidBake { agent_build_hash, agent_sha, selftest_pin, seedpins, lock_sha, est_mib } = mid;
 
     // --- Fable Part D: the shared base-runtime segment cache. Keyed on DECLARED
     //     base pins only (Alpine + package set + overlay + agent + compose engine +

@@ -9,6 +9,8 @@
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+use rayon::prelude::*;
+
 use crate::artifact;
 use super::util::sha256_file_hex;
 
@@ -110,19 +112,23 @@ pub(super) fn tree_hash(root: &Path, exclude: &[&str]) -> std::io::Result<String
     if !root.exists() {
         return Ok(format!("MISSING:{}", root.display()));
     }
-    let mut entries: Vec<(String, String)> = Vec::new();
-    for path in walk_files(root)? {
-        let base = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        if exclude.contains(&base) {
-            continue;
-        }
-        let rel = path
-            .strip_prefix(root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .into_owned();
-        entries.push((rel, sha256_file_hex(&path)?));
-    }
+    // Hash the files in parallel; the `sort` below fixes the order the key
+    // hashes over, so rayon's completion order never reaches the digest.
+    let mut entries: Vec<(String, String)> = walk_files(root)?
+        .into_par_iter()
+        .filter(|path| {
+            let base = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            !exclude.contains(&base)
+        })
+        .map(|path| {
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .into_owned();
+            Ok((rel, sha256_file_hex(&path)?))
+        })
+        .collect::<std::io::Result<_>>()?;
     entries.sort();
     let mut buf = String::new();
     for (rel, sha) in entries {

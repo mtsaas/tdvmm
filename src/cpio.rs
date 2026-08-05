@@ -48,6 +48,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
+use rayon::prelude::*;
+
 /// The fixed guest wall-clock epoch (2026-08-01T00:00:00Z), written as the mtime of
 /// every archived entry so timestamps never vary between builds.
 const BUILD_EPOCH: u32 = 1785542400;
@@ -295,6 +297,15 @@ fn rdev_of(meta_rdev: u64, mode: u32) -> (u32, u32) {
 fn write_rootfs_segment(c: &mut Cpio, root: &Path) -> Result<(), CpioError> {
     let entries = collect(root)?;
 
+    // Pre-read every entry's payload in parallel, indexed by the SORTED entry
+    // order. Only the reads are parallel: the emit passes below stay sequential
+    // over `entries`, pulling `payloads[idx]`, so thread completion order can
+    // never reach the archive bytes.
+    let payloads = entries
+        .par_iter()
+        .map(read_payload)
+        .collect::<Result<Vec<_>, CpioError>>()?;
+
     // Pass 1: renumber inodes by first appearance in sorted order.
     let mut ino_map: HashMap<(u64, u64), u32> = HashMap::new();
     let mut counter: u32 = 0;
@@ -332,12 +343,12 @@ fn write_rootfs_segment(c: &mut Cpio, root: &Path) -> Result<(), CpioError> {
             }
             if let Some(list) = deferred.remove(&key) {
                 for &di in list.iter().rev() {
-                    write_entry(c, &entries[di], ino_map[&key], false)?;
+                    write_entry(c, &entries[di], ino_map[&key], &[])?;
                 }
             }
-            write_entry(c, e, ino_map[&key], true)?;
+            write_entry(c, e, ino_map[&key], &payloads[idx])?;
         } else {
-            write_entry(c, e, ino_map[&key], true)?;
+            write_entry(c, e, ino_map[&key], &payloads[idx])?;
         }
     }
 
@@ -350,25 +361,27 @@ fn write_rootfs_segment(c: &mut Cpio, root: &Path) -> Result<(), CpioError> {
     Ok(())
 }
 
-/// Write a single rootfs entry. `with_data` is false for a non-last hardlink, whose
-/// header records `filesize = 0` and carries no content.
-fn write_entry(c: &mut Cpio, e: &Entry, new_ino: u32, with_data: bool) -> Result<(), CpioError> {
-    let t = e.mode & S_IFMT;
-    let (rmaj, rmin) = rdev_of(e.rdev, e.mode);
-
-    let payload: Vec<u8> = if !with_data {
-        Vec::new()
-    } else if t == S_IFREG {
-        fs::read(&e.path).map_err(|err| CpioError::io(format!("reading {}", e.path.display()), err))?
-    } else if t == S_IFLNK {
-        fs::read_link(&e.path)
+/// Read the payload bytes an entry's data section carries: the file contents of
+/// a regular file, the target path of a symlink, empty for everything else.
+fn read_payload(e: &Entry) -> Result<Vec<u8>, CpioError> {
+    match e.mode & S_IFMT {
+        S_IFREG => {
+            fs::read(&e.path).map_err(|err| CpioError::io(format!("reading {}", e.path.display()), err))
+        }
+        S_IFLNK => Ok(fs::read_link(&e.path)
             .map_err(|err| CpioError::io(format!("reading symlink {}", e.path.display()), err))?
             .as_os_str()
             .as_bytes()
-            .to_vec()
-    } else {
-        Vec::new()
-    };
+            .to_vec()),
+        _ => Ok(Vec::new()),
+    }
+}
+
+/// Write a single rootfs entry with its pre-read `payload` bytes. A non-last
+/// hardlink passes `&[]`: its header records `filesize = 0` and carries no
+/// content.
+fn write_entry(c: &mut Cpio, e: &Entry, new_ino: u32, payload: &[u8]) -> Result<(), CpioError> {
+    let (rmaj, rmin) = rdev_of(e.rdev, e.mode);
 
     // GNU cpio --reproducible writes nlink=2 for every directory (it does not
     // preserve the subdirectory-dependent on-disk count); non-directories keep their
@@ -391,7 +404,7 @@ fn write_entry(c: &mut Cpio, e: &Entry, new_ino: u32, with_data: bool) -> Result
         name: &e.name,
     });
     if !payload.is_empty() {
-        c.data(&payload);
+        c.data(payload);
     }
     Ok(())
 }
