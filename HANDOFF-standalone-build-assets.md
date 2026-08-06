@@ -1,9 +1,11 @@
 # Handoff — make `tdvmm build` work from an installed binary (assets → cache, `guest/` → `testdata/`)
 
 **Branch:** `feat/standalone-build-assets` (off `main`)
-**Status:** Phase 2 complete + committed (b89b14f). **DIRECTION CHANGE (owner,
-2026-08-05) — IMPLEMENTED + verified, see "Direction change result" below.**
-Phase 3 (rename/docs) not started.
+**Status:** Phases 1–3 complete. Phase 1/2 + direction change merged to `main`
+(PRs #5, #6). Phase 3 (`guest/` → `testdata/`) committed on `feat/guest-to-testdata`
+(off `main`, 2026-08-06) — see "Phase 3 result" below. The deferred `tdvmm doctor`
+command shipped in PR #6. **DIRECTION CHANGE (owner, 2026-08-05) — IMPLEMENTED +
+verified, see "Direction change result" below.**
 
 ## ⚠ DIRECTION CHANGE — build from source in containers, no precompiled artifacts
 Owner ruling (2026-08-05): **precompiled artifacts are a security risk**, especially
@@ -280,11 +282,47 @@ release-gap error. TWO owner actions gate full standalone:
    exercising the rest of the standalone path — nothing faked.)
 2. **The first agent release** (flow above), then re-run with `EXPECT_AGENT_GAP=0`.
 
-### Phase 3 — rename + docs (mechanical, lands last)
-- [ ] Rename `guest/` → `testdata/`; update `tests/manifest.toml`, `scripts/*`, unit-test path literals, `run.sh`, CONTRIBUTING.
-- [ ] Rewrite README / GETTING_STARTED build examples to use the user's own `./compose.yml` (not `guest/stacks/...`); "clone the repo for worked examples" → `testdata/stacks/`.
-- [ ] Update `cli.rs` `--help` example text.
-- [ ] Resolve the `tdvmm boot` / `initramfs` keep-vs-retire question before finalizing.
+### Phase 3 — rename + docs (mechanical, lands last)  ✅ DONE + COMMITTED (b3b72f0 on `feat/guest-to-testdata`)
+- [x] Rename `guest/` → `testdata/`; update `tests/manifest.toml`, `scripts/*`, unit-test path literals, `run.sh`, CONTRIBUTING.
+- [x] Rewrite README / GETTING_STARTED build examples to use the user's own `./compose.yml` (not `guest/stacks/...`); "clone the repo for worked examples" → `testdata/stacks/`.
+- [x] Update `cli.rs` `--help` example text.
+- [x] Resolve the `tdvmm boot` / `initramfs` keep-vs-retire question — **KEPT** (default initrd is now `testdata/initramfs/`, with the existing clear out-of-repo error).
+
+### Phase 3 result (2026-08-06)
+**What changed.** `git mv guest/ → testdata/` (95 renames: kernel pin+config,
+alpine overlay/pins, busybox clock-guest initramfs, worked-example stacks). Every
+path reference updated: `include_str!`/`include_bytes!` pins (`kernel.rs`,
+`pins.rs`, `overlay.rs`), unit-test fixture literals (`compose/*`, `overlay.rs`),
+the runtime locator, `scripts/*`, `tests/manifest.toml`, `.gitignore`. The
+checkout locator was renamed for coherence: `find_guest_dir` → `find_testdata_dir`
+(+ `guest_dir` params → `testdata_dir`), all `pub(super)`. Domain uses of the word
+"guest" (guest kernel, closed-world guest, guest-agent) were left untouched.
+
+**Docs.** README/GETTING_STARTED build examples now lead with the user's own
+`./compose.yml`; worked examples point at `testdata/stacks/` ("clone the repo").
+`cli.rs --help` examples use `./compose.yml`.
+
+**Retired (pre-approved smaller call).** `guest/manifest.txt` +
+`scripts/gen_manifest.sh` — nothing reads them; the cpuid anchor lives in the
+artifact manifest (`src/artifact/manifest.rs`).
+
+**Byte-identity — VERIFIED (2026-08-06).** The `.tdvmm` embeds file *contents*, not
+the `guest/` path, so the rename is byte-safe. Gates on the rebuilt binary:
+- `scripts/artifact_test.sh insert-trim` gate 1 (BIT-REPRODUCIBLE): two builds →
+  `2b86ab69…` — the unchanged golden. Gates 2–5, 7, 8 (inspect/verify/run-FF/
+  offline/override/run==boot) PASS.
+- `scripts/bake_repeat_test.sh`: two `--no-cache` bakes → identical `compose.lock`
+  (`054307…`), identical manifest digests + initramfs (`af9789…`).
+- `cargo test`: 178 green, incl. cpio golden, committed-lock round-trips, overlay
+  embedded-vs-checkout identity.
+
+**Drive-by fix (separate concern, not the rename).** `artifact_test.sh` gate 6
+(corruption refusal) grepped uppercase `MISMATCH` but the code emits lowercase
+`hash mismatch` (`artifact/read.rs`) — a stale case-sensitive test bug that made
+the gate falsely fail. Fixed to `grep -qi 'mismatch'`. The security property itself
+was always intact: `run` on a flipped-byte artifact prints the member hash mismatch
+and refuses to boot (exit 1). Pre-existing clippy debt in test targets (a `3.14`
+literal, an unchecked `write()` in `serial.rs`) is untouched and unrelated.
 
 ## Deferred follow-ups (queued, do AFTER Phase 2)
 - **`tdvmm doctor` command** (owner, 2026-08-05): a concise CLI that (a) checks all
