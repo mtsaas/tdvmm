@@ -1,0 +1,30 @@
+# tdvmm guest agent pin (mirrors guest/kernel/kernel.lock).
+#
+# The guest tdvmm-agent (a static, reproducible x86_64-unknown-linux-musl binary)
+# is acquired EITHER by fetching the pinned GitHub release asset (PRIMARY,
+# verified against AGENT_SHA256) OR by the reproducible from-source build inside
+# the pinned builder container (FALLBACK — needs a source checkout; the builder
+# image pin lives in images.lock beside this file). Both paths yield the
+# byte-identical agent recorded here; the fallback is sha-verified against
+# AGENT_SHA256 whenever one is recorded. This file is embedded into the tdvmm
+# binary at compile time.
+#
+# This file is EXCLUDED from the agent source-identity hash (agent_src_id), so
+# recording a pin here never changes the agent's own bytes. NOTE: the root
+# Cargo.toml [profile.agent-release] section is NOT part of that hash either —
+# editing the profile changes the agent bytes without changing the build hash,
+# so re-record after any profile change.
+#
+# PENDING FIRST RELEASE: the pin fields are deliberately empty — no agent release
+# asset has been published yet, so the from-source fallback is the only working
+# path. Release flow (record-BEFORE-tag, so nothing lags):
+#   1. tdvmm build-agent --record --tag agent-<version>   # writes this file
+#   2. commit this file, then tag that commit `agent-<version>` and push the tag
+#   3. .github/workflows/agent-release.yml rebuilds the agent (double-build),
+#      verifies it matches AGENT_SHA256 below, and publishes the asset
+#   4. rebuild/re-release tdvmm so the recorded pin is embedded
+AGENT_VERSION=
+AGENT_SHA256=
+AGENT_BUILD_HASH=
+RELEASE_ASSET_URL=
+RELEASE_ASSET_NAME=tdvmm-agent-x86_64-unknown-linux-musl

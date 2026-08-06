@@ -1,7 +1,31 @@
 # Handoff — make `tdvmm build` work from an installed binary (assets → cache, `guest/` → `testdata/`)
 
 **Branch:** `feat/standalone-build-assets` (off `main`)
-**Status:** Phase 1 in progress (see checklist). Update this doc at every phase boundary.
+**Status:** Phase 2 complete + verified + committed as a checkpoint. **DIRECTION CHANGE
+(owner, 2026-08-05) — see below.** Phase 3 (rename/docs) not started.
+
+## ⚠ DIRECTION CHANGE — build from source in containers, no precompiled artifacts
+Owner ruling (2026-08-05): **precompiled artifacts are a security risk**, especially
+run privileged in the VM. So the CLI must **compile the kernel and the tdvmm-agent
+from source in containers, then extract the artifacts** — do NOT download prebuilt
+binaries. Consequences:
+- **CANCELLED (no longer needed):** the agent release asset + `agent-release.yml`
+  workflow, `agent.lock`-as-a-download-pin, the kernel release-asset fetch, and the
+  stale-kernel-asset re-upload. No outward-facing publishing.
+- **INVERT:** the container-build paths that Phase 2 built as *fallbacks*
+  (`ensure_kernel` reproducible build in `kernel.rs`; the agent musl build in
+  `agent.rs`) become the **PRIMARY** (and only) path. Kernel already fetches sha-pinned
+  SOURCE (cdn.kernel.org) + builds in a pinned container — that IS the model.
+- **KEEP from Phase 2:** overlay embedding, the cache relocation (Phase 1), `self_here`
+  → optional repo locator, and the container-build code. Pins become build-input /
+  reproducibility verification, not a download source.
+- **NEW crux:** for a no-repo install to build the agent from source, the agent source
+  (tdvmm-agent + tdvmm-proto) must travel with the binary (embed) or be a pinned source
+  tarball. Kernel-source model to mirror.
+- **NEW requirement:** a good terminal UI showing the container BUILD progress (kernel +
+  agent compiles) — stream container output into the ratatui progress UI (BuildKit-style).
+- Design + implementation delegated to Fable. Reproducibility (byte-identical `.tdvmm`,
+  the double-build gates) is preserved — the built bytes are the same reproducible outputs.
 
 ## Why
 `tdvmm build` silently requires running from a full source checkout, so the
@@ -28,7 +52,7 @@ Every phase must keep `.tdvmm` **byte-identical**. Gates: `scripts/artifact_test
 
 ## Plan / checklist
 
-### Phase 1 — output-side, no byte risk  ✅ DONE (see "Phase 1 result")
+### Phase 1 — output-side, no byte risk  ✅ DONE + COMMITTED (b5f55ca) — verified independently (byte-identity 2b86ab69, bake_repeat exit 0, 203 tests)
 - [x] Stop writing `stack.lock` / `compose.lock.yml` into `guest/stacks/<name>/`; write beside the artifact in the cache. Fix `create_dir_all` + golden-clobber.
 - [x] Move download cache (minirootfs tarball, compose CLI) → `cache_dir/downloads/`.
 - [x] Move `vmlinux` output → `cache_dir/kernel/`.
@@ -80,13 +104,121 @@ pass today; the boot-smoke scripts (`smoke_test*.sh`, `artifact_test.sh`) were m
 cache-first with a repo-tree fallback. Full cleanup lands with the Phase-3 `testdata/` rename.
 
 ### Phase 2 — input-side embedding + agent asset (reproducibility risk)
-- [ ] Embed `kernel.lock` + kernel config; `ensure_kernel` output → cache.
-- [ ] Embed `compose-engine.lock`, `rootfs-builder.lock` as consts.
-- [ ] Embed the `initramfs-alpine/overlay/` (7 files, ~40 KB) — reproduce bytes+modes exactly.
-- [ ] Add `agent.lock` + `ensure_agent(cache_dir)` (release asset + source fallback).
-- [ ] Add the tag-triggered GH Actions workflow to publish the agent asset.
-- [ ] Delete `self_here()`; rework cache-key inputs (repo tree hashes → pinned shas).
-- [ ] Gate: byte-identity suite + **new empty-cwd installed-binary bake test**.
+- [x] Embed the `kernel.lock` PIN (not the kernel, not the config — owner decision
+      2026-08-05 mid-phase: vmlinux stays a pure GitHub release asset fetched into
+      the cache; the pin is a compiled-in pointer via `include_str!`; the kernel
+      config stays a checkout file read only by the container-REBUILD fallback +
+      `--record`, mirroring the agent's from-source fallback).
+- [x] Embed `compose-engine.lock`, `rootfs-builder.lock` (`include_str!`, parsed
+      at use — the committed files stay the single source of truth).
+- [x] Embed the `initramfs-alpine/overlay/` (7 files, ~40 KB) — reproduce bytes+modes exactly.
+- [x] Add `agent.lock` + `ensure_agent(cache_dir, …)` (release asset + source fallback).
+- [x] Add the tag-triggered GH Actions workflow to publish the agent asset.
+  - **NOTE — chicken-and-egg:** no agent release asset exists yet. Phase 2 builds the
+    full mechanism; `ensure_agent` uses the source-build fallback (needs a checkout)
+    until the OWNER cuts the first release (pushes a tag → the new workflow publishes
+    the asset → record its sha into `agent.lock`). Do NOT cut a release in Phase 2.
+    Kernel/minirootfs/compose/overlay have real pinned assets already, so THOSE go
+    fully standalone now; the zero-checkout **agent** path only closes after the
+    first release. The empty-cwd acceptance test verifies everything testable now and
+    documents the agent-release dependency — it does not fake the agent path.
+- [x] `self_here()` → optional `find_guest_dir()`/`find_repo_root()` (checkout
+      locator for the fallbacks/maintainer flows only); cache-key inputs reworked
+      (repo tree hashes → the pinned agent identity); `CACHE_VERSION` 4 → 5.
+- [x] Gate: byte-identity suite + **new empty-cwd installed-binary bake test**
+      (`scripts/standalone_bake_test.sh`).
+
+### Phase 2 result (2026-08-05)
+**What is embedded now (compile time, `include_str!`/`include_bytes!`).** The
+committed files stay the single source of truth; the binary carries a copy:
+
+| embedded | from | consumed by |
+|---|---|---|
+| kernel PIN (`kernel.lock`, ~1 KB) | `guest/kernel/kernel.lock` | `ensure_kernel` — fetches the vmlinux release asset into `<cache>/kernel/`, sha-verified. The KERNEL ITSELF IS NOT EMBEDDED (owner decision 2026-08-05): download + cache, pin compiled in. The kernel CONFIG is also not embedded — it's read from a checkout only by the container-REBUILD fallback + `--record` (maintainer paths, mirroring the agent's from-source fallback). |
+| `compose-engine.lock` | `guest/initramfs-alpine/` | compose CLI pin (version+sha) |
+| `rootfs-builder.lock` | `guest/initramfs-alpine/` | fetch/rootfs-builder image pin |
+| `images.lock` | `tdvmm-agent/` | agent-builder image pin (see below why this stays a separate file) |
+| agent PIN (`agent.lock`) | `tdvmm-agent/agent.lock` (NEW) | `ensure_agent` (empty = pending first release) |
+| overlay (7 files, ~40 KB) | `guest/initramfs-alpine/overlay/` | `src/build/overlay.rs` static table |
+
+**Overlay mode pinning (the reproducibility risk — resolved).** The overlay is a
+static `(relpath, mode, bytes)` table (`src/build/overlay.rs`): `init` + the 3
+`usr/local/bin/*.sh` scripts pinned 0755, `etc/inittab` + the 2
+`etc/containers/*.conf` pinned 0644 (these three previously inherited the
+checkout's modes — now pinned, so even a weird-umask checkout can't perturb the
+cpio). Directories are created 0755 only where missing (`cp -a`-merge parity —
+existing base-rootfs dirs keep their tar modes). Two unit tests guard it:
+embedded-vs-checkout byte/mode identity (catches drift when overlay files are
+edited without rebuilding the table) and umask-independence of `materialize`.
+
+**Agent asset mechanism + the self-reference trap.** `ensure_agent(cache_dir,
+source_out, ux)` mirrors `ensure_kernel`: cache hit (sha-verified) → release
+asset fetch (sha-verified) → from-source pinned-container build (needs a
+checkout; ALSO sha-verified against the recorded pin once one exists — the
+drift tripwire). CRITICAL invariant: `agent.lock` lives inside `tdvmm-agent/`,
+whose tree hash IS the agent build hash (`TDVMM_AGENT_BUILD`, compiled into the
+agent bytes) — so `agent.lock` is EXCLUDED from that hash (`agent_src_id`,
+`tree_hash(…, &["agent.lock"])`). Without the exclusion, recording a pin would
+change the very bytes it pins (and adding the file already broke the golden —
+caught by the byte-identity gate, fixed). `images.lock` stays a separate file
+for the same reason in reverse: it MUST stay inside the hashed tree (a builder
+bump is a real toolchain change). Root `Cargo.toml`'s `[profile.agent-release]`
+is NOT hashed — noted in agent.lock; re-record after profile edits.
+
+**Agent release flow (record-BEFORE-tag; owner action to close the gap).**
+1. `tdvmm build-agent --record --tag agent-<version>` → writes the pin into `tdvmm-agent/agent.lock`
+2. commit, tag that commit `agent-<version>`, push the tag
+3. `.github/workflows/agent-release.yml` (NEW, `agent-*` tags) rebuilds via `tdvmm build-agent` itself (zero flag drift), double-builds for byte-identity, REFUSES to publish unless bytes == the committed pin, then uploads `tdvmm-agent-x86_64-unknown-linux-musl` + sha256sums
+4. rebuild/re-release tdvmm so the pin is embedded
+
+Until step 1-3 happen, agent.lock is a documented empty placeholder and the
+from-source fallback (checkout required) is the only agent path.
+
+**`self_here()` → optional locator.** Now `find_guest_dir()`/`find_repo_root()`
+returning `Option` (`src/build/util.rs`). Consumers, each with its own clear
+error only when actually needed: the agent from-source fallback, the kernel
+container-rebuild fallback + `build-kernel --record`, `tdvmm boot`'s default
+initrd, `TDVMM_REGEN_LOCKS` fixture regen, and `agent_cache_input`'s
+source-identity case. Nothing else touches the checkout.
+
+**Cache keys.** `CACHE_VERSION` 4 → 5 (one cold miss). The bake key's
+`agent/proto/cargolock` repo-tree lines collapsed into one `agent:` line —
+the recorded release sha when agent.lock has one, else `agent_src_id` (checkout).
+Overlay + compose-engine lines now come from the embedded data. Keys never
+enter artifact bytes; the `.tdvmm` golden confirms.
+
+**Byte-identity + gates (all run on the corrected code, 2026-08-05).**
+- insert-trim two-bake `--no-cache`: both bakes `2b86ab69…` (the Phase-1 golden) — PASS.
+  (An intermediate version that put agent.lock in the hashed tree WITHOUT the
+  exclusion baked `cd926acb…` — the gate caught it; that is why the exclusion is
+  load-bearing.)
+- `scripts/bake_repeat_test.sh`: PASS (identical compose.lock + ledger + initramfs across two `--no-cache` bakes).
+- `scripts/agent_double_build.sh`: PASS (both builds `1c0b5393…`, build hash `a14c50c8…` — matching the golden bake's agent exactly).
+- Self-reference check: with agent.lock POPULATED (real sha, no asset URL), a
+  rebuilt tdvmm's `build-agent` reproduces the same build hash + bytes — recording
+  a pin cannot move the `.tdvmm`.
+- `cargo build` clean; new code clippy-clean; 205 tests green (203 + 2 new overlay tests).
+- `git status guest/` stays clean through all bakes.
+
+**Residual noticed (pre-existing, not Phase 2):** the committed
+`guest/stacks/insert-trim/stack.lock` fixture records `agent_sha256 809d4845…`,
+but the golden `2b86ab69…` bake (Phase 1 and now) actually embeds agent
+`1c0b5393…` (build `a14c50c8…`) — the fixture predates an agent-source change
+and was never regenerated. No Rust test reads it; refresh via
+`TDVMM_REGEN_LOCKS=1` during Phase 3 if desired.
+
+**NEW acceptance script: `scripts/standalone_bake_test.sh`** (installed binary,
+empty cwd, fresh cache). Result: minirootfs + compose CLI + overlay + all pins
+resolve standalone; the bake stops at the AGENT step with the documented
+release-gap error. TWO owner actions gate full standalone:
+1. **KNOWN ISSUE (found by this test): the `kernel-6.1.128` release asset is
+   STALE** — the published `vmlinux-6.1.128` hashes `98d75369…`, but kernel.lock
+   (and the checkout vmlinux) record `19506f47…`. The standalone kernel fetch
+   therefore fails → falls back → refuses without a checkout. Fix:
+   `gh release upload kernel-6.1.128 guest/kernel/vmlinux-6.1.128 --clobber`.
+   (The script reports this, then seeds the sha-verified pinned vmlinux to keep
+   exercising the rest of the standalone path — nothing faked.)
+2. **The first agent release** (flow above), then re-run with `EXPECT_AGENT_GAP=0`.
 
 ### Phase 3 — rename + docs (mechanical, lands last)
 - [ ] Rename `guest/` → `testdata/`; update `tests/manifest.toml`, `scripts/*`, unit-test path literals, `run.sh`, CONTRIBUTING.

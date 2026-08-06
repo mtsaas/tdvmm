@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cpio;
 use super::fsops::{copy_dir_contents, copy_tree, extract_tar, install_file, set_mode, walk_files};
+use super::overlay;
 use super::util::sha256_file_hex;
 
 #[derive(Serialize, Deserialize)]
@@ -17,7 +18,6 @@ pub(super) struct AssembleConfig {
     /// (the cached cpio segment is read instead). Untrusted transport (§2).
     pub(super) base_rootfs_tar: PathBuf,
     pub(super) build_epoch: String,
-    pub(super) overlay: PathBuf,
     pub(super) compose_cache: PathBuf,
     pub(super) agent_bin: PathBuf,
     pub(super) seed_storage: PathBuf,
@@ -59,16 +59,9 @@ fn assemble_base_tree(cfg: &AssembleConfig, rootfs: &Path) -> Result<(), Box<dyn
     //       container and staged to work/ by the host before this runs.
     extract_tar(&cfg.base_rootfs_tar, rootfs)?;
 
-    // 4. drop the overlay (init, self-test, compose launcher, podman config).
-    copy_dir_contents(&cfg.overlay, rootfs)?;
-    for f in [
-        "init",
-        "usr/local/bin/container-selftest.sh",
-        "usr/local/bin/compose-up.sh",
-        "usr/local/bin/healthcheck-ticker.sh",
-    ] {
-        set_mode(&rootfs.join(f), 0o755)?;
-    }
+    // 4. drop the overlay (init, self-test, compose launcher, podman config) —
+    //    embedded in the binary, every byte + mode pinned (see `overlay`).
+    overlay::materialize(rootfs)?;
     // 4b. bake the genuine Docker Compose v2 CLI.
     install_file(&cfg.compose_cache, &rootfs.join("usr/local/bin/docker-compose"), 0o755)?;
     // 4c. bake the control-channel agent.

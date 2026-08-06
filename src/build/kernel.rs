@@ -4,6 +4,12 @@
 //! (PRIMARY, sha256-verified against kernel.lock) OR by a reproducible build inside
 //! the pinned builder container (FALLBACK). Both paths MUST yield the byte-identical
 //! vmlinux recorded in kernel.lock. No host kernel toolchain is required.
+//!
+//! The kernel.lock PIN is embedded at compile time — a pointer (version + sha256 +
+//! release URL), never the kernel itself — so a standalone binary knows exactly
+//! what to fetch into the cache with no checkout present. The container-rebuild
+//! fallback and the `--record` bootstrap are maintainer flows that read the
+//! kernel config (and write the lock) in a source checkout.
 
 use std::path::{Path, PathBuf};
 
@@ -11,14 +17,19 @@ use crate::compose;
 use crate::engine;
 use crate::ui;
 use super::cache::resolve_cache_dir;
-use super::pins::{fetch_in_container, fetch_verify};
-use super::util::{self_here, sha256_file_hex, ScratchDir};
+use super::pins::{fetch_in_container, fetch_verify, lock_values};
+use super::util::{find_guest_dir, sha256_file_hex, ScratchDir};
 use super::ux::{capture, run, Ux};
 use super::{BuildKernelArgs, BUILD_EPOCH};
 
 /// The kernel config baked into the guest (Firecracker microvm config, HPET off,
-/// all built-in). Lives in `guest/kernel/`; hashed into kernel.lock.
+/// all built-in). Lives in `guest/kernel/`; hashed into kernel.lock. Read only by
+/// the container-rebuild fallback + `--record` (checkout-only maintainer paths).
 const KERNEL_CONFIG_NAME: &str = "microvm-kernel-x86_64-6.1.config";
+
+/// The committed kernel pin (`guest/kernel/kernel.lock`), embedded so `tdvmm
+/// build` can fetch + verify the pinned vmlinux with no checkout present.
+const KERNEL_LOCK: &str = include_str!("../../guest/kernel/kernel.lock");
 
 /// The reproducibility ledger for the guest kernel (`guest/kernel/kernel.lock`).
 /// Empty `sha256`/`source_sha256`/`builder_digest` mean "not yet recorded" — the
@@ -36,42 +47,54 @@ pub(super) struct KernelLock {
     release_asset_name: String,
 }
 
-fn kernel_lock_path(here: &Path) -> PathBuf {
-    here.join("kernel/kernel.lock")
+fn kernel_lock_path(guest_dir: &Path) -> PathBuf {
+    guest_dir.join("kernel/kernel.lock")
 }
 
-pub(super) fn read_kernel_lock(here: &Path) -> Result<KernelLock, Box<dyn std::error::Error>> {
-    let path = kernel_lock_path(here);
+fn parse_kernel_lock(text: &str, origin: &str) -> Result<KernelLock, Box<dyn std::error::Error>> {
+    let [version, sha256, config_sha256, source_url, source_sha256, builder_image, builder_digest, release_asset_url, release_asset_name] =
+        lock_values(text, [
+            "KERNEL_VERSION",
+            "KERNEL_SHA256",
+            "KERNEL_CONFIG_SHA256",
+            "KERNEL_SOURCE_URL",
+            "KERNEL_SOURCE_SHA256",
+            "BUILDER_IMAGE",
+            "BUILDER_DIGEST",
+            "RELEASE_ASSET_URL",
+            "RELEASE_ASSET_NAME",
+        ]);
+    if version.is_empty() {
+        return Err(format!("{origin} missing KERNEL_VERSION").into());
+    }
+    Ok(KernelLock {
+        version,
+        sha256,
+        config_sha256,
+        source_url,
+        source_sha256,
+        builder_image,
+        builder_digest,
+        release_asset_url,
+        release_asset_name,
+    })
+}
+
+/// The compiled-in kernel pin (what `tdvmm build` uses — never a checkout read).
+pub(super) fn embedded_kernel_lock() -> Result<KernelLock, Box<dyn std::error::Error>> {
+    parse_kernel_lock(KERNEL_LOCK, "embedded kernel.lock")
+}
+
+/// Read the CHECKOUT's kernel.lock (maintainer `--record` flow only: the on-disk
+/// file is the source of truth being edited; a rebuild embeds it afterwards).
+fn read_kernel_lock(guest_dir: &Path) -> Result<KernelLock, Box<dyn std::error::Error>> {
+    let path = kernel_lock_path(guest_dir);
     let text = std::fs::read_to_string(&path)
         .map_err(|e| format!("reading {}: {e} (run `tdvmm build-kernel --record`)", path.display()))?;
-    let mut k = KernelLock::default();
-    for line in text.lines() {
-        let l = line.trim();
-        if l.is_empty() || l.starts_with('#') {
-            continue;
-        }
-        let Some((key, val)) = l.split_once('=') else { continue };
-        let val = val.trim().to_string();
-        match key.trim() {
-            "KERNEL_VERSION" => k.version = val,
-            "KERNEL_SHA256" => k.sha256 = val,
-            "KERNEL_CONFIG_SHA256" => k.config_sha256 = val,
-            "KERNEL_SOURCE_URL" => k.source_url = val,
-            "KERNEL_SOURCE_SHA256" => k.source_sha256 = val,
-            "BUILDER_IMAGE" => k.builder_image = val,
-            "BUILDER_DIGEST" => k.builder_digest = val,
-            "RELEASE_ASSET_URL" => k.release_asset_url = val,
-            "RELEASE_ASSET_NAME" => k.release_asset_name = val,
-            _ => {}
-        }
-    }
-    if k.version.is_empty() {
-        return Err(format!("{} missing KERNEL_VERSION", path.display()).into());
-    }
-    Ok(k)
+    parse_kernel_lock(&text, &path.display().to_string())
 }
 
-fn write_kernel_lock(here: &Path, k: &KernelLock) -> Result<(), Box<dyn std::error::Error>> {
+fn write_kernel_lock(guest_dir: &Path, k: &KernelLock) -> Result<(), Box<dyn std::error::Error>> {
     let body = format!(
         "# tdvmm guest kernel pin (Fable Part C).\n\
          #\n\
@@ -93,22 +116,21 @@ fn write_kernel_lock(here: &Path, k: &KernelLock) -> Result<(), Box<dyn std::err
         k.version, k.sha256, k.config_sha256, k.source_url, k.source_sha256,
         k.builder_image, k.builder_digest, k.release_asset_url, k.release_asset_name,
     );
-    std::fs::write(kernel_lock_path(here), body)?;
+    std::fs::write(kernel_lock_path(guest_dir), body)?;
     Ok(())
 }
 
 /// Ensure the guest kernel is present at `<cache>/kernel/vmlinux-<version>` and
-/// matches kernel.lock. PRIMARY: fetch the pinned release asset (sha-verified).
-/// FALLBACK: reproducible container build (sha-verified). Returns the path. The
-/// kernel.lock + config are still READ from `here` (`guest/kernel/`); only the
-/// built/fetched vmlinux OUTPUT lands in the (disposable) cache dir.
+/// matches the embedded kernel.lock pin. PRIMARY: fetch the pinned release asset
+/// (sha-verified) — no checkout needed. FALLBACK: reproducible container build,
+/// which reads the kernel config from a source checkout (maintainer path).
+/// Returns the cached vmlinux path.
 pub(super) fn ensure_kernel(
-    here: &Path,
     cache_dir: &Path,
     force_build: bool,
     ux: &Ux,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let kl = read_kernel_lock(here)?;
+    let kl = embedded_kernel_lock()?;
     let kernel_dir = cache_dir.join("kernel");
     std::fs::create_dir_all(&kernel_dir)?;
     let out = kernel_dir.join(format!("vmlinux-{}", kl.version));
@@ -151,8 +173,13 @@ pub(super) fn ensure_kernel(
         }
     }
 
-    // FALLBACK: reproducible container build.
-    build_kernel_container(here, cache_dir, &kl, &out, ux)?;
+    // FALLBACK: reproducible container build (needs the kernel config from a
+    // source checkout — the release asset is the standalone path).
+    let guest_dir = find_guest_dir().ok_or(
+        "kernel release asset unavailable and no source checkout found for the \
+         container-build fallback (the fallback reads guest/kernel/ from a checkout)",
+    )?;
+    build_kernel_container(&guest_dir, cache_dir, &kl, &out, ux)?;
     let got = sha256_file_hex(&out)?;
     if got != kl.sha256 {
         return Err(format!(
@@ -172,7 +199,7 @@ pub(super) fn ensure_kernel(
 /// fixed KBUILD_BUILD_* + build-id). Source is fetched+verified on the host and
 /// bind-mounted; the compiler is pinned by the image digest.
 fn build_kernel_container(
-    here: &Path,
+    guest_dir: &Path,
     cache_dir: &Path,
     kl: &KernelLock,
     out: &Path,
@@ -204,7 +231,7 @@ fn build_kernel_container(
     std::fs::write(&conf, "[engine]\nruntime=\"runc\"\n")?;
     let work_guard = ScratchDir::new()?;
     let work = work_guard.path();
-    let config_src = here.join("kernel").join(KERNEL_CONFIG_NAME);
+    let config_src = guest_dir.join("kernel").join(KERNEL_CONFIG_NAME);
 
     // 3. the in-container build script — a faithful port of build_kernel.sh with
     //    reproducibility knobs. KBUILD_BUILD_TIMESTAMP/USER/HOST + SOURCE_DATE_EPOCH
@@ -288,15 +315,18 @@ fn resolve_image_digest(image: &str) -> Result<String, Box<dyn std::error::Error
 /// ALWAYS with progress UI disabled / output inherited (scope lock — progress
 /// is `build`-only): a plain inherited passthrough.
 pub fn cmd_build_kernel(args: BuildKernelArgs) -> Result<i32, Box<dyn std::error::Error>> {
-    let here = self_here()?;
     let (cache_dir, cache_src) = resolve_cache_dir(args.cache_dir.as_deref());
     eprintln!("== tdvmm build-kernel ==  cache-dir: {} (source: {cache_src})", cache_dir.display());
     let progress = ui::Progress::disabled();
     let ux = Ux::inherit(&progress);
 
     if args.record {
-        // Bootstrap/update kernel.lock: resolve digests, container-build, record.
-        let mut kl = read_kernel_lock(&here).unwrap_or_default();
+        // Bootstrap/update kernel.lock IN THE CHECKOUT: resolve digests,
+        // container-build, record. The edited on-disk lock is the input; a
+        // `cargo build` afterwards embeds the recorded pin.
+        let guest_dir = find_guest_dir()
+            .ok_or("`build-kernel --record` needs a source checkout (it rewrites guest/kernel/kernel.lock)")?;
+        let mut kl = read_kernel_lock(&guest_dir).unwrap_or_default();
         if kl.version.is_empty() {
             return Err(
                 "guest/kernel/kernel.lock must exist with at least KERNEL_VERSION + \
@@ -304,7 +334,7 @@ pub fn cmd_build_kernel(args: BuildKernelArgs) -> Result<i32, Box<dyn std::error
             );
         }
         // config sha (declared input).
-        kl.config_sha256 = sha256_file_hex(&here.join("kernel").join(KERNEL_CONFIG_NAME))?;
+        kl.config_sha256 = sha256_file_hex(&guest_dir.join("kernel").join(KERNEL_CONFIG_NAME))?;
         // resolve the builder image digest if not pinned yet.
         if kl.builder_digest.is_empty() {
             eprintln!("   resolving builder image digest for {} ...", kl.builder_image);
@@ -316,12 +346,12 @@ pub fn cmd_build_kernel(args: BuildKernelArgs) -> Result<i32, Box<dyn std::error
             .clone()
             .map(PathBuf::from)
             .unwrap_or_else(|| cache_dir.join("kernel").join(format!("vmlinux-{}", kl.version)));
-        build_kernel_container(&here, &cache_dir, &kl, &out, &ux)?;
+        build_kernel_container(&guest_dir, &cache_dir, &kl, &out, &ux)?;
         // record source + kernel shas.
         let tarball = cache_dir.join("kernel-src").join(format!("linux-{}.tar.xz", kl.version));
         kl.source_sha256 = sha256_file_hex(&tarball)?;
         kl.sha256 = sha256_file_hex(&out)?;
-        write_kernel_lock(&here, &kl)?;
+        write_kernel_lock(&guest_dir, &kl)?;
         eprintln!("== kernel.lock RECORDED ==");
         eprintln!("   KERNEL_SHA256={}", kl.sha256);
         eprintln!("   KERNEL_SOURCE_SHA256={}", kl.source_sha256);
@@ -331,7 +361,7 @@ pub fn cmd_build_kernel(args: BuildKernelArgs) -> Result<i32, Box<dyn std::error
         return Ok(0);
     }
 
-    let out = ensure_kernel(&here, &cache_dir, args.force_build, &ux)?;
+    let out = ensure_kernel(&cache_dir, args.force_build, &ux)?;
     // If a custom -o was requested, copy the acquired kernel there too.
     if let Some(o) = &args.out {
         let op = PathBuf::from(o);
@@ -350,25 +380,31 @@ pub fn cmd_build_kernel(args: BuildKernelArgs) -> Result<i32, Box<dyn std::error
 
 /// Resolve `tdvmm boot`'s kernel + initramfs, filling in a default for any input
 /// the caller omitted: the pinned guest kernel (ensured/fetched like `tdvmm
-/// build`) and the committed busybox clock-guest initramfs. A provided path is
-/// used verbatim.
+/// build` — no checkout needed) and the committed busybox clock-guest initramfs
+/// (checkout-only; error if absent). A provided path is used verbatim.
 pub fn resolve_boot_inputs(
     kernel: Option<&str>,
     initrd: Option<&str>,
 ) -> Result<(PathBuf, PathBuf), Box<dyn std::error::Error>> {
-    let here = self_here()?;
     let kernel = match kernel {
         Some(k) => PathBuf::from(k),
         None => {
             let (cache_dir, _src) = resolve_cache_dir(None);
             let progress = ui::Progress::disabled();
             let ux = Ux::inherit(&progress);
-            ensure_kernel(&here, &cache_dir, false, &ux)?
+            ensure_kernel(&cache_dir, false, &ux)?
         }
     };
     let initrd = match initrd {
         Some(i) => PathBuf::from(i),
-        None => here.join("initramfs/initramfs.cpio.gz"),
+        None => {
+            let guest_dir = find_guest_dir().ok_or(
+                "no --initrd given and no source checkout found: the default busybox \
+                 clock-guest initramfs lives in the repo (guest/initramfs/); pass \
+                 --initrd <path> or run from a checkout",
+            )?;
+            guest_dir.join("initramfs/initramfs.cpio.gz")
+        }
     };
     Ok((kernel, initrd))
 }

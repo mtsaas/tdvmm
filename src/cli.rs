@@ -170,6 +170,15 @@ pub(crate) struct BuildAgentArgs {
     /// Output path for the built static-musl agent binary.
     #[arg(short, long, value_name = "PATH", default_value = "tdvmm-agent.bin")]
     pub(crate) out: String,
+    /// Record this build's sha256 + build hash + release-asset URL (for --tag)
+    /// into tdvmm-agent/agent.lock (the agent mirror of `build-kernel --record`;
+    /// step 1 of the record-before-tag agent release flow).
+    #[arg(long, requires = "tag")]
+    pub(crate) record: bool,
+    /// The `agent-<version>` tag you will push after committing the recorded
+    /// agent.lock (with --record).
+    #[arg(long, value_name = "TAG")]
+    pub(crate) tag: Option<String>,
 }
 
 /// `tdvmm build-kernel` args.

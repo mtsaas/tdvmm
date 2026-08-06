@@ -12,11 +12,13 @@ use std::path::{Path, PathBuf};
 
 use crate::artifact;
 use super::fsops::tree_hash;
+use super::overlay;
+use super::pins::COMPOSE_ENGINE_LOCK;
 use super::util::{now_nanos, sha256_file_hex};
 
 /// Cache-entry format version. Bump when the cached fileset or key inputs change
 /// in a way older entries can't satisfy.
-pub(super) const CACHE_VERSION: u32 = 4;
+pub(super) const CACHE_VERSION: u32 = 5;
 
 pub(super) struct CacheCtx {
     /// The per-key entry directory: <cache-root>/<key>.
@@ -47,8 +49,6 @@ pub(super) fn resolve_cache_dir(flag: Option<&str>) -> (PathBuf, &'static str) {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn compute_cache_key(
     self_exe: &Path,
-    here: &Path,
-    alpine_dir: &Path,
     compose_dir: &Path,
     stack_name: &str,
     mem_mib: u64,
@@ -57,25 +57,16 @@ pub(super) fn compute_cache_key(
     cache_dir: &Path,
     kernel: &Path,
     builders: &[String],
+    agent_pin: &str,
 ) -> Result<CacheCtx, String> {
-    let repo_root = here
-        .parent()
-        .ok_or_else(|| "no repo root above guest/".to_string())?;
     let self_sha = sha256_file_hex(self_exe).map_err(|x| format!("hashing tdvmm binary: {x}"))?;
     let kernel_sha = sha256_file_hex(kernel).map_err(|x| format!("hashing kernel: {x}"))?;
-    // The agent is now a Rust crate built in a pinned musl container: its cache
-    // input is the agent + proto crate trees + Cargo.lock (a toolchain/image bump
-    // is captured via the `builders` digests below). Fable §2.
-    let agent_tree =
-        tree_hash(&repo_root.join("tdvmm-agent"), &[]).map_err(|x| format!("hashing tdvmm-agent: {x}"))?;
-    let proto_tree =
-        tree_hash(&repo_root.join("tdvmm-proto"), &[]).map_err(|x| format!("hashing tdvmm-proto: {x}"))?;
-    let cargo_lock = sha256_file_hex(&repo_root.join("Cargo.lock"))
-        .map_err(|x| format!("hashing Cargo.lock: {x}"))?;
-    let overlay_tree =
-        tree_hash(&alpine_dir.join("overlay"), &[]).map_err(|x| format!("hashing overlay: {x}"))?;
-    let engine_sha = sha256_file_hex(&alpine_dir.join("compose-engine.lock"))
-        .map_err(|x| format!("hashing compose-engine.lock: {x}"))?;
+    // The agent input is its PINNED identity (`agent_cache_input`): the recorded
+    // release sha, or the source identity when the from-source fallback applies.
+    // The overlay + compose-engine pins are embedded in the binary (also covered
+    // by `self_sha`, but kept as named lines so the key form stays legible).
+    let overlay_id = overlay::overlay_id();
+    let engine_sha = artifact::sha256_hex(COMPOSE_ENGINE_LOCK.as_bytes());
     // the stack dir: compose.yml + build contexts + bind sources + service source,
     // EXCLUDING the lock ledgers (the bake writes those to the cache, but a corpus
     // stack keeps committed compose.lock.yml/stack.lock fixtures in this same dir —
@@ -92,10 +83,8 @@ pub(super) fn compute_cache_key(
          builders:  {builders_line}\n\
          engine:    {engine_sha}\n\
          kernel:    {kernel_sha}\n\
-         agent:     {agent_tree}\n\
-         proto:     {proto_tree}\n\
-         cargolock: {cargo_lock}\n\
-         overlay:   {overlay_tree}\n\
+         agent:     {agent_pin}\n\
+         overlay:   {overlay_id}\n\
          stackdir:  {stack_tree}\n\
          name:      {stack_name}\n\
          mem:       {mem_mib}\n\

@@ -30,6 +30,7 @@ mod fsops;
 mod images;
 mod initramfs;
 mod kernel;
+mod overlay;
 mod pack;
 mod pins;
 mod seed;
@@ -120,4 +121,16 @@ pub struct BuildKernelArgs {
     pub cache_dir: Option<String>,
     pub force_build: bool,
     pub record: bool,
+}
+
+/// `tdvmm build-agent` args.
+pub struct BuildAgentArgs {
+    pub out: String,
+    /// Record this build's identity (sha256 + build hash + release-asset URL for
+    /// `--tag`) into `tdvmm-agent/agent.lock` — the agent mirror of
+    /// `build-kernel --record`.
+    pub record: bool,
+    /// The release tag whose workflow published (or will publish) the agent
+    /// asset; required with `--record`.
+    pub tag: Option<String>,
 }

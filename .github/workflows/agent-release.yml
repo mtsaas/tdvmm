@@ -1,0 +1,71 @@
+name: agent-release
+
+# Publish the reproducible guest tdvmm-agent as a release asset on `agent-*`
+# tags (standalone-build-assets Phase 2). Record-BEFORE-tag flow: the tagged
+# commit already carries the pin in tdvmm-agent/agent.lock (written by
+# `tdvmm build-agent --record --tag <tag>`), and this workflow REFUSES to
+# publish unless its own rebuild of the tagged tree byte-matches that pin —
+# so a published asset can never disagree with the embedded agent.lock.
+#
+# The agent is built by the repo's own `tdvmm build-agent` (the exact pinned-
+# container build `tdvmm build` uses — zero flag drift), twice, as the
+# double-build byte-identity gate. ubuntu-latest ships podman (the engine
+# tdvmm shells out to).
+
+on:
+  push:
+    tags:
+      - "agent-*"
+
+permissions:
+  contents: write # required to create the GitHub release + upload assets
+
+jobs:
+  build-agent-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: build tdvmm (host toolchain; only drives the pinned container build)
+        run: cargo build --release --locked -p tdvmm
+
+      - name: double-build the agent in the pinned container (byte-identity gate)
+        run: |
+          set -eu
+          podman --version
+          target/release/tdvmm build-agent -o /tmp/agent-a
+          target/release/tdvmm build-agent -o /tmp/agent-b
+          A=$(sha256sum /tmp/agent-a | awk '{print $1}')
+          B=$(sha256sum /tmp/agent-b | awk '{print $1}')
+          echo "build A: $A"
+          echo "build B: $B"
+          [ "$A" = "$B" ] || { echo "FATAL: agent double-build is not byte-identical"; exit 1; }
+
+      - name: verify the build matches the committed agent.lock pin
+        run: |
+          set -eu
+          GOT=$(sha256sum /tmp/agent-a | awk '{print $1}')
+          WANT=$(sed -n 's/^AGENT_SHA256=//p' tdvmm-agent/agent.lock)
+          echo "built:    $GOT"
+          echo "recorded: $WANT"
+          [ -n "$WANT" ] || { echo "FATAL: agent.lock has no AGENT_SHA256 — record before tagging (tdvmm build-agent --record --tag ${GITHUB_REF_NAME})"; exit 1; }
+          [ "$GOT" = "$WANT" ] || { echo "FATAL: built agent does not match the committed agent.lock pin"; exit 1; }
+
+      - name: stage release assets
+        run: |
+          set -eu
+          mkdir -p dist
+          cp /tmp/agent-a dist/tdvmm-agent-x86_64-unknown-linux-musl
+          chmod +x dist/tdvmm-agent-x86_64-unknown-linux-musl
+          cd dist
+          sha256sum tdvmm-agent-x86_64-unknown-linux-musl > sha256sums.txt
+          cat sha256sums.txt
+
+      - name: create release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          files: |
+            dist/tdvmm-agent-x86_64-unknown-linux-musl
+            dist/sha256sums.txt
+          generate_release_notes: true
