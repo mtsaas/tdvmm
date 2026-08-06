@@ -41,7 +41,6 @@ pub(crate) fn cmd_doctor(
         ("network", check_network()),
         ("cache dir", check_cache_dir(&cache_dir, cache_src)),
     ];
-    println!("tdvmm doctor");
     for (name, result) in &checks {
         println!("{}", render_check(name, result));
     }
@@ -58,7 +57,10 @@ pub(crate) fn cmd_doctor(
         progress.finish();
         match result {
             Ok(()) => {
-                println!("  ✓ {:<12} guest kernel + agent + pinned downloads cached", "pre-warm");
+                println!(
+                    "  ✓ {:<12} guest kernel + agent + pinned downloads cached",
+                    "pre-warm"
+                );
             }
             Err(e) => {
                 problems += 1;
@@ -97,7 +99,9 @@ fn check_kvm() -> CheckResult {
     let vm = kvm
         .create_vm()
         .map_err(|e| format!("KVM_CREATE_VM failed: {e} (virtualization disabled in firmware?)"))?;
-    let vcpu = vm.create_vcpu(0).map_err(|e| format!("KVM_CREATE_VCPU failed: {e}"))?;
+    let vcpu = vm
+        .create_vcpu(0)
+        .map_err(|e| format!("KVM_CREATE_VCPU failed: {e}"))?;
     vtsc::read_tsc_offset(&vcpu).map_err(|e| e.to_string())?;
     Ok(format!(
         "virtualization ok (api v{}), KVM_VCPU_TSC_OFFSET available",
@@ -115,7 +119,9 @@ fn check_host_kernel() -> CheckResult {
 /// `6.9.3-arch1-1`) must be >= [`MIN_KERNEL`].
 fn kernel_release_check(release: &str) -> CheckResult {
     let (want_major, want_minor) = MIN_KERNEL;
-    let mut nums = release.split(['.', '-']).map_while(|s| s.parse::<u32>().ok());
+    let mut nums = release
+        .split(['.', '-'])
+        .map_while(|s| s.parse::<u32>().ok());
     match (nums.next(), nums.next()) {
         (Some(major), Some(minor)) if (major, minor) >= MIN_KERNEL => {
             Ok(format!("{release} (>= {want_major}.{want_minor})"))
@@ -133,7 +139,11 @@ fn check_podman() -> CheckResult {
         .output()
         .map_err(|e| format!("{} not runnable: {e}", engine::ENGINE))?;
     if !out.status.success() {
-        return Err(format!("`{} --version` failed ({})", engine::ENGINE, out.status));
+        return Err(format!(
+            "`{} --version` failed ({})",
+            engine::ENGINE,
+            out.status
+        ));
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
@@ -157,18 +167,21 @@ fn check_cache_dir(cache_dir: &Path, source: &str) -> CheckResult {
     std::fs::create_dir_all(cache_dir)
         .map_err(|e| format!("cannot create {}: {e}", cache_dir.display()))?;
     let probe = cache_dir.join(".doctor-write-probe");
-    std::fs::write(&probe, b"").map_err(|e| format!("{} not writable: {e}", cache_dir.display()))?;
+    std::fs::write(&probe, b"")
+        .map_err(|e| format!("{} not writable: {e}", cache_dir.display()))?;
     let _ = std::fs::remove_file(&probe);
-    let free_gib = free_bytes(cache_dir)
-        .map_err(|e| format!("statvfs {}: {e}", cache_dir.display()))?
-        >> 30;
+    let free_gib =
+        free_bytes(cache_dir).map_err(|e| format!("statvfs {}: {e}", cache_dir.display()))? >> 30;
     if free_gib < MIN_FREE_GIB {
         return Err(format!(
             "{} ({source}) has only {free_gib} GiB free (need >= {MIN_FREE_GIB} GiB)",
             cache_dir.display()
         ));
     }
-    Ok(format!("{} ({source}), writable, {free_gib} GiB free", cache_dir.display()))
+    Ok(format!(
+        "{} ({source}), writable, {free_gib} GiB free",
+        cache_dir.display()
+    ))
 }
 
 /// Free bytes available to unprivileged writes on `path`'s filesystem.
@@ -225,9 +238,15 @@ mod tests {
             ("bad", Err("broken".to_string())),
         ];
         let good = render_check(checks[0].0, &checks[0].1);
-        assert!(good.starts_with("  ✓ ok") && good.ends_with(" fine"), "{good}");
+        assert!(
+            good.starts_with("  ✓ ok") && good.ends_with(" fine"),
+            "{good}"
+        );
         let bad = render_check(checks[1].0, &checks[1].1);
-        assert!(bad.starts_with("  ✗ bad") && bad.ends_with(" broken"), "{bad}");
+        assert!(
+            bad.starts_with("  ✗ bad") && bad.ends_with(" broken"),
+            "{bad}"
+        );
         assert_eq!(problem_count(&checks), 1);
         assert_eq!(problem_count(&checks[..1]), 0);
         assert_eq!(exit_code(0), 0);
