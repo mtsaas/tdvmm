@@ -811,7 +811,7 @@ mod tests {
             "demo",
         ];
         for stack in stacks {
-            let path = format!("guest/stacks/{stack}/compose.lock.yml");
+            let path = format!("testdata/stacks/{stack}/compose.lock.yml");
             let raw = std::fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("read {path}: {e}"));
             // Strip leading '#' comment lines (the generated header).

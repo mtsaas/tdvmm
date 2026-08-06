@@ -15,7 +15,7 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-COMPOSE="${1:-$ROOT/guest/stacks/insert-trim/compose.yml}"
+COMPOSE="${1:-$ROOT/testdata/stacks/insert-trim/compose.yml}"
 # The stack name is the compose file's folder — `tdvmm build` takes it as the
 # required first positional (name, then compose path).
 NAME="$(basename "$(dirname "$COMPOSE")")"

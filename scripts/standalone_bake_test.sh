@@ -23,8 +23,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 STACK="${1:-insert-trim}"
 FULL_COLD="${FULL_COLD:-0}"
-KERNEL_VER="$(sed -n 's/^KERNEL_VERSION=//p' "$ROOT/guest/kernel/kernel.lock")"
-KERNEL_SHA="$(sed -n 's/^KERNEL_SHA256=//p' "$ROOT/guest/kernel/kernel.lock")"
+KERNEL_VER="$(sed -n 's/^KERNEL_VERSION=//p' "$ROOT/testdata/kernel/kernel.lock")"
+KERNEL_SHA="$(sed -n 's/^KERNEL_SHA256=//p' "$ROOT/testdata/kernel/kernel.lock")"
 
 BIN="$ROOT/target/release/tdvmm"
 [ -x "$BIN" ] || { echo "[standalone] building tdvmm..."; ( cd "$ROOT" && cargo build --release ) || exit 3; }
@@ -37,8 +37,8 @@ mkdir -p "$INSTALL" "$PROJECT" "$CACHE"
 cp "$BIN" "$INSTALL/tdvmm"
 
 # The user's project: the compose file + its relative bind sources, nothing else
-# (no lock fixtures, no guest/ tree).
-for f in "$ROOT/guest/stacks/$STACK"/*; do
+# (no lock fixtures, no testdata/ tree).
+for f in "$ROOT/testdata/stacks/$STACK"/*; do
   case "$(basename "$f")" in
     compose.lock.yml|stack.lock) ;;
     *) cp -r "$f" "$PROJECT/" ;;
@@ -51,7 +51,7 @@ done
 if [ "$FULL_COLD" != "1" ]; then
   for k in "${TDVMM_CACHE_DIR:-$HOME/.tdvmm}/kernel/vmlinux-$KERNEL_VER" \
            "$ROOT/.tdvmm-tmp/tdvmm-cache/kernel/vmlinux-$KERNEL_VER" \
-           "$ROOT/guest/kernel/vmlinux-$KERNEL_VER"; do
+           "$ROOT/testdata/kernel/vmlinux-$KERNEL_VER"; do
     if [ -f "$k" ] && echo "$KERNEL_SHA  $k" | sha256sum -c --quiet - 2>/dev/null; then
       mkdir -p "$CACHE/kernel"
       cp "$k" "$CACHE/kernel/vmlinux-$KERNEL_VER"
@@ -66,9 +66,9 @@ echo "== standalone bake: installed binary, empty cwd, fresh cache =="
 echo "   bin:     $INSTALL/tdvmm"
 echo "   project: $PROJECT"
 echo "   cache:   $CACHE"
-# Snapshot the repo guest/ state so the untouched-repo check below compares
+# Snapshot the repo testdata/ state so the untouched-repo check below compares
 # against it (uncommitted work in a dev checkout must not fail the test).
-GUEST_BEFORE="$(cd "$ROOT" && git status --porcelain guest/ 2>/dev/null)"
+GUEST_BEFORE="$(cd "$ROOT" && git status --porcelain testdata/ 2>/dev/null)"
 ( cd "$PROJECT" && env -u TDVMM_CACHE_DIR \
     "$INSTALL/tdvmm" build --no-cache --cache-dir "$CACHE" "$STACK-standalone" compose.yml \
 ) >"$LOG" 2>&1
@@ -110,14 +110,14 @@ else
   echo "FAIL compose CLI missing from fresh cache"; ok=0
 fi
 
-# The repo must be untouched (nothing may write into guest/) — compared
+# The repo must be untouched (nothing may write into testdata/) — compared
 # against the pre-bake snapshot, so pre-existing uncommitted work doesn't trip.
-GUEST_AFTER="$(cd "$ROOT" && git status --porcelain guest/ 2>/dev/null)"
+GUEST_AFTER="$(cd "$ROOT" && git status --porcelain testdata/ 2>/dev/null)"
 if [ "$GUEST_AFTER" != "$GUEST_BEFORE" ]; then
-  echo "FAIL bake dirtied the repo guest/ tree:"
+  echo "FAIL bake dirtied the repo testdata/ tree:"
   diff <(printf '%s' "$GUEST_BEFORE") <(printf '%s' "$GUEST_AFTER"); ok=0
 else
-  echo "OK   repo guest/ tree untouched"
+  echo "OK   repo testdata/ tree untouched"
 fi
 
 if [ "$ok" = "1" ]; then

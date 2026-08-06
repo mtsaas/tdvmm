@@ -11,20 +11,20 @@ use super::kernel::embedded_kernel_lock;
 use super::util::{sha256_file_hex, ScratchDir};
 use super::ux::{run, Ux};
 
-/// The pinned Alpine rootfs-builder ledger (`guest/initramfs-alpine/
+/// The pinned Alpine rootfs-builder ledger (`testdata/initramfs-alpine/
 /// rootfs-builder.lock`), embedded. This image assembles the base rootfs
 /// (`apk --root`) AND serves as the fetch container (busybox `wget`).
-const ROOTFS_BUILDER_LOCK: &str = include_str!("../../guest/initramfs-alpine/rootfs-builder.lock");
+const ROOTFS_BUILDER_LOCK: &str = include_str!("../../testdata/initramfs-alpine/rootfs-builder.lock");
 
 /// The pinned rust+musl agent-builder ledger (`tdvmm-agent/images.lock`),
 /// embedded. Deliberately INSIDE the tree `agent_src_id` hashes: a builder
 /// bump is a real toolchain change and must change the agent's build hash.
 const AGENT_IMAGES_LOCK: &str = include_str!("../../tdvmm-agent/images.lock");
 
-/// The pinned Docker Compose CLI ledger (`guest/initramfs-alpine/
+/// The pinned Docker Compose CLI ledger (`testdata/initramfs-alpine/
 /// compose-engine.lock`), embedded.
 pub(super) const COMPOSE_ENGINE_LOCK: &str =
-    include_str!("../../guest/initramfs-alpine/compose-engine.lock");
+    include_str!("../../testdata/initramfs-alpine/compose-engine.lock");
 
 /// Parse `KEY=value` lines out of a pin ledger, returning the values for `keys`
 /// in order. Missing keys come back as empty strings — callers decide what is

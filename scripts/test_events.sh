@@ -14,7 +14,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 BIN="$ROOT/target/release/tdvmm"
-PASS_SCN="$ROOT/guest/stacks/insert-trim/events.yml"
+PASS_SCN="$ROOT/testdata/stacks/insert-trim/events.yml"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 
 [ -x "$BIN" ] || { echo "building tdvmm..."; ( cd "$ROOT" && cargo build --release ) || exit 3; }
@@ -23,7 +23,7 @@ TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 # agent with the poll/FIFO loop and embeds the FIFO volume). A canonical name keeps
 # the committed lock ledger clean; the run then resolves the stack by name.
 echo "== bake insert-trim (embeds the bridge) =="
-"$BIN" build insert-trim "$ROOT/guest/stacks/insert-trim/compose.yml" || { echo "FATAL: bake failed" >&2; exit 3; }
+"$BIN" build insert-trim "$ROOT/testdata/stacks/insert-trim/compose.yml" || { echo "FATAL: bake failed" >&2; exit 3; }
 
 PASS=0; FAIL=0
 ok()  { echo "  PASS: $*"; PASS=$((PASS+1)); }

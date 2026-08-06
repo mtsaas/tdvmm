@@ -15,23 +15,23 @@ pub(super) fn sha256_file_hex(path: &Path) -> std::io::Result<String> {
     Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// Locate the repo `guest/` directory of a source checkout, if one is present:
+/// Locate the repo `testdata/` directory of a source checkout, if one is present:
 /// relative to the running binary (target/…), else under the current dir. Every
 /// runtime asset is embedded or cached now, so a checkout is OPTIONAL — only the
 /// from-source fallbacks (agent build, kernel rebuild, `tdvmm boot`'s default
 /// initrd) and the maintainer `--record`/regen flows consume this, and each
 /// reports its own clear error when it needs a checkout that isn't there.
-pub(super) fn find_guest_dir() -> Option<PathBuf> {
+pub(super) fn find_testdata_dir() -> Option<PathBuf> {
     let mut p = std::env::current_exe().ok()?;
     // .../target/release/tdvmm -> .../ (repo root)
     for _ in 0..3 {
         p.pop();
     }
-    let cand = p.join("guest");
+    let cand = p.join("testdata");
     if cand.is_dir() {
         return Some(cand);
     }
-    let cwd = std::env::current_dir().ok()?.join("guest");
+    let cwd = std::env::current_dir().ok()?.join("testdata");
     cwd.is_dir().then_some(cwd)
 }
 

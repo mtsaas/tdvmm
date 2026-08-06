@@ -33,7 +33,7 @@ BIN="$ROOT/target/release/tdvmm"
 # in $CACHE/bake/; keeping the dir warm across runs makes re-bakes fast.
 CACHE="${TDVMM_TEST_CACHE:-$ROOT/.tdvmm-tmp/tdvmm-cache}"; mkdir -p "$CACHE"
 # `tdvmm build`'s ensure_kernel writes the pinned vmlinux under the cache dir (was
-# guest/kernel/). Gate 8's raw boot reads it; the first build below populates it.
+# testdata/kernel/). Gate 8's raw boot reads it; the first build below populates it.
 KERNEL="$CACHE/kernel/vmlinux-6.1.128"
 
 STACKS=("$@"); [ "${#STACKS[@]}" -eq 0 ] && STACKS=(insert-trim svcchain)
@@ -68,7 +68,7 @@ for stack in "${STACKS[@]}"; do
   echo "==================================================================="
   echo " ARTIFACT GATES: $stack"
   echo "==================================================================="
-  compose="$ROOT/guest/stacks/$stack/compose.yml"
+  compose="$ROOT/testdata/stacks/$stack/compose.yml"
   if [ ! -f "$compose" ]; then
     echo "  SKIP: $stack has no compose.yml at $compose"; continue
   fi

@@ -59,7 +59,7 @@ pub const SERIAL_IRQ: u32 = 4;
 /// by the MP table (see `mptable::isa_irq_to_ioapic_pin`), so no routing change is
 /// needed. The guest kernel must expose ttyS1: the pinned kernel gains
 /// `CONFIG_SERIAL_8250_NR_UARTS=2` / `RUNTIME_UARTS=2` (see
-/// `guest/kernel/test1a-com2.config`).
+/// `testdata/kernel/test1a-com2.config`).
 pub const SERIAL2_PORT_BASE: u16 = 0x2f8;
 pub const SERIAL2_IRQ: u32 = 3;
 
@@ -69,7 +69,7 @@ pub const SERIAL2_IRQ: u32 = 3;
 /// needed). A guest-side forwarder opens ttyS3 and the host `EgressBackend`
 /// (`crate::egress`) terminates the proxied TCP. The guest kernel exposes ttyS3
 /// via `CONFIG_SERIAL_8250_NR_UARTS=4` / `RUNTIME_UARTS=4` (recorded in
-/// `guest/kernel/egress-com4.config`). COM3 (ttyS2) is intentionally left
+/// `testdata/kernel/egress-com4.config`). COM3 (ttyS2) is intentionally left
 /// unbacked (open bus): NR_UARTS=4 is the smallest cap that includes the COM4
 /// slot. When `--allow-egress` is off, COM4 is not instantiated, 0x2e8 stays
 /// open bus, and ttyS3 never registers — byte-identical to the closed world.

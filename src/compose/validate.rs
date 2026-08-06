@@ -459,9 +459,9 @@ mod tests {
         serde_yaml::from_str(src).expect("test fixture parses")
     }
 
-    /// Validate a `guest/stacks/rejects/*.yml` corpus fixture (cwd is the repo root).
+    /// Validate a `testdata/stacks/rejects/*.yml` corpus fixture (cwd is the repo root).
     fn validate_fixture(file: &str) -> Result<Validated, ValidateError> {
-        let path = format!("guest/stacks/rejects/{file}");
+        let path = format!("testdata/stacks/rejects/{file}");
         let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
         let doc = parse(&raw);
         validate(&doc, Path::new(&path))

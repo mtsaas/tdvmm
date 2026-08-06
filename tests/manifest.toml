@@ -55,7 +55,7 @@ name = "smoke-busybox"
 tier = "T1"
 tags = ["parallel-safe"]
 timeout = 90
-requires = "guest/initramfs/initramfs.cpio.gz guest/kernel/vmlinux-6.1.128"
+requires = "testdata/initramfs/initramfs.cpio.gz testdata/kernel/vmlinux-6.1.128"
 cmd = "scripts/smoke_test.sh 45"
 desc = "FLOOR(boot): busybox guest boots to the TDVMM_BOOT_OK serial marker"
 
@@ -64,7 +64,7 @@ name = "interactive-exit"
 tier = "T1"
 tags = ["parallel-safe"]
 timeout = 180
-requires = "guest/initramfs/initramfs.cpio.gz guest/kernel/vmlinux-6.1.128"
+requires = "testdata/initramfs/initramfs.cpio.gz testdata/kernel/vmlinux-6.1.128"
 cmd = "scripts/smoke_test_interactive_exit.sh 20"
 desc = "exit respawns; reboot/poweroff self-exit(0); horizon bounds wedge(3); mode line"
 
@@ -82,7 +82,7 @@ name = "smoke-container"
 tier = "T1"
 tags = ["needs-bake"]
 timeout = 300
-requires = "guest/stacks/spinner/compose.yml guest/kernel/vmlinux-6.1.128"
+requires = "testdata/stacks/spinner/compose.yml testdata/kernel/vmlinux-6.1.128"
 cmd = "scripts/smoke_test_container.sh 120"
 desc = "bake+run the minimal spinner stack; guest creates a podman bridge network and runs a digest-pinned image offline"
 
@@ -125,7 +125,7 @@ name = "egress-safety"
 tier = "T2"
 tags = ["parallel-safe", "needs-bake"]
 timeout = 420
-requires = "guest/stacks/egress-probe/compose.yml guest/kernel/vmlinux-6.1.128"
+requires = "testdata/stacks/egress-probe/compose.yml testdata/kernel/vmlinux-6.1.128"
 cmd = "scripts/egress_safety_test.sh"
 desc = "SAFETY(--allow-egress): phase gate proven e2e — clock never jumps mid-request (T1), FF re-engages once drained (T2), a gate breach aborts (T3b), an adversarial dribble is not FF'd past the read timeout (T3c), transport under --ff off (T5), closed-world identity flag-off (T6). Loopback test server, no internet."
 
@@ -173,7 +173,7 @@ tier = "T3"
 tags = ["needs-bake"]
 timeout = 400
 requires = ""
-cmd = "scripts/bake_repeat_test.sh guest/stacks/insert-trim/compose.yml"
+cmd = "scripts/bake_repeat_test.sh testdata/stacks/insert-trim/compose.yml"
 desc = "FLOOR(artifact repro): re-bake (--no-cache) -> identical lock + digests (insert-trim)"
 
 [[test]]
@@ -182,7 +182,7 @@ tier = "T3"
 tags = ["needs-bake"]
 timeout = 500
 requires = ""
-cmd = "scripts/bake_repeat_test.sh guest/stacks/demo/compose.yml"
+cmd = "scripts/bake_repeat_test.sh testdata/stacks/demo/compose.yml"
 desc = "FLOOR(artifact repro): re-bake (--no-cache) -> identical lock + content-ids (demo build: contexts)"
 
 [[test]]
@@ -227,7 +227,7 @@ tier = "T3"
 tags = ["needs-bake"]
 timeout = 900
 requires = ""
-cmd = "mkdir -p .tdvmm-test-results && ./target/release/tdvmm build demo guest/stacks/demo/compose.yml -o .tdvmm-test-results/demo.tdvmm && ./target/release/tdvmm test .tdvmm-test-results/demo.tdvmm --scenario guest/stacks/demo/demo.yml --wall-timeout 800 --logs-dir /tmp/demo-logs"
+cmd = "mkdir -p .tdvmm-test-results && ./target/release/tdvmm build demo testdata/stacks/demo/compose.yml -o .tdvmm-test-results/demo.tdvmm && ./target/release/tdvmm test .tdvmm-test-results/demo.tdvmm --scenario testdata/stacks/demo/demo.yml --wall-timeout 800 --logs-dir /tmp/demo-logs"
 desc = "flagship demo: full virtual day of the gRPC stack + fault/recovery -> PASS, per-service logs"
 
 [[test]]

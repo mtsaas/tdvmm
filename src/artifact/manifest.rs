@@ -66,7 +66,7 @@ pub struct Toolchain {
 /// changes the manifest, and therefore the whole-file sha256.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Anchors {
-    /// sha256 of the `cpuid_profile` text below (matches `guest/manifest.txt`).
+    /// sha256 of the `cpuid_profile` text below.
     pub cpuid_sha256: String,
     /// The effective guest clock/timer CPUID profile (`tdvmm dump-cpuid` output).
     pub cpuid_profile: String,

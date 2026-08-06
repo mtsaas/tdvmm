@@ -24,7 +24,7 @@ macro_rules! overlay_file {
         OverlayFile {
             path: $path,
             mode: $mode,
-            bytes: include_bytes!(concat!("../../guest/initramfs-alpine/overlay/", $path)),
+            bytes: include_bytes!(concat!("../../testdata/initramfs-alpine/overlay/", $path)),
         }
     };
 }
@@ -92,7 +92,7 @@ mod tests {
     /// missing from the table, none extra).
     #[test]
     fn embedded_overlay_matches_checkout_bytes_and_modes() {
-        let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("guest/initramfs-alpine/overlay");
+        let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/initramfs-alpine/overlay");
         let mut seen = 0;
         for f in OVERLAY_FILES {
             let on_disk = checkout.join(f.path);

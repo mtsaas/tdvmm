@@ -20,27 +20,27 @@ use crate::engine;
 use crate::ui;
 use super::cache::resolve_cache_dir;
 use super::pins::{fetch_in_container, fetch_verify, lock_values};
-use super::util::{find_guest_dir, sha256_file_hex, ScratchDir};
+use super::util::{find_testdata_dir, sha256_file_hex, ScratchDir};
 use super::ux::{capture, run, run_build, Ux};
 use super::{BuildKernelArgs, BUILD_EPOCH};
 
 /// The kernel config baked into the guest (Firecracker microvm config, HPET off,
-/// all built-in). The checkout copy in `guest/kernel/` is the source of truth
+/// all built-in). The checkout copy in `testdata/kernel/` is the source of truth
 /// `--record` reads/hashes; the embedded copy below is what every build uses.
 const KERNEL_CONFIG_NAME: &str = "microvm-kernel-x86_64-6.1.config";
 
-/// The committed kernel pin (`guest/kernel/kernel.lock`), embedded so `tdvmm
+/// The committed kernel pin (`testdata/kernel/kernel.lock`), embedded so `tdvmm
 /// build` can build + verify the pinned vmlinux with no checkout present.
-const KERNEL_LOCK: &str = include_str!("../../guest/kernel/kernel.lock");
+const KERNEL_LOCK: &str = include_str!("../../testdata/kernel/kernel.lock");
 
 /// The committed kernel config, embedded beside the pin: the container build's
 /// required input, tripwired against the lock's KERNEL_CONFIG_SHA256 (see
 /// [`embedded_kernel_config`]) so a config edit can't silently build an
 /// unrecorded kernel.
 const KERNEL_CONFIG: &str =
-    include_str!("../../guest/kernel/microvm-kernel-x86_64-6.1.config");
+    include_str!("../../testdata/kernel/microvm-kernel-x86_64-6.1.config");
 
-/// The reproducibility ledger for the guest kernel (`guest/kernel/kernel.lock`).
+/// The reproducibility ledger for the guest kernel (`testdata/kernel/kernel.lock`).
 /// Empty `sha256`/`source_sha256`/`builder_digest` mean "not yet recorded" — the
 /// `--record` bootstrap fills them.
 #[derive(Default, Clone)]
@@ -54,8 +54,8 @@ pub(super) struct KernelLock {
     pub(super) builder_digest: String,
 }
 
-fn kernel_lock_path(guest_dir: &Path) -> PathBuf {
-    guest_dir.join("kernel/kernel.lock")
+fn kernel_lock_path(testdata_dir: &Path) -> PathBuf {
+    testdata_dir.join("kernel/kernel.lock")
 }
 
 fn parse_kernel_lock(text: &str, origin: &str) -> Result<KernelLock, Box<dyn std::error::Error>> {
@@ -90,14 +90,14 @@ pub(super) fn embedded_kernel_lock() -> Result<KernelLock, Box<dyn std::error::E
 
 /// Read the CHECKOUT's kernel.lock (maintainer `--record` flow only: the on-disk
 /// file is the source of truth being edited; a rebuild embeds it afterwards).
-fn read_kernel_lock(guest_dir: &Path) -> Result<KernelLock, Box<dyn std::error::Error>> {
-    let path = kernel_lock_path(guest_dir);
+fn read_kernel_lock(testdata_dir: &Path) -> Result<KernelLock, Box<dyn std::error::Error>> {
+    let path = kernel_lock_path(testdata_dir);
     let text = std::fs::read_to_string(&path)
         .map_err(|e| format!("reading {}: {e} (run `tdvmm build-kernel --record`)", path.display()))?;
     parse_kernel_lock(&text, &path.display().to_string())
 }
 
-fn write_kernel_lock(guest_dir: &Path, k: &KernelLock) -> Result<(), Box<dyn std::error::Error>> {
+fn write_kernel_lock(testdata_dir: &Path, k: &KernelLock) -> Result<(), Box<dyn std::error::Error>> {
     let body = format!(
         "# tdvmm guest kernel pin (Fable Part C).\n\
          #\n\
@@ -118,7 +118,7 @@ fn write_kernel_lock(guest_dir: &Path, k: &KernelLock) -> Result<(), Box<dyn std
         k.version, k.sha256, k.config_sha256, k.source_url, k.source_sha256,
         k.builder_image, k.builder_digest,
     );
-    std::fs::write(kernel_lock_path(guest_dir), body)?;
+    std::fs::write(kernel_lock_path(testdata_dir), body)?;
     Ok(())
 }
 
@@ -328,17 +328,17 @@ pub fn cmd_build_kernel(args: BuildKernelArgs) -> Result<i32, Box<dyn std::error
         // Bootstrap/update kernel.lock IN THE CHECKOUT: resolve digests,
         // container-build, record. The edited on-disk lock + config are the
         // inputs; a `cargo build` afterwards embeds the recorded pin.
-        let guest_dir = find_guest_dir()
-            .ok_or("`build-kernel --record` needs a source checkout (it rewrites guest/kernel/kernel.lock)")?;
-        let mut kl = read_kernel_lock(&guest_dir).unwrap_or_default();
+        let testdata_dir = find_testdata_dir()
+            .ok_or("`build-kernel --record` needs a source checkout (it rewrites testdata/kernel/kernel.lock)")?;
+        let mut kl = read_kernel_lock(&testdata_dir).unwrap_or_default();
         if kl.version.is_empty() {
             return Err(
-                "guest/kernel/kernel.lock must exist with at least KERNEL_VERSION + \
+                "testdata/kernel/kernel.lock must exist with at least KERNEL_VERSION + \
                  KERNEL_SOURCE_URL + BUILDER_IMAGE before --record".into(),
             );
         }
         // the checkout config is the declared input being recorded.
-        let config = std::fs::read_to_string(guest_dir.join("kernel").join(KERNEL_CONFIG_NAME))?;
+        let config = std::fs::read_to_string(testdata_dir.join("kernel").join(KERNEL_CONFIG_NAME))?;
         kl.config_sha256 = artifact::sha256_hex(config.as_bytes());
         // resolve the builder image digest if not pinned yet.
         if kl.builder_digest.is_empty() {
@@ -356,7 +356,7 @@ pub fn cmd_build_kernel(args: BuildKernelArgs) -> Result<i32, Box<dyn std::error
         let tarball = cache_dir.join("kernel-src").join(format!("linux-{}.tar.xz", kl.version));
         kl.source_sha256 = sha256_file_hex(&tarball)?;
         kl.sha256 = sha256_file_hex(&out)?;
-        write_kernel_lock(&guest_dir, &kl)?;
+        write_kernel_lock(&testdata_dir, &kl)?;
         eprintln!("== kernel.lock RECORDED ==");
         eprintln!("   KERNEL_SHA256={}", kl.sha256);
         eprintln!("   KERNEL_SOURCE_SHA256={}", kl.source_sha256);
@@ -403,12 +403,12 @@ pub fn resolve_boot_inputs(
     let initrd = match initrd {
         Some(i) => PathBuf::from(i),
         None => {
-            let guest_dir = find_guest_dir().ok_or(
+            let testdata_dir = find_testdata_dir().ok_or(
                 "no --initrd given and no source checkout found: the default busybox \
-                 clock-guest initramfs lives in the repo (guest/initramfs/); pass \
+                 clock-guest initramfs lives in the repo (testdata/initramfs/); pass \
                  --initrd <path> or run from a checkout",
             )?;
-            guest_dir.join("initramfs/initramfs.cpio.gz")
+            testdata_dir.join("initramfs/initramfs.cpio.gz")
         }
     };
     Ok((kernel, initrd))

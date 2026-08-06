@@ -28,11 +28,19 @@ Three commands do everything:
 
 ## 1. Build a stack
 
-Give `tdvmm build` a name for the stack and a supported `compose.yml`. We'll use the
+Give `tdvmm build` a name for the stack and a supported `compose.yml` — your own:
+
+```sh
+tdvmm build myapp ./compose.yml
+# -> ~/.tdvmm/artifacts/myapp.tdvmm
+```
+
+The worked examples in this guide (`demo`, `insert-trim`, `faultlab`, …) live in a repo
+checkout under `testdata/stacks/`, so clone the repo to follow along. We'll use the
 bundled demo (Postgres + Redis + a small gRPC api/worker/client):
 
 ```sh
-tdvmm build demo guest/stacks/demo/compose.yml
+tdvmm build demo testdata/stacks/demo/compose.yml
 # -> ~/.tdvmm/artifacts/demo.tdvmm
 ```
 
@@ -63,7 +71,7 @@ develop on a Mac, `scripts/macos-build.sh` runs the bake for you inside the Linu
 `~/.tdvmm/artifacts/`:
 
 ```sh
-scripts/macos-build.sh guest/stacks/demo/compose.yml
+scripts/macos-build.sh testdata/stacks/demo/compose.yml
 ```
 
 The boundary: **macOS can bake, but only Linux with `/dev/kvm` can run.** Because the
@@ -119,7 +127,7 @@ or inject a fault. Run one against the demo:
 
 ```sh
 tdvmm test demo \
-  --scenario guest/stacks/demo/demo.yml --logs-dir ./logs
+  --scenario testdata/stacks/demo/demo.yml --logs-dir ./logs
 ```
 
 Without `--jsonl`/`--report`, the run log and report default to `./demo.jsonl` and
@@ -244,7 +252,7 @@ A network partition is the same idea without killing anything:
 
 Because every fault fires at a scheduled virtual time, `at: 24h` fast-forwards straight
 to it — you can test "what happens after a day of running, then a crash" without waiting
-a day. `guest/stacks/faultlab/` has complete kill/recover and partition/heal scenarios
+a day. `testdata/stacks/faultlab/` has complete kill/recover and partition/heal scenarios
 to crib from.
 
 ## Looking at an artifact
@@ -277,7 +285,7 @@ tdvmm verify  demo   # check nothing changed; print its sha256
 
 ## Where to go next
 
-- `guest/stacks/` — worked examples: `demo` (the full gRPC stack), `insert-trim`
+- `testdata/stacks/` — worked examples: `demo` (the full gRPC stack), `insert-trim`
   (minimal), `faultlab` (faults), `webstack`, `svcchain`.
 - `CONTRIBUTING.md` — how the code is laid out and where to change things.
 - `ARCHITECTURE.md` — how tdvmm works inside.

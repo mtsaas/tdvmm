@@ -37,7 +37,7 @@ fi
 
 # Bake the (minimal) spinner stack into ~/.tdvmm; a warm cache makes this a
 # near-instant restore. Writes spinner's committed locks (hence needs-bake).
-"$BIN" build "$STACK" "$ROOT/guest/stacks/$STACK/compose.yml" || { echo "SMOKE FAIL: bake error"; exit 3; }
+"$BIN" build "$STACK" "$ROOT/testdata/stacks/$STACK/compose.yml" || { echo "SMOKE FAIL: bake error"; exit 3; }
 
 LOG="$(mktemp)"
 cleanup() { kill "$PID" 2>/dev/null; wait "$PID" 2>/dev/null; rm -f "$LOG"; }

@@ -18,9 +18,9 @@ use crate::{DEFAULT_CMDLINE, DEFAULT_MAX_JUMP_SECS, DEFAULT_MEM_MIB};
                   suffix (ms, s, m, h), e.g. 500ms, 30s, 5m, 2h.",
     after_help = "Examples:\n  \
                   tdvmm doctor\n  \
-                  tdvmm build insert-trim guest/stacks/insert-trim/compose.yml\n  \
-                  tdvmm run insert-trim\n  \
-                  tdvmm test insert-trim --scenario guest/stacks/insert-trim/insert-trim.yml\n  \
+                  tdvmm build myapp ./compose.yml\n  \
+                  tdvmm run myapp\n  \
+                  tdvmm test myapp --scenario ./scenario.yml\n  \
                   tdvmm ls",
     version
 )]
@@ -42,7 +42,7 @@ pub(crate) enum Cmd {
     /// A host build tool (needs podman + network): pulls and digest-pins each image,
     /// squashes them into an offline seed store, and packs a self-contained .tdvmm.
     /// The content-hash cache makes an unchanged stack near-instant to re-bake.
-    #[command(after_help = "Example:\n  tdvmm build insert-trim guest/stacks/insert-trim/compose.yml -o insert-trim.tdvmm")]
+    #[command(after_help = "Example:\n  tdvmm build myapp ./compose.yml -o myapp.tdvmm")]
     Build(BuildCliArgs),
     /// Run a .tdvmm stack (offline).
     ///
@@ -59,7 +59,7 @@ pub(crate) enum Cmd {
                       1  FAIL — a scenario assertion failed\n  \
                       2  ERROR — test infrastructure fault: bad/rejected scenario (including \
                       static validation before boot), agent unreachable, wall-clock timeout, ...",
-        after_help = "Example:\n  tdvmm test insert-trim.tdvmm --scenario guest/stacks/insert-trim/insert-trim.yml"
+        after_help = "Example:\n  tdvmm test myapp.tdvmm --scenario ./scenario.yml"
     )]
     Test(TestArgs),
     /// List the .tdvmm artifacts in the local store.
@@ -531,7 +531,7 @@ mod tests {
         // Migration guard: a stale one-arg `tdvmm build ./compose.yml` puts a PATH
         // (with a `/`) where the name now belongs — rejected, with a hint toward the
         // new `tdvmm build <name> <compose>` form.
-        for path in ["./compose.yml", "guest/stacks/demo/compose.yml"] {
+        for path in ["./compose.yml", "testdata/stacks/demo/compose.yml"] {
             let err = parse_stack_name(path).unwrap_err();
             assert!(err.contains("tdvmm build <name>"), "hint missing for {path:?}: {err}");
         }

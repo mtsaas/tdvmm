@@ -33,7 +33,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 BIN="$ROOT/target/release/tdvmm"
-STACKS_DIR="$ROOT/guest/stacks"
+STACKS_DIR="$ROOT/testdata/stacks"
 # Self-contained: bake each stack into a gitignored test dir, then `tdvmm run` it
 # (kernel + initramfs come from the .tdvmm; no repo / ~/.tdvmm/artifacts dependency).
 OUTDIR="${TDVMM_OUT_DIR:-$ROOT/.tdvmm-test-results}"; mkdir -p "$OUTDIR"

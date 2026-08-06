@@ -44,9 +44,9 @@ BIN="$ROOT/target/release/tdvmm"
 # Default kernel: the cache copy `tdvmm build`/`build-kernel` now writes (was the
 # repo tree), falling back to a repo-tree copy if that is what's present.
 DEFAULT_KERNEL="${TDVMM_CACHE_DIR:-$HOME/.tdvmm}/kernel/vmlinux-6.1.128"
-[ -f "$DEFAULT_KERNEL" ] || DEFAULT_KERNEL="$ROOT/guest/kernel/vmlinux-6.1.128"
+[ -f "$DEFAULT_KERNEL" ] || DEFAULT_KERNEL="$ROOT/testdata/kernel/vmlinux-6.1.128"
 KERNEL="${KERNEL:-$DEFAULT_KERNEL}"
-INITRD="${INITRD:-$ROOT/guest/initramfs/initramfs.cpio.gz}"
+INITRD="${INITRD:-$ROOT/testdata/initramfs/initramfs.cpio.gz}"
 MEM="${MEM:-256}"
 
 # Seconds to allow the VMM to terminate on its own after the quit command is

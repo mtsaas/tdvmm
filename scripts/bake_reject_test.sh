@@ -14,7 +14,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 BIN="$ROOT/target/release/tdvmm"
-CORPUS="$ROOT/guest/stacks/rejects"
+CORPUS="$ROOT/testdata/stacks/rejects"
 [ -x "$BIN" ] || { echo "building tdvmm..."; ( cd "$ROOT" && cargo build --release ) || exit 3; }
 
 # case: <file> <expect: reject|warn> <substring the diagnostic must contain>

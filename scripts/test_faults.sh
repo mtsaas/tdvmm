@@ -20,7 +20,7 @@ BIN="$ROOT/target/release/tdvmm"
 # Self-contained: bake into a gitignored test dir (NOT the repo / ~/.tdvmm/artifacts).
 OUTDIR="${TDVMM_OUT_DIR:-$ROOT/.tdvmm-test-results}"; mkdir -p "$OUTDIR"
 TDVMM="${TDVMM_FAULT_ARTIFACT:-$OUTDIR/faultlab.tdvmm}"
-SDIR="$ROOT/guest/stacks/faultlab"
+SDIR="$ROOT/testdata/stacks/faultlab"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 

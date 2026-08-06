@@ -36,7 +36,7 @@ tdvmm build demo ./demo/compose.yml   # -> ~/.tdvmm/artifacts/demo.tdvmm
 tdvmm run demo --max-virtual-time 24h
 
 # Drive it through a scenario and get a pass/fail verdict:
-tdvmm test demo --scenario guest/stacks/demo/demo.yml
+tdvmm test demo --scenario ./demo/scenario.yml
 ```
 
 ## Requirements

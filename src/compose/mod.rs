@@ -70,7 +70,7 @@ mod tests {
         const PG_PIN: &str =
             "localhost/tdvmm-postgres-57c72fd2a128@sha256:cbf217007d0742829dc120c3ea9cd2621e90eb3adfeaf6684e87ce268a2ca368";
         for stack in ["faultlab", "svcchain", "configpipeline"] {
-            let compose_path = format!("guest/stacks/{stack}/compose.yml");
+            let compose_path = format!("testdata/stacks/{stack}/compose.yml");
             let raw = std::fs::read_to_string(&compose_path).unwrap();
             let doc: Value = serde_yaml::from_str(&raw).unwrap();
             let mut digests: HashMap<String, String> = HashMap::new();
@@ -106,7 +106,7 @@ mod tests {
 
             // The committed lock is a generated file; TDVMM_REGEN_LOCKS=1 rewrites it
             // (mirrors the proto-goldens regen).
-            let lock_path = format!("guest/stacks/{stack}/compose.lock.yml");
+            let lock_path = format!("testdata/stacks/{stack}/compose.lock.yml");
             if std::env::var("TDVMM_REGEN_LOCKS").is_ok() {
                 std::fs::write(&lock_path, got.as_bytes()).unwrap();
                 continue;

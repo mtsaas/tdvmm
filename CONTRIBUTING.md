@@ -53,7 +53,7 @@ src/                 the VMM (the `tdvmm` binary)
 
 tdvmm-proto/          host <-> guest-agent wire types (shared crate)
 tdvmm-agent/          the tiny in-guest agent that `tdvmm test` drives (static musl)
-guest/
+testdata/
   kernel/            the pinned kernel config + kernel.lock
   initramfs-alpine/  the in-RAM guest rootfs (overlay files, image/package pins)
   stacks/            worked example stacks (each a compose.yml + a scenario)

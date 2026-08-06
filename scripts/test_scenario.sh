@@ -17,14 +17,14 @@ BIN="$ROOT/target/release/tdvmm"
 # Self-contained: bake into a gitignored test dir (NOT the repo / ~/.tdvmm/artifacts).
 OUTDIR="${TDVMM_OUT_DIR:-$ROOT/.tdvmm-test-results}"; mkdir -p "$OUTDIR"
 TDVMM="${TDVMM_ARTIFACT:-$OUTDIR/insert-trim.tdvmm}"
-SCN="$ROOT/guest/stacks/insert-trim/insert-trim.yml"
+SCN="$ROOT/testdata/stacks/insert-trim/insert-trim.yml"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 [ -x "$BIN" ] || { echo "building tdvmm..."; ( cd "$ROOT" && cargo build --release ) || exit 3; }
 if [ ! -f "$TDVMM" ]; then
   echo "== insert-trim.tdvmm missing — baking it (tdvmm build -> $TDVMM) =="
-  "$BIN" build insert-trim "$ROOT/guest/stacks/insert-trim/compose.yml" -o "$TDVMM" || {
+  "$BIN" build insert-trim "$ROOT/testdata/stacks/insert-trim/compose.yml" -o "$TDVMM" || {
     echo "FATAL: bake failed" >&2; exit 3; }
 fi
 

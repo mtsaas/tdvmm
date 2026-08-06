@@ -49,7 +49,7 @@ MAX_VIRTUAL_TIME="${MAX_VIRTUAL_TIME:-$(( (TARGET_HOURS + 12) * 3600 ))s}"
 [ -x "$BIN" ] || { echo "ff_demo: building..."; ( cd "$ROOT" && cargo build --release ) || exit 3; }
 if [ ! -f "$TDVMM" ]; then
   echo "[ff_demo] baking $STACK -> $TDVMM"
-  "$BIN" build "$STACK" "$ROOT/guest/stacks/$STACK/compose.yml" -o "$TDVMM" \
+  "$BIN" build "$STACK" "$ROOT/testdata/stacks/$STACK/compose.yml" -o "$TDVMM" \
     || { echo "ff_demo: bake failed"; exit 3; }
 fi
 

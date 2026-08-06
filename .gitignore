@@ -5,21 +5,21 @@
 /vendor-ref
 
 # Bootstrap kernel image (40 MiB prebuilt vmlinux). Rebuild with
-# guest/kernel/build_kernel.sh, or re-download per README.
-/guest/kernel/vmlinux-*
-/guest/kernel/linux-*/
+# testdata/kernel/build_kernel.sh, or re-download per README.
+/testdata/kernel/vmlinux-*
+/testdata/kernel/linux-*/
 
 # Kernel build tool binary (source gen_init_cpio.c is committed)
-/guest/initramfs/gen_init_cpio
+/testdata/initramfs/gen_init_cpio
 
 # Alpine container guest download caches: the pinned minirootfs + Docker Compose
 # v2 CLI, fetched + sha256-verified by `tdvmm build`. packages.lock IS committed.
-/guest/initramfs-alpine/alpine-minirootfs-*.tar.gz
-/guest/initramfs-alpine/docker-compose-*
+/testdata/initramfs-alpine/alpine-minirootfs-*.tar.gz
+/testdata/initramfs-alpine/docker-compose-*
 
 # Per-stack baked initramfs images produced by `tdvmm build` (rebuildable).
-/guest/initramfs-alpine/initramfs-alpine-*.cpio.gz
-/guest/initramfs-alpine/initramfs-alpine-*.cpio.gz.sha256
+/testdata/initramfs-alpine/initramfs-alpine-*.cpio.gz
+/testdata/initramfs-alpine/initramfs-alpine-*.cpio.gz.sha256
 
 # OP-1a: the single-file .tdvmm artifacts (bake-stack.sh output) are rebuildable;
 # the manifest anchors live in each stack's stack.lock, which IS committed.

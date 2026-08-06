@@ -20,7 +20,7 @@ use super::pack::{pack_tdvmm, PackInputs};
 use super::pins::{collect_builder_pins, compose_engine_pin, fetch_verify, rootfs_builder_pin};
 use super::seed::{SeedConfig, SeedSquash};
 use super::stack_lock::{append_stack_lock_tdvmm, write_stack_lock};
-use super::util::{find_guest_dir, sha256_file_hex, sweep_stale_scratch, utc_now_iso, ScratchDir};
+use super::util::{find_testdata_dir, sha256_file_hex, sweep_stale_scratch, utc_now_iso, ScratchDir};
 use super::ux::{capture, run, Ux};
 use super::{
     BuildArgs, ALPINE_BRANCH, BUILD_EPOCH, BUSYBOX_REF, DEFAULT_MEM_MIB, DEFAULT_MIRROR,
@@ -163,8 +163,8 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     //   artifacts/<name>.tdvmm              the deliverable (all .tdvmm, nothing else)
     //   bake/initramfs-alpine-<name>.cpio.gz  the intermediate cpio (build debris)
     //   ledgers/<name>.{compose.lock.yml,stack.lock,packages.lock}  the per-bake
-    //                                       ledgers (were written into guest/stacks/…
-    //                                       + guest/initramfs-alpine/packages.lock).
+    //                                       ledgers (were written into testdata/stacks/…
+    //                                       + testdata/initramfs-alpine/packages.lock).
     // Every basename recorded INSIDE the artifact is unchanged (stack.lock records
     // only basenames), so the `.tdvmm` bytes stay byte-identical wherever this lands.
     let artifacts_dir = cache_dir.join("artifacts");
@@ -651,15 +651,15 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
 
 /// Maintainer-only fixture regeneration. A normal `tdvmm build` NEVER writes into
 /// the repo — the per-bake ledgers land in the cache ledgers dir. But the committed
-/// `guest/stacks/<name>/{compose.lock.yml,stack.lock}` are TEST FIXTURES that unit
+/// `testdata/stacks/<name>/{compose.lock.yml,stack.lock}` are TEST FIXTURES that unit
 /// tests compare byte-for-byte, and a real bake is the only way to regenerate the
 /// `stack.lock` fixtures (the `compose.lock.yml` fixtures also have the pure-unit
 /// `TDVMM_REGEN_LOCKS=1 cargo test` path). So when `TDVMM_REGEN_LOCKS` is set, copy
 /// this bake's freshly-written cache ledgers back over the committed fixtures — the
-/// two stack locks plus the committed `guest/initramfs-alpine/packages.lock`
+/// two stack locks plus the committed `testdata/initramfs-alpine/packages.lock`
 /// reference (skipped on a cache HIT, where packages.lock isn't restored).
 /// Best-effort + explicitly opt-in: a maintainer runs it from a checkout, so the
-/// repo `guest/` dir is locatable.
+/// repo `testdata/` dir is locatable.
 fn maybe_regen_fixtures(
     stack: &str,
     lock_out: &Path,
@@ -670,7 +670,7 @@ fn maybe_regen_fixtures(
     if std::env::var_os("TDVMM_REGEN_LOCKS").is_none() {
         return;
     }
-    let Some(here) = find_guest_dir() else {
+    let Some(here) = find_testdata_dir() else {
         ux.progress.println("TDVMM_REGEN_LOCKS: no source checkout found; fixtures not regenerated");
         return;
     };
