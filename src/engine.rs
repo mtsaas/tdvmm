@@ -10,8 +10,10 @@
 //! *build* containers pass a `containers.conf` pinning `runtime="runc"`; this
 //! module never relies on the host default runtime.
 
+use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::{Mutex, PoisonError};
 
 /// The container-engine binary. Podman-only for now (Fable §7). A docker switch
 /// would be an additive change to THIS constant + the constructors below, never a
@@ -59,6 +61,73 @@ pub fn unshare(conf: &Path) -> Command {
 pub enum OutputMode {
     Inherit,
     CaptureOnFailure,
+}
+
+/// A failed [`run_streamed`] child: what went wrong, plus the full captured
+/// transcript — the caller decides how much to surface, nothing is swallowed.
+pub struct StreamError {
+    pub message: String,
+    pub transcript: String,
+}
+
+/// Run a command with both stdio streams piped, feeding every output line to
+/// `sink` as it arrives (the build-progress live tail) while accumulating the
+/// full transcript — returned on success, carried by the error on failure.
+/// Two reader threads drain the pipes (no back-pressure deadlock); line order
+/// across the two streams is best-effort interleaved, which is fine for a log
+/// tail. UI-free like the rest of this module: the sink is an opaque callback,
+/// never a progress handle, and the ORCHESTRATOR decides when streaming is
+/// appropriate (mirroring how it picks the [`OutputMode`]).
+pub fn run_streamed(
+    cmd: &mut Command,
+    sink: &(dyn Fn(&str) + Sync),
+) -> Result<String, StreamError> {
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            return Err(StreamError {
+                message: format!("spawn {:?}: {e}", cmd.get_program()),
+                transcript: String::new(),
+            });
+        }
+    };
+    // Both handles exist: spawn() was given Stdio::piped() for each stream.
+    let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
+    let transcript = Mutex::new(String::new());
+    std::thread::scope(|s| {
+        s.spawn(|| drain(stdout, &transcript, sink));
+        s.spawn(|| drain(stderr, &transcript, sink));
+    });
+    let status = child.wait();
+    let transcript = transcript.into_inner().unwrap_or_else(PoisonError::into_inner);
+    match status {
+        Ok(status) if status.success() => Ok(transcript),
+        Ok(status) => Err(StreamError {
+            message: format!("command {:?} failed ({status})", cmd.get_program()),
+            transcript,
+        }),
+        Err(e) => Err(StreamError {
+            message: format!("wait {:?}: {e}", cmd.get_program()),
+            transcript,
+        }),
+    }
+}
+
+/// Feed one pipe's lines (trailing `\r` trimmed) into the shared transcript
+/// and the sink, until EOF.
+fn drain(stream: impl Read, transcript: &Mutex<String>, sink: &(dyn Fn(&str) + Sync)) {
+    for line in BufReader::new(stream).lines() {
+        let Ok(line) = line else { break };
+        let line = line.trim_end_matches('\r');
+        {
+            let mut t = transcript.lock().unwrap_or_else(PoisonError::into_inner);
+            t.push_str(line);
+            t.push('\n');
+        }
+        sink(line);
+    }
 }
 
 /// Run a command for its side effect, per `mode`. Every run-time path

@@ -30,6 +30,7 @@ mod fsops;
 mod images;
 mod initramfs;
 mod kernel;
+mod overlay;
 mod pack;
 mod pins;
 mod seed;
@@ -60,9 +61,12 @@ const DEFAULT_WORKING_SET_MIB: u64 = 512;
 const DEFAULT_SQUASH_THRESHOLD_MIB: u64 = 100;
 
 /// The `tdvmm build` progress bar's step count (Fable CLI-UX ruling): resolve
-/// inputs, bake cache, squash images, seed store, compose.lock + binds,
-/// assemble initramfs, pack artifact, cache + diagnostics.
-const TOTAL_STEPS: u32 = 8;
+/// inputs, guest kernel, bake cache, guest agent, pull + build images, seed
+/// store, compose.lock + binds, assemble initramfs, pack artifact, cache +
+/// diagnostics. The two container compiles are first-class steps (their live
+/// output streams into the viewport tail); a bake-cache HIT still exits at
+/// step 3 without ever touching the agent.
+const TOTAL_STEPS: u32 = 10;
 
 const ALPINE_BRANCH: &str = "v3.22";
 const ALPINE_VER: &str = "3.22.5";
@@ -120,4 +124,9 @@ pub struct BuildKernelArgs {
     pub cache_dir: Option<String>,
     pub force_build: bool,
     pub record: bool,
+}
+
+/// `tdvmm build-agent` args.
+pub struct BuildAgentArgs {
+    pub out: String,
 }

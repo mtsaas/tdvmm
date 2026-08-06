@@ -12,7 +12,7 @@ use std::path::Path;
 use crate::artifact;
 use crate::engine;
 use super::cache::CACHE_VERSION;
-use super::fsops::tree_hash;
+use super::overlay;
 use super::util::{now_nanos, ScratchDir};
 use super::ux::{run, Ux};
 use super::{ALPINE_VER, BUILD_EPOCH, MINIROOTFS_SHA256, PKGS};
@@ -69,14 +69,13 @@ pub(super) fn build_base_rootfs(
 
 /// The base-runtime cache key: DECLARED base pins only (never the stack).
 pub(super) fn compute_base_key(
-    alpine_dir: &Path,
     agent_sha: &str,
     compose_version: &str,
     compose_sha256: &str,
     selftest_pin: &str,
     rootfs_builder: &str,
 ) -> String {
-    let overlay_tree = tree_hash(&alpine_dir.join("overlay"), &[]).unwrap_or_default();
+    let overlay_id = overlay::overlay_id();
     let pkgs = PKGS.join(",");
     let manifest = format!(
         "tdvmm-base-runtime v{CACHE_VERSION}\n\
@@ -84,7 +83,7 @@ pub(super) fn compute_base_key(
          minirootfs: {MINIROOTFS_SHA256}\n\
          epoch:      {BUILD_EPOCH}\n\
          pkgs:       {pkgs}\n\
-         overlay:    {overlay_tree}\n\
+         overlay:    {overlay_id}\n\
          agent:      {agent_sha}\n\
          compose:    {compose_version} {compose_sha256}\n\
          builder:    {rootfs_builder}\n\

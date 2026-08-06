@@ -8,7 +8,7 @@ use super::images::{squash_base_name, squash_short, ImgRecord};
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn write_stack_lock(
-    here: &Path,
+    out_path: &Path,
     stack: &str,
     project: &str,
     mem_mib: u64,
@@ -24,7 +24,6 @@ pub(super) fn write_stack_lock(
     validated: &compose::Validated,
     builders: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let path = here.join("stacks").join(stack).join("stack.lock");
     let mut prov: Vec<String> = Vec::new();
     // build_base lines (per build service, per base) come before image/pin (sorted).
     for b in &validated.builds {
@@ -80,13 +79,18 @@ pub(super) fn write_stack_lock(
     for line in &prov {
         out.push_str(&format!("  {line}\n"));
     }
-    std::fs::write(&path, out)?;
+    // The ledger lands in the (disposable) cache dir, never the repo. Create the
+    // parent so a first bake of a fresh stack name can't fail at the final write
+    // (the missing-`create_dir_all` bug that used to blow up step 7 post-bake).
+    if let Some(parent) = out_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(out_path, out)?;
     Ok(())
 }
 
-pub(super) fn append_stack_lock_tdvmm(here: &Path, stack: &str, tdvmm_sha: &str, out_tdvmm: &Path) -> std::io::Result<()> {
-    let path = here.join("stacks").join(stack).join("stack.lock");
-    let mut s = std::fs::read_to_string(&path)?;
+pub(super) fn append_stack_lock_tdvmm(path: &Path, tdvmm_sha: &str, out_tdvmm: &Path) -> std::io::Result<()> {
+    let mut s = std::fs::read_to_string(path)?;
     s.push_str(&format!("tdvmm_sha256          {tdvmm_sha}  {}\n", out_tdvmm.file_name().unwrap().to_string_lossy()));
-    std::fs::write(&path, s)
+    std::fs::write(path, s)
 }

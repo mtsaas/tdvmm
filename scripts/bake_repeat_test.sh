@@ -19,8 +19,12 @@ COMPOSE="${1:-$ROOT/guest/stacks/insert-trim/compose.yml}"
 # The stack name is the compose file's folder — `tdvmm build` takes it as the
 # required first positional (name, then compose path).
 NAME="$(basename "$(dirname "$COMPOSE")")"
-LOCK="$ROOT/guest/stacks/$NAME/compose.lock.yml"
-MAN="$ROOT/guest/stacks/$NAME/stack.lock"
+# `tdvmm build` writes the per-stack lock ledgers under the cache dir, NEVER the
+# repo. Use a self-contained cache (--cache-dir on both bakes below) so this test
+# compares THIS bake's freshly-written ledgers, not a stale committed copy.
+CACHE="${TDVMM_TEST_CACHE:-$ROOT/.tdvmm-tmp/tdvmm-cache}"; mkdir -p "$CACHE"
+LOCK="$CACHE/ledgers/$NAME.compose.lock.yml"
+MAN="$CACHE/ledgers/$NAME.stack.lock"
 
 # compare only the reproducible portion of the manifest: the pinned image digests
 # + compose.lock hash + sizing. Drop comment lines, the informational tdvmm_sha256
@@ -32,12 +36,12 @@ compared() { grep -v -e '^#' -e '^initramfs_sha256' -e '^tdvmm_sha256' "$1"; }
 # unconditionally (a content-hash cache HIT would trivially return the same file
 # and prove nothing). This exercises the real pull/squash/build/assemble each time.
 echo "== bake #1 (--no-cache, full re-bake) =="
-"$ROOT/target/release/tdvmm" build --no-cache "$NAME" "$COMPOSE" >/tmp/bake1.log 2>&1 || { echo "BAKE1 FAILED"; tail -30 /tmp/bake1.log; exit 1; }
+"$ROOT/target/release/tdvmm" build --no-cache --cache-dir "$CACHE" "$NAME" "$COMPOSE" >/tmp/bake1.log 2>&1 || { echo "BAKE1 FAILED"; tail -30 /tmp/bake1.log; exit 1; }
 L1="$(sha256sum "$LOCK" | awk '{print $1}')"; M1="$(compared "$MAN")"; A1="$(awk '/^initramfs_sha256/{print $2}' "$MAN")"
 cp "$LOCK" /tmp/lock1.yml
 
 echo "== bake #2 (--no-cache, full re-bake) =="
-"$ROOT/target/release/tdvmm" build --no-cache "$NAME" "$COMPOSE" >/tmp/bake2.log 2>&1 || { echo "BAKE2 FAILED"; tail -30 /tmp/bake2.log; exit 1; }
+"$ROOT/target/release/tdvmm" build --no-cache --cache-dir "$CACHE" "$NAME" "$COMPOSE" >/tmp/bake2.log 2>&1 || { echo "BAKE2 FAILED"; tail -30 /tmp/bake2.log; exit 1; }
 L2="$(sha256sum "$LOCK" | awk '{print $1}')"; M2="$(compared "$MAN")"; A2="$(awk '/^initramfs_sha256/{print $2}' "$MAN")"
 
 echo

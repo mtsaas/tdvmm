@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::compose;
 use crate::engine;
 use crate::ui;
-use super::agent::build_agent;
+use super::agent::{agent_src_id, ensure_agent};
 use super::base::{base_cache_store, build_base_rootfs, compute_base_key};
 use super::cache::{cache_is_hit, cache_restore, cache_store, compute_cache_key, resolve_cache_dir};
 use super::fsops::copy_tree;
@@ -17,10 +17,10 @@ use super::images::{bake_all, bake_one, build_one, squash_base_name, ImgRecord};
 use super::initramfs::AssembleConfig;
 use super::kernel::ensure_kernel;
 use super::pack::{pack_tdvmm, PackInputs};
-use super::pins::{collect_builder_pins, fetch_verify, read_compose_lock, read_rootfs_builder_pin};
+use super::pins::{collect_builder_pins, compose_engine_pin, fetch_verify, rootfs_builder_pin};
 use super::seed::{SeedConfig, SeedSquash};
 use super::stack_lock::{append_stack_lock_tdvmm, write_stack_lock};
-use super::util::{self_here, sha256_file_hex, sweep_stale_scratch, utc_now_iso, ScratchDir};
+use super::util::{find_guest_dir, sha256_file_hex, sweep_stale_scratch, utc_now_iso, ScratchDir};
 use super::ux::{capture, run, Ux};
 use super::{
     BuildArgs, ALPINE_BRANCH, BUILD_EPOCH, BUSYBOX_REF, DEFAULT_MEM_MIB, DEFAULT_MIRROR,
@@ -45,12 +45,13 @@ fn print_artifact_id_line(sha: &str, path: &Path) {
     }
 }
 
-/// What the overlapped middle of the bake — stages 3-5, with the agent build
-/// and the two pinned downloads running alongside under one thread scope —
-/// hands the serial assemble/pack tail.
+/// What the overlapped middle of the bake — the image/seed/lock stages, with
+/// the two pinned downloads running alongside under one thread scope — hands
+/// the serial assemble/pack tail. (The agent compile is a SERIAL step before
+/// the scope: one live build at a time keeps the viewport tail coherent, and
+/// on a warm agent cache — every bake after the machine's first — the lost
+/// overlap costs nothing.)
 struct MidBake {
-    agent_build_hash: String,
-    agent_sha: String,
     selftest_pin: String,
     seedpins: HashMap<String, String>,
     lock_sha: String,
@@ -103,8 +104,6 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     let squash_threshold_mib = args.squash_threshold.unwrap_or(DEFAULT_SQUASH_THRESHOLD_MIB);
 
     let self_exe = std::env::current_exe()?;
-    let here = self_here()?; // the guest/ dir (repo layout), for overlay/agent/etc.
-    let alpine_dir = here.join("initramfs-alpine");
 
     // ---- progress UI (Fable CLI-UX ruling) ---------------------------------
     // A LOCAL value, never a global; `.finish()`/`Drop` clear it on every exit
@@ -138,44 +137,50 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     ux.progress.detail(format!("   cache-dir: {} (source: {cache_src})", cache_dir.display()));
     diag.push_str(&format!("cache_dir: {} (source: {cache_src})\n", cache_dir.display()));
 
-    // --- kernel (Fable Part C): fetch the pinned release asset, else reproducibly
-    //     build it in the pinned container; verified against kernel.lock. Done
-    //     BEFORE the cache key so the kernel bytes are a present, hashable input. ---
-    let repo_root = here
-        .parent()
-        .ok_or("could not locate the repo root above guest/")?
-        .to_path_buf();
-    let kernel = ensure_kernel(&here, &cache_dir, false, &ux)?;
+    // --- kernel (Fable Part C): sha-verified cache hit, else reproducibly
+    //     compiled from the pinned source in the pinned container (its live
+    //     output streams into this step's tail); verified against kernel.lock.
+    //     Done BEFORE the cache key so the kernel bytes are a present,
+    //     hashable input. ---
+    ux.progress.step(2, TOTAL_STEPS, "guest kernel");
+    let kernel = ensure_kernel(&cache_dir, false, &ux)?;
     diag.push_str(&format!("kernel: {} sha256={}\n", kernel.display(), sha256_file_hex(&kernel).unwrap_or_default()));
 
     // --- builder-image pins (Fable Part B): the DECLARED, host-identical toolchain
-    //     anchors that REPLACE the host-probed `podman --version` in both the hashed
-    //     artifact bytes and the cache key. Sorted for order-stability. ---
-    let builders = collect_builder_pins(&repo_root, &here)?;
+    //     anchors — all embedded — that REPLACE the host-probed `podman --version`
+    //     in both the hashed artifact bytes and the cache key. Sorted. ---
+    let builders = collect_builder_pins()?;
     ux.progress.detail(format!("   builders: {}", builders.join(" ")));
 
     // Output destinations (needed early so a cache HIT can restore them). The `-o`
     // path is NOT part of the cache key: identical inputs bake identical bytes
     // regardless of where they land.
     //
-    // DEFAULT outputs land under the resolved cache root's `artifacts/` dir (NOT
-    // the source tree): an installed `tdvmm` must not write build outputs into the
-    // repo. `-o <path>` still fully overrides the `.tdvmm` destination. The
-    // intermediate cpio is build debris, not a deliverable, so it lands under
-    // `bake/` (beside the content-hash cache) — keeping `artifacts/` all `.tdvmm`.
-    // Its basename is unchanged and stack.lock records only the basename, so the
-    // `.tdvmm` bytes stay byte-identical.
+    // DEFAULT outputs land under the resolved cache root (NOT the source tree): an
+    // installed `tdvmm` must not write build outputs into the repo, and reusing an
+    // example stack name must never clobber a committed lock golden. `-o <path>`
+    // still fully overrides the `.tdvmm` destination. Layout:
+    //   artifacts/<name>.tdvmm              the deliverable (all .tdvmm, nothing else)
+    //   bake/initramfs-alpine-<name>.cpio.gz  the intermediate cpio (build debris)
+    //   ledgers/<name>.{compose.lock.yml,stack.lock,packages.lock}  the per-bake
+    //                                       ledgers (were written into guest/stacks/…
+    //                                       + guest/initramfs-alpine/packages.lock).
+    // Every basename recorded INSIDE the artifact is unchanged (stack.lock records
+    // only basenames), so the `.tdvmm` bytes stay byte-identical wherever this lands.
     let artifacts_dir = cache_dir.join("artifacts");
     std::fs::create_dir_all(&artifacts_dir)?;
     let bake_out_dir = cache_dir.join("bake");
     std::fs::create_dir_all(&bake_out_dir)?;
+    let ledgers_dir = cache_dir.join("ledgers");
+    std::fs::create_dir_all(&ledgers_dir)?;
     let out_tdvmm = match &args.out {
         Some(o) => PathBuf::from(o),
         None => artifacts_dir.join(format!("{stack_name}.tdvmm")),
     };
     let out_initramfs = bake_out_dir.join(format!("initramfs-alpine-{stack_name}.cpio.gz"));
-    let committed_lock = here.join("stacks").join(&stack_name).join("compose.lock.yml");
-    let stack_lock_path = here.join("stacks").join(&stack_name).join("stack.lock");
+    let lock_out = ledgers_dir.join(format!("{stack_name}.compose.lock.yml"));
+    let stack_lock_out = ledgers_dir.join(format!("{stack_name}.stack.lock"));
+    let packages_lock_out = ledgers_dir.join(format!("{stack_name}.packages.lock"));
 
     // ---- content-hash bake cache -------------------------------------------
     // The key covers EVERY input that affects the output bytes: the whole compose
@@ -186,10 +191,10 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     // gone), the tdvmm binary itself (all compiled-in pins + bake logic), and the
     // sizing knobs. `tdvmm build` is deterministic (artifact_test gate 1), so a hit
     // reusing the prior `.tdvmm` is byte-identical to a fresh bake.
-    ux.progress.step(2, TOTAL_STEPS, "bake cache");
+    ux.progress.step(3, TOTAL_STEPS, "bake cache");
     let cache = match compute_cache_key(
-        &self_exe, &here, &alpine_dir, &compose_dir, &stack_name, mem_mib, working_set_mib,
-        squash_threshold_mib, &cache_dir, &kernel, &builders,
+        &self_exe, &compose_dir, &stack_name, mem_mib, working_set_mib,
+        squash_threshold_mib, &cache_dir, &kernel, &builders, &agent_src_id(),
     ) {
         Ok(c) => Some(c),
         Err(e) => {
@@ -204,11 +209,13 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
             diag.push_str("bake_cache_status: HIT (reused)\n");
             ux.progress.detail(format!("== BAKE CACHE HIT ==  key={}", &c.key[..16]));
             ux.progress.detail(format!("   reusing baked artifacts (skipped pull/squash/assemble): {}", c.dir.display()));
-            match cache_restore(c, &out_tdvmm, &out_initramfs, &committed_lock, &stack_lock_path) {
+            match cache_restore(c, &out_tdvmm, &out_initramfs, &lock_out, &stack_lock_out) {
                 Ok(tdvmm_sha) => {
                     ux.progress.detail(format!("   .tdvmm:     {} (sha256 {tdvmm_sha})", out_tdvmm.display()));
                     let size = std::fs::metadata(&out_tdvmm).map(|m| m.len()).unwrap_or(0);
                     ux.progress.print_summary(&out_tdvmm, &tdvmm_sha, size, progress.elapsed(), None);
+                    // Maintainer-only: refresh the committed lock fixtures from this bake.
+                    maybe_regen_fixtures(&stack_name, &lock_out, &stack_lock_out, &packages_lock_out, &ux);
                     progress.finish();
                     // stdout: the machine-readable artifact identity line — emitted only when
                     // stdout is piped/redirected (see print_artifact_id_line). `suspend` runs
@@ -236,6 +243,19 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     // their ScratchDir guard could run (best-effort).
     sweep_stale_scratch();
 
+    // --- agent (Fable §2): sidecar-verified cache hit, else reproducibly
+    //     compiled from the EMBEDDED source in the pinned container (its live
+    //     output streams into this step's tail). Serial by design — see
+    //     [`MidBake`]. Its file sha256 goes in the ledger + anchors and feeds
+    //     the base key. ---
+    ux.progress.step(4, TOTAL_STEPS, "guest agent");
+    let (agent_path, agent_build_hash) = ensure_agent(&cache_dir, &ux)?;
+    let agent_sha = sha256_file_hex(&agent_path)?;
+    // TTY: deliberately NOT shown on the step line — it's diagnostic (relocated
+    // to `diag`), not routine build progress.
+    ux.progress.detail(format!("   tdvmm-agent: sha256 {agent_sha}  build {agent_build_hash}"));
+    diag.push_str(&format!("agent_sha256: {agent_sha}\nagent_build_hash: {agent_build_hash}\n"));
+
     // --- scratch workdir + clean CONTAINERS_CONF ---
     let work_guard = ScratchDir::new()?;
     let work = work_guard.path().to_path_buf();
@@ -251,7 +271,7 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
         .and_then(|s| s.split_whitespace().nth(2).map(|v| v.to_string()))
         .unwrap_or_default();
 
-    ux.progress.step(3, TOTAL_STEPS, "pull + build images");
+    ux.progress.step(5, TOTAL_STEPS, "pull + build images");
     ux.progress.detail(format!("   images: {}", validated.images.join(" ")));
     if !validated.builds.is_empty() {
         let tags: Vec<&str> = validated.builds.iter().map(|b| b.image_tag.as_str()).collect();
@@ -267,15 +287,19 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&bstore)?;
     std::fs::create_dir_all(&brun)?;
 
-    // Stage-6 inputs resolved EARLY (all cheap: env/lock-file reads + path/URL
-    // formatting) so the agent build + the two pinned downloads can start with
-    // the image phase and overlap the whole middle of the bake.
-    let agent_bin = work.join("tdvmm-agent");
+    // Assemble-stage inputs resolved EARLY (all cheap: embedded-pin reads +
+    // path/URL formatting) so the two pinned downloads can start with the
+    // image phase and overlap the whole middle of the bake.
     let mirror = std::env::var("ALPINE_MIRROR").unwrap_or_else(|_| DEFAULT_MIRROR.to_string());
-    let tarball = alpine_dir.join(MINIROOTFS);
+    // sha-verified download caches live under the cache dir (NOT the source tree):
+    // an installed `tdvmm` has no writable repo. The pins that DESCRIBE them
+    // (compose-engine.lock) are embedded in the binary. `fetch_verify`
+    // create_dir_all's the destination parent, so `downloads/` is made on demand.
+    let downloads_dir = cache_dir.join("downloads");
+    let tarball = downloads_dir.join(MINIROOTFS);
     let mini_url = format!("{mirror}/{ALPINE_BRANCH}/releases/x86_64/{MINIROOTFS}");
-    let (compose_version, compose_sha256) = read_compose_lock(&alpine_dir)?;
-    let compose_cache = alpine_dir.join(format!("docker-compose-{compose_version}"));
+    let (compose_version, compose_sha256) = compose_engine_pin()?;
+    let compose_cache = downloads_dir.join(format!("docker-compose-{compose_version}"));
     let compose_url = format!("https://github.com/docker/compose/releases/download/{compose_version}/docker-compose-linux-x86_64");
 
     // Paths shared by the overlapped middle (the scope below) and the serial
@@ -292,14 +316,12 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     let mut plain_refs: Vec<String> = Vec::new();
     let mut plain_pin: HashMap<String, String> = HashMap::new();
 
-    // Stages 3-5 under one thread scope: the reproducible agent build (a full
-    // musl recompile that used to run alone in stage 6) and the two pinned
+    // The image/seed/lock stages under one thread scope: the two pinned
     // downloads proceed alongside the image bakes + seed store + lock emission,
     // joining exactly where their outputs are first needed. Errors are `Send`
     // inside the scope (thread results cross the joins); the `map_err` closure
     // below coerces back to the plain boxed error this function returns.
     let mid = std::thread::scope(|s| -> Result<MidBake, Box<dyn std::error::Error + Send + Sync>> {
-        let agent_t = s.spawn(|| build_agent(&here, &agent_bin, &ux).map_err(|e| e.to_string()));
         let mini_t = s.spawn(|| fetch_verify(&tarball, &mini_url, MINIROOTFS_SHA256, &ux).map_err(|e| e.to_string()));
         let compose_t = s.spawn(|| fetch_verify(&compose_cache, &compose_url, &compose_sha256, &ux).map_err(|e| e.to_string()));
 
@@ -358,7 +380,7 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
         }
 
         // --- 3. build the seed store (podman unshare) ---
-        ux.progress.step(4, TOTAL_STEPS, "seed store");
+        ux.progress.step(6, TOTAL_STEPS, "seed store");
         ux.progress.detail("== build seed store ==");
         std::fs::create_dir_all(&store)?;
         std::fs::create_dir_all(&runroot)?;
@@ -398,7 +420,7 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
         }
 
         // --- 4. emit compose.lock.yml + materialize binds ---
-        ux.progress.step(5, TOTAL_STEPS, "compose.lock + binds");
+        ux.progress.step(7, TOTAL_STEPS, "compose.lock + binds");
         ux.progress.detail("== emit compose.lock.yml ==");
         let mut digests: HashMap<String, String> = HashMap::new();
         for reff in &plain_refs {
@@ -447,31 +469,20 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
         }
 
         // --- 6. assemble the per-stack initramfs ---
-        ux.progress.step(6, TOTAL_STEPS, "assemble initramfs");
+        ux.progress.step(8, TOTAL_STEPS, "assemble initramfs");
         ux.progress.detail("== assemble initramfs (Rust rootfs + cpio) ==");
         // (out_initramfs computed early, above, for the cache path)
 
-        // Join the tdvmm-agent build (static musl, reproducible, in the pinned
-        // builder container — spawned at the top of this scope). Yields the
-        // embedded build hash (the compat oracle reported by ping/hello); its
-        // file sha256 goes in the ledger + anchors and feeds the base key.
-        let agent_build_hash = agent_t.join().map_err(|_| "tdvmm-agent build thread panicked")??;
-        let agent_sha = sha256_file_hex(&agent_bin)?;
-        // TTY: deliberately NOT shown on the step line — it's diagnostic (relocated
-        // to `diag` below), not routine build progress.
-        ux.progress.detail(format!("   tdvmm-agent: sha256 {agent_sha}  build {agent_build_hash}"));
-        diag.push_str(&format!("agent_sha256: {agent_sha}\nagent_build_hash: {agent_build_hash}\n"));
-
         // Join the pinned minirootfs + compose-binary downloads (fetched and
-        // sha-verified in their threads, cached in alpine_dir): both must be on
-        // disk before the base build / base key / assemble read them.
+        // sha-verified in their threads, cached under downloads_dir): both must
+        // be on disk before the base build / base key / assemble read them.
         mini_t.join().map_err(|_| "minirootfs fetch thread panicked")??;
         compose_t.join().map_err(|_| "compose fetch thread panicked")??;
 
-        Ok(MidBake { agent_build_hash, agent_sha, selftest_pin, seedpins, lock_sha, est_mib })
+        Ok(MidBake { selftest_pin, seedpins, lock_sha, est_mib })
     })
     .map_err(|e| -> Box<dyn std::error::Error> { e })?;
-    let MidBake { agent_build_hash, agent_sha, selftest_pin, seedpins, lock_sha, est_mib } = mid;
+    let MidBake { selftest_pin, seedpins, lock_sha, est_mib } = mid;
 
     // --- Fable Part D: the shared base-runtime segment cache. Keyed on DECLARED
     //     base pins only (Alpine + package set + overlay + agent + compose engine +
@@ -480,9 +491,9 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     //     forces a base rebuild (still stored). ---
     // The pinned rootfs-builder image (Move 3 Step C) — folded into the base key so
     // an image bump busts the base-runtime cache and re-resolves the package set.
-    let (rb_img, rb_dig) = read_rootfs_builder_pin(&here)?;
+    let (rb_img, rb_dig) = rootfs_builder_pin()?;
     let rootfs_builder = format!("{rb_img}@{rb_dig}");
-    let base_key = compute_base_key(&alpine_dir, &agent_sha, &compose_version, &compose_sha256, &selftest_pin, &rootfs_builder);
+    let base_key = compute_base_key(&agent_sha, &compose_version, &compose_sha256, &selftest_pin, &rootfs_builder);
     let base_entry = cache_dir.join("base-runtime").join(&base_key);
     let base_seg_cached = base_entry.join("base.cpio");
     let base_pl_cached = base_entry.join("packages.lock");
@@ -507,7 +518,7 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     let base_segment = if base_hit { base_seg_cached.clone() } else { work.join("base.cpio") };
 
     // MISS: build the base Alpine rootfs in the pinned rootfs-builder container
-    // (apk --root, NO chroot) BEFORE the unshare — build_agent's slot. Produces
+    // (apk --root, NO chroot) BEFORE the unshare. Produces
     // base-rootfs.tar (untrusted transport) + packages.lock (the resolution
     // ledger). On a HIT this is skipped entirely (cached cpio segment reused).
     let base_build_dir = work.join("base-build");
@@ -523,9 +534,8 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
         work: work.clone(),
         base_rootfs_tar: base_rootfs_tar.clone(),
         build_epoch: BUILD_EPOCH.to_string(),
-        overlay: here.join("initramfs-alpine/overlay"),
         compose_cache,
-        agent_bin,
+        agent_bin: agent_path,
         seed_storage: store.clone(),
         selftest_image_ref: selftest_pin.clone(),
         stack_name: stack_name.clone(),
@@ -534,7 +544,7 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
         stack_binds: binds_stage.clone(),
         stack_mem: mem_mib,
         out: out_initramfs.clone(),
-        packages_lock_out: alpine_dir.join("packages.lock"),
+        packages_lock_out: packages_lock_out.clone(),
         base_hit,
         base_segment: base_segment.clone(),
         base_packages_lock: base_pl_cached.clone(),
@@ -549,7 +559,7 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
 
     // MISS: store the freshly-emitted base segment (+ its package set) for reuse.
     if !base_hit {
-        if let Err(e) = base_cache_store(&base_entry, &base_segment, &alpine_dir.join("packages.lock")) {
+        if let Err(e) = base_cache_store(&base_entry, &base_segment, &packages_lock_out) {
             ux.progress.println(format!("{}: could not populate base-runtime cache ({e})", compose::WARN));
         } else {
             ux.progress.detail(format!("   base cached: {} (key {})", base_entry.display(), &base_key[..16]));
@@ -560,11 +570,11 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
 
     // --- 7. write stack.lock (the reproducibility ledger — declared inputs only,
     //        NO host-probed values; Fable guardrail §3) ---
-    ux.progress.step(7, TOTAL_STEPS, "pack artifact");
-    write_stack_lock(&here, &stack_name, &project, mem_mib, est_mib, &lock_sha, &art_sha, &agent_sha, &out_initramfs, &records, &plain_refs, &plain_pin, &seedpins, &validated, &builders)?;
+    ux.progress.step(9, TOTAL_STEPS, "pack artifact");
+    write_stack_lock(&stack_lock_out, &stack_name, &project, mem_mib, est_mib, &lock_sha, &art_sha, &agent_sha, &out_initramfs, &records, &plain_refs, &plain_pin, &seedpins, &validated, &builders)?;
 
-    // stash the emitted lock next to the manifest.
-    std::fs::copy(&lock_path, &committed_lock)?;
+    // stash the emitted lock beside the artifact in the cache ledgers dir.
+    std::fs::copy(&lock_path, &lock_out)?;
 
     // --- 8. pack the single-file .tdvmm artifact ---
     ux.progress.detail("== pack .tdvmm artifact ==");
@@ -590,7 +600,7 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     let tdvmm_sha = written.sha256_hex;
     let tdvmm_len = written.len;
     // append the artifact identity to the ledger.
-    append_stack_lock_tdvmm(&here, &stack_name, &tdvmm_sha, &out_tdvmm)?;
+    append_stack_lock_tdvmm(&stack_lock_out, &tdvmm_sha, &out_tdvmm)?;
     diag.push_str(&format!(
         "initramfs: {} sha256={art_sha}\ntdvmm: {} sha256={tdvmm_sha}\n",
         out_initramfs.display(), out_tdvmm.display(),
@@ -609,9 +619,9 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     ux.progress.suspend(|| print_artifact_id_line(&tdvmm_sha, &out_tdvmm));
 
     // --- 9. populate the bake cache (best-effort; never fails the build) ---
-    ux.progress.step(8, TOTAL_STEPS, "cache");
+    ux.progress.step(10, TOTAL_STEPS, "cache");
     if let Some(c) = &cache {
-        match cache_store(c, &out_tdvmm, &out_initramfs, &committed_lock, &stack_lock_path, &tdvmm_sha) {
+        match cache_store(c, &out_tdvmm, &out_initramfs, &lock_out, &stack_lock_out, &tdvmm_sha) {
             Ok(true) => {
                 ux.progress.detail(format!("   cached:    {} (key {})", c.dir.display(), &c.key[..16]));
                 diag.push_str(&format!("bake_cache_stored: {} (key {})\n", c.dir.display(), c.key));
@@ -627,13 +637,63 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     //         relocated, not lost. Disposable; best-effort. ---
     let diag_path = write_bake_diagnostics(&cache_dir, &stack_name, &host_podman_version, &builders, &diag, ux.progress);
 
+    // Maintainer-only: refresh the committed lock fixtures from this bake.
+    maybe_regen_fixtures(&stack_name, &lock_out, &stack_lock_out, &packages_lock_out, &ux);
+
     // TTY: the aligned final summary block (Fix: the bar is cleared FIRST, so
-    // the step counter deterministically reaches [8/8] with no stale spinner
+    // the step counter deterministically reaches [10/10] with no stale spinner
     // frame). A no-op in frozen mode — the plain `DONE` block above already
     // covers it byte-for-byte.
     ux.progress.print_summary(&out_tdvmm, &tdvmm_sha, tdvmm_len, progress.elapsed(), diag_path.as_deref());
 
     Ok(0)
+}
+
+/// Maintainer-only fixture regeneration. A normal `tdvmm build` NEVER writes into
+/// the repo — the per-bake ledgers land in the cache ledgers dir. But the committed
+/// `guest/stacks/<name>/{compose.lock.yml,stack.lock}` are TEST FIXTURES that unit
+/// tests compare byte-for-byte, and a real bake is the only way to regenerate the
+/// `stack.lock` fixtures (the `compose.lock.yml` fixtures also have the pure-unit
+/// `TDVMM_REGEN_LOCKS=1 cargo test` path). So when `TDVMM_REGEN_LOCKS` is set, copy
+/// this bake's freshly-written cache ledgers back over the committed fixtures — the
+/// two stack locks plus the committed `guest/initramfs-alpine/packages.lock`
+/// reference (skipped on a cache HIT, where packages.lock isn't restored).
+/// Best-effort + explicitly opt-in: a maintainer runs it from a checkout, so the
+/// repo `guest/` dir is locatable.
+fn maybe_regen_fixtures(
+    stack: &str,
+    lock_out: &Path,
+    stack_lock_out: &Path,
+    packages_lock_out: &Path,
+    ux: &Ux,
+) {
+    if std::env::var_os("TDVMM_REGEN_LOCKS").is_none() {
+        return;
+    }
+    let Some(here) = find_guest_dir() else {
+        ux.progress.println("TDVMM_REGEN_LOCKS: no source checkout found; fixtures not regenerated");
+        return;
+    };
+    let stack_dir = here.join("stacks").join(stack);
+    let mut targets = vec![
+        (lock_out, stack_dir.join("compose.lock.yml")),
+        (stack_lock_out, stack_dir.join("stack.lock")),
+    ];
+    if packages_lock_out.is_file() {
+        targets.push((packages_lock_out, here.join("initramfs-alpine/packages.lock")));
+    }
+    for (from, to) in &targets {
+        let r = to
+            .parent()
+            .map(std::fs::create_dir_all)
+            .unwrap_or(Ok(()))
+            .and_then(|()| std::fs::copy(from, to).map(|_| ()));
+        if let Err(e) = r {
+            ux.progress.println(format!("TDVMM_REGEN_LOCKS: could not write {} ({e})", to.display()));
+            return;
+        }
+    }
+    ux.progress.println(format!("TDVMM_REGEN_LOCKS: regenerated committed lock fixtures for {stack}"));
 }
 
 /// Write host-probed + relocated bake diagnostics to a side file under the

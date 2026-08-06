@@ -1,6 +1,6 @@
-//! Small build-time utilities: content hashing, temp-dir creation, locating the
-//! repo `guest/` tree from the running binary, and the informational UTC clock
-//! used by the lock ledger.
+//! Small build-time utilities: content hashing, temp-dir creation, optionally
+//! locating a source checkout from the running binary, and the informational UTC
+//! clock used by the lock ledger.
 
 use std::path::{Path, PathBuf};
 
@@ -15,24 +15,24 @@ pub(super) fn sha256_file_hex(path: &Path) -> std::io::Result<String> {
     Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// Resolve the repo `guest/` directory relative to the running binary (target/…).
-/// Falls back to `guest/` under the current dir.
-pub(super) fn self_here() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let exe = std::env::current_exe()?;
-    let mut p = exe.clone();
+/// Locate the repo `guest/` directory of a source checkout, if one is present:
+/// relative to the running binary (target/…), else under the current dir. Every
+/// runtime asset is embedded or cached now, so a checkout is OPTIONAL — only the
+/// from-source fallbacks (agent build, kernel rebuild, `tdvmm boot`'s default
+/// initrd) and the maintainer `--record`/regen flows consume this, and each
+/// reports its own clear error when it needs a checkout that isn't there.
+pub(super) fn find_guest_dir() -> Option<PathBuf> {
+    let mut p = std::env::current_exe().ok()?;
     // .../target/release/tdvmm -> .../ (repo root)
     for _ in 0..3 {
         p.pop();
     }
     let cand = p.join("guest");
     if cand.is_dir() {
-        return Ok(cand);
+        return Some(cand);
     }
-    let cwd = std::env::current_dir()?.join("guest");
-    if cwd.is_dir() {
-        return Ok(cwd);
-    }
-    Err("could not locate the repo guest/ directory (run from the repo, or keep target/ in place)".into())
+    let cwd = std::env::current_dir().ok()?.join("guest");
+    cwd.is_dir().then_some(cwd)
 }
 
 /// Filename prefix for every build scratch dir (`tdvmm-build-<pid>-<nanos>`). The

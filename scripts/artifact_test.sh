@@ -28,11 +28,13 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 BIN="$ROOT/target/release/tdvmm"
-KERNEL="$ROOT/guest/kernel/vmlinux-6.1.128"
 # Self-contained bake outputs: a gitignored, persistent test cache dir (NOT the
 # repo, NOT ~/.tdvmm). The per-stack initramfs (needed by gate 8's raw boot) lands
-# in $CACHE/artifacts/; keeping the dir warm across runs makes re-bakes fast.
+# in $CACHE/bake/; keeping the dir warm across runs makes re-bakes fast.
 CACHE="${TDVMM_TEST_CACHE:-$ROOT/.tdvmm-tmp/tdvmm-cache}"; mkdir -p "$CACHE"
+# `tdvmm build`'s ensure_kernel writes the pinned vmlinux under the cache dir (was
+# guest/kernel/). Gate 8's raw boot reads it; the first build below populates it.
+KERNEL="$CACHE/kernel/vmlinux-6.1.128"
 
 STACKS=("$@"); [ "${#STACKS[@]}" -eq 0 ] && STACKS=(insert-trim svcchain)
 MEM="${MEM:-3072}"
@@ -43,7 +45,7 @@ WALL_TIMEOUT="${WALL_TIMEOUT:-120}"
 GATE_HOP_US="${GATE_HOP_US:-500}"
 
 [ -x "$BIN" ] || { echo "[artifact] building tdvmm..."; ( cd "$ROOT" && cargo build --release ) || exit 3; }
-[ -f "$KERNEL" ] || { echo "[artifact] kernel missing: $KERNEL"; exit 3; }
+# The kernel lands in the cache on the first build (gate 1), before gate 8 reads it.
 
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 CMDLINE="console=ttyS0 reboot=t panic=1 pci=off no_timer_check tsc=reliable tdvmm.stack=1 tdvmm.interval=$INTERVAL tdvmm.maxrows=$MAX_ROWS tdvmm.hc_tick=2"

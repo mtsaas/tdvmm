@@ -4,19 +4,23 @@
 //! byte-identical `.tdvmm`; see artifact_test gate 1), so a build whose inputs are
 //! unchanged can REUSE the prior outputs and skip the whole pull/squash/assemble
 //! pipeline. The cache key hashes EVERY input that affects the output bytes; a hit
-//! restores the `.tdvmm`, the per-stack initramfs (+ sha sidecar), and the committed
-//! compose.lock.yml + stack.lock. `--no-cache` forces a full rebuild (still stored,
+//! restores the `.tdvmm`, the per-stack initramfs (+ sha sidecar), and the per-stack
+//! compose.lock.yml + stack.lock ledgers. `--no-cache` forces a full rebuild (still stored,
 //! so later runs hit); nightly bake-repeatability uses it to re-bake unconditionally.
 
 use std::path::{Path, PathBuf};
 
 use crate::artifact;
 use super::fsops::tree_hash;
+use super::overlay;
+use super::pins::COMPOSE_ENGINE_LOCK;
 use super::util::{now_nanos, sha256_file_hex};
 
 /// Cache-entry format version. Bump when the cached fileset or key inputs change
-/// in a way older entries can't satisfy.
-pub(super) const CACHE_VERSION: u32 = 3;
+/// in a way older entries can't satisfy. v6: the `agent:` line is always the
+/// embedded source identity (the release-sha alternative is gone — the agent is
+/// only ever built from the embedded source).
+pub(super) const CACHE_VERSION: u32 = 6;
 
 pub(super) struct CacheCtx {
     /// The per-key entry directory: <cache-root>/<key>.
@@ -47,8 +51,6 @@ pub(super) fn resolve_cache_dir(flag: Option<&str>) -> (PathBuf, &'static str) {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn compute_cache_key(
     self_exe: &Path,
-    here: &Path,
-    alpine_dir: &Path,
     compose_dir: &Path,
     stack_name: &str,
     mem_mib: u64,
@@ -57,27 +59,20 @@ pub(super) fn compute_cache_key(
     cache_dir: &Path,
     kernel: &Path,
     builders: &[String],
+    agent_pin: &str,
 ) -> Result<CacheCtx, String> {
-    let repo_root = here
-        .parent()
-        .ok_or_else(|| "no repo root above guest/".to_string())?;
     let self_sha = sha256_file_hex(self_exe).map_err(|x| format!("hashing tdvmm binary: {x}"))?;
     let kernel_sha = sha256_file_hex(kernel).map_err(|x| format!("hashing kernel: {x}"))?;
-    // The agent is now a Rust crate built in a pinned musl container: its cache
-    // input is the agent + proto crate trees + Cargo.lock (a toolchain/image bump
-    // is captured via the `builders` digests below). Fable §2.
-    let agent_tree =
-        tree_hash(&repo_root.join("tdvmm-agent"), &[]).map_err(|x| format!("hashing tdvmm-agent: {x}"))?;
-    let proto_tree =
-        tree_hash(&repo_root.join("tdvmm-proto"), &[]).map_err(|x| format!("hashing tdvmm-proto: {x}"))?;
-    let cargo_lock = sha256_file_hex(&repo_root.join("Cargo.lock"))
-        .map_err(|x| format!("hashing Cargo.lock: {x}"))?;
-    let overlay_tree =
-        tree_hash(&alpine_dir.join("overlay"), &[]).map_err(|x| format!("hashing overlay: {x}"))?;
-    let engine_sha = sha256_file_hex(&alpine_dir.join("compose-engine.lock"))
-        .map_err(|x| format!("hashing compose-engine.lock: {x}"))?;
+    // The agent input is its embedded source identity (`agent_src_id`) — the
+    // identity of the agent that ends up in the artifact. The overlay +
+    // compose-engine pins are embedded in the binary (also covered by
+    // `self_sha`, but kept as named lines so the key form stays legible).
+    let overlay_id = overlay::overlay_id();
+    let engine_sha = artifact::sha256_hex(COMPOSE_ENGINE_LOCK.as_bytes());
     // the stack dir: compose.yml + build contexts + bind sources + service source,
-    // EXCLUDING this bake's own committed outputs.
+    // EXCLUDING the lock ledgers (the bake writes those to the cache, but a corpus
+    // stack keeps committed compose.lock.yml/stack.lock fixtures in this same dir —
+    // they must not perturb the key).
     let stack_tree = tree_hash(compose_dir, &["compose.lock.yml", "stack.lock"])
         .map_err(|x| format!("hashing stack dir: {x}"))?;
     // Fable Part B/guardrail §3: the DECLARED builder-image digests replace the old
@@ -90,10 +85,8 @@ pub(super) fn compute_cache_key(
          builders:  {builders_line}\n\
          engine:    {engine_sha}\n\
          kernel:    {kernel_sha}\n\
-         agent:     {agent_tree}\n\
-         proto:     {proto_tree}\n\
-         cargolock: {cargo_lock}\n\
-         overlay:   {overlay_tree}\n\
+         agent:     {agent_pin}\n\
+         overlay:   {overlay_id}\n\
          stackdir:  {stack_tree}\n\
          name:      {stack_name}\n\
          mem:       {mem_mib}\n\
@@ -125,10 +118,10 @@ pub(super) fn cache_restore(
     c: &CacheCtx,
     out_tdvmm: &Path,
     out_initramfs: &Path,
-    committed_lock: &Path,
+    lock_out: &Path,
     stack_lock: &Path,
 ) -> std::io::Result<String> {
-    for p in [out_tdvmm, out_initramfs, committed_lock] {
+    for p in [out_tdvmm, out_initramfs, lock_out, stack_lock] {
         if let Some(parent) = p.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -139,7 +132,7 @@ pub(super) fn cache_restore(
         c.dir.join("initramfs.cpio.gz.sha256"),
         format!("{}.sha256", out_initramfs.display()),
     )?;
-    std::fs::copy(c.dir.join("compose.lock.yml"), committed_lock)?;
+    std::fs::copy(c.dir.join("compose.lock.yml"), lock_out)?;
     std::fs::copy(c.dir.join("stack.lock"), stack_lock)?;
     Ok(std::fs::read_to_string(c.dir.join("tdvmm_sha256"))?
         .trim()
@@ -152,7 +145,7 @@ pub(super) fn cache_store(
     c: &CacheCtx,
     out_tdvmm: &Path,
     out_initramfs: &Path,
-    committed_lock: &Path,
+    lock_out: &Path,
     stack_lock: &Path,
     tdvmm_sha: &str,
 ) -> std::io::Result<bool> {
@@ -171,7 +164,7 @@ pub(super) fn cache_store(
     } else {
         std::fs::write(tmp.join("initramfs.cpio.gz.sha256"), b"")?;
     }
-    std::fs::copy(committed_lock, tmp.join("compose.lock.yml"))?;
+    std::fs::copy(lock_out, tmp.join("compose.lock.yml"))?;
     std::fs::copy(stack_lock, tmp.join("stack.lock"))?;
     std::fs::write(tmp.join("tdvmm_sha256"), format!("{tdvmm_sha}\n"))?;
     // atomic publish; if another builder won the race, drop our temp.

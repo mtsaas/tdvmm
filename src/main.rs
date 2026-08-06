@@ -265,7 +265,7 @@ fn dispatch() -> Result<i32, Box<dyn std::error::Error>> {
             cache_dir: args.cache_dir,
             no_progress,
         }),
-        Cmd::BuildAgent(args) => build::cmd_build_agent(&args.out),
+        Cmd::BuildAgent(args) => build::cmd_build_agent(build::BuildAgentArgs { out: args.out }),
         Cmd::BuildKernel(args) => build::cmd_build_kernel(build::BuildKernelArgs {
             out: args.out,
             cache_dir: args.cache_dir,
