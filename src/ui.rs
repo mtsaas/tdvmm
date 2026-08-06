@@ -42,7 +42,8 @@
 //! This module is UI-only plumbing: it knows nothing about podman, the bake
 //! pipeline, or the `engine` choke point (module-placement rule — UI depends
 //! on nothing, the choke point depends on nothing UI). It is used ONLY by
-//! `build.rs`'s orchestrator, never by `run`/`test`/`boot`/etc. A [`Progress`]
+//! `build.rs`'s orchestrator and `doctor`'s pre-warm, never by
+//! `run`/`test`/`boot`/etc. A [`Progress`]
 //! is always a value LOCAL to its owner (never a global — Fable coexistence
 //! rule): it cannot outlive a bake, so it can never coexist with a running
 //! VM's raw-tty console.

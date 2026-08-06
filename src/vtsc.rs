@@ -245,7 +245,9 @@ impl VirtualClock {
 
 /// Read the current TSC offset for `vcpu` via KVM_HAS/GET_DEVICE_ATTR on the
 /// vCPU fd (group `KVM_VCPU_TSC_CTRL`, attr `KVM_VCPU_TSC_OFFSET`).
-fn read_tsc_offset(vcpu: &VcpuFd) -> Result<i64, VtscError> {
+/// `pub(crate)` for `doctor`'s KVM check only — the boot path goes through
+/// [`VirtualClock::from_vcpu`].
+pub(crate) fn read_tsc_offset(vcpu: &VcpuFd) -> Result<i64, VtscError> {
     let probe = kvm_device_attr {
         group: KVM_VCPU_TSC_CTRL,
         attr: u64::from(KVM_VCPU_TSC_OFFSET),

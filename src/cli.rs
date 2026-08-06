@@ -17,6 +17,7 @@ use crate::{DEFAULT_CMDLINE, DEFAULT_MAX_JUMP_SECS, DEFAULT_MEM_MIB};
                   Durations (--max-virtual-time): a bare number is seconds, or use a \
                   suffix (ms, s, m, h), e.g. 500ms, 30s, 5m, 2h.",
     after_help = "Examples:\n  \
+                  tdvmm doctor\n  \
                   tdvmm build insert-trim guest/stacks/insert-trim/compose.yml\n  \
                   tdvmm run insert-trim\n  \
                   tdvmm test insert-trim --scenario guest/stacks/insert-trim/insert-trim.yml\n  \
@@ -26,10 +27,10 @@ use crate::{DEFAULT_CMDLINE, DEFAULT_MAX_JUMP_SECS, DEFAULT_MEM_MIB};
 pub(crate) struct Cli {
     #[command(subcommand)]
     pub(crate) cmd: Cmd,
-    /// Disable the `tdvmm build` progress spinner (plain `== step ==` lines).
+    /// Disable the build progress spinner (plain `== step ==` lines).
     ///
-    /// Also forced by a non-terminal stderr, `CI`, or `TERM=dumb`. No effect on
-    /// any other subcommand.
+    /// Also forced by a non-terminal stderr, `CI`, or `TERM=dumb`. Affects only
+    /// `tdvmm build` and `tdvmm doctor`'s pre-warm.
     #[arg(long, global = true)]
     pub(crate) no_progress: bool,
 }
@@ -78,6 +79,14 @@ pub(crate) enum Cmd {
     /// and the busybox clock guest — so a bare `tdvmm boot` smoke-boots the minimal
     /// guest; pass --kernel / --initrd to override.
     Boot(BootArgs),
+    /// Check host prerequisites and pre-warm the build cache.
+    ///
+    /// Probes everything a first `tdvmm build`/`run` needs — /dev/kvm, KVM
+    /// (incl. the KVM_VCPU_TSC_OFFSET attribute), host kernel >= 5.16, podman,
+    /// network, and the cache dir — then builds/fetches the guest kernel,
+    /// agent, and pinned downloads into the cache so later builds are fast.
+    /// Exit 0 = everything healthy; 1 = one or more problems.
+    Doctor(DoctorArgs),
     /// Build the pinned guest kernel from source.
     ///
     /// Reproducibly compiles the sha-pinned kernel source in the pinned builder
@@ -163,6 +172,15 @@ pub(crate) struct BuildCliArgs {
     /// $HOME/.tdvmm. The resolved dir is logged at build start.
     #[arg(long, value_name = "PATH")]
     pub(crate) cache_dir: Option<String>,
+}
+
+/// `tdvmm doctor` args.
+#[derive(Args)]
+pub(crate) struct DoctorArgs {
+    /// Run only the prerequisite checks; skip the cache pre-warm (the
+    /// kernel/agent container builds and the pinned downloads).
+    #[arg(long)]
+    pub(crate) skip_downloads: bool,
 }
 
 /// `tdvmm build-agent` args.
