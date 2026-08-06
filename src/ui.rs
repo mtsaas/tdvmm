@@ -389,15 +389,21 @@ impl Progress {
         r.redraw();
     }
 
+    /// Run `f` on the CURRENT step's state under the renderer lock; a no-op in
+    /// frozen mode or between steps.
+    fn with_current(&self, f: impl FnOnce(&mut StepState)) {
+        if let Some(live) = &self.live {
+            if let Some(st) = live.lock().current.as_mut() {
+                f(st);
+            }
+        }
+    }
+
     /// Replace the CURRENT step's spinner label (e.g. `guest kernel` →
     /// `guest kernel · compiling 6.1.128 (first run)` once a compile actually
     /// starts). TTY-only; a no-op in frozen mode.
     pub fn relabel(&self, label: impl Into<String>) {
-        if let Some(live) = &self.live {
-            if let Some(st) = live.lock().current.as_mut() {
-                st.label = label.into();
-            }
-        }
+        self.with_current(|st| st.label = label.into());
     }
 
     /// One streamed line of the CURRENT step's child output (the live build
@@ -426,11 +432,7 @@ impl Progress {
     /// A short inline note for the CURRENT step's `✓` line (e.g. `miss → full
     /// bake`), for single-fact steps. TTY-only; a no-op in frozen mode.
     pub fn note(&self, text: impl Into<String>) {
-        if let Some(live) = &self.live {
-            if let Some(st) = live.lock().current.as_mut() {
-                st.note = Some(text.into());
-            }
-        }
+        self.with_current(|st| st.note = Some(text.into()));
     }
 
     /// One entry (`name`, size in MiB) in the CURRENT step's aligned indented
@@ -438,11 +440,7 @@ impl Progress {
     /// line once the step finishes. TTY-only; a no-op in frozen mode. Safe from
     /// the parallel bake workers (guarded by the renderer lock).
     pub fn item(&self, name: impl Into<String>, size_mib: u64) {
-        if let Some(live) = &self.live {
-            if let Some(st) = live.lock().current.as_mut() {
-                st.items.push((name.into(), size_mib));
-            }
-        }
+        self.with_current(|st| st.items.push((name.into(), size_mib)));
     }
 
     /// One chrome line that must ALWAYS surface — warnings, gate failures,

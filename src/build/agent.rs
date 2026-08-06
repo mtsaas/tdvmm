@@ -185,14 +185,13 @@ pub(super) fn ensure_agent(
 /// bytes) are unchanged. Determinism knobs: the `agent-release` profile
 /// (opt-level=z, lto, codegen-units=1, panic=abort, strip=symbols);
 /// `SOURCE_DATE_EPOCH`; the path remaps; `--build-id=none`; and `rust-lld` +
-/// self-contained linking so no external C toolchain is pulled. Returns the
-/// embedded build hash.
+/// self-contained linking so no external C toolchain is pulled.
 fn build_agent(
     src_dir: &Path,
     out: &Path,
     log: &Path,
     ux: &Ux,
-) -> Result<String, Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error>> {
     let (image, digest) = agent_builder_pin()?;
     let img_ref = format!("{image}@{digest}");
     let build_hash = agent_src_id();
@@ -227,7 +226,7 @@ fn build_agent(
 
     std::fs::copy(work.join("tdvmm-agent"), out)
         .map_err(|e| format!("agent build produced no binary: {e}"))?;
-    Ok(build_hash)
+    Ok(())
 }
 
 /// `tdvmm build-agent -o <path>`: build the reproducible musl agent standalone
@@ -251,7 +250,8 @@ pub fn cmd_build_agent(args: BuildAgentArgs) -> Result<i32, Box<dyn std::error::
     // Progress is disabled here, so run_build inherits and never writes the
     // log — the path is just the would-be destination.
     let log = resolve_cache_dir(None).0.join("diagnostics").join("agent-build.log");
-    let build_hash = build_agent(&src, &outp, &log, &ux)?;
+    build_agent(&src, &outp, &log, &ux)?;
+    let build_hash = agent_src_id();
     let sha = sha256_file_hex(&outp)?;
     let size = std::fs::metadata(&outp)?.len();
     eprintln!("   tdvmm-agent: {size} bytes  build={build_hash}  sha256={sha}");

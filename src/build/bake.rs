@@ -474,8 +474,8 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
         // (out_initramfs computed early, above, for the cache path)
 
         // Join the pinned minirootfs + compose-binary downloads (fetched and
-        // sha-verified in their threads, cached in alpine_dir): both must be on
-        // disk before the base build / base key / assemble read them.
+        // sha-verified in their threads, cached under downloads_dir): both must
+        // be on disk before the base build / base key / assemble read them.
         mini_t.join().map_err(|_| "minirootfs fetch thread panicked")??;
         compose_t.join().map_err(|_| "compose fetch thread panicked")??;
 
