@@ -135,7 +135,7 @@ with open(p,'r+b') as f: f.seek(off); b=f.read(1); f.seek(off); f.write(bytes([b
     else
       if "$BIN" run "$C" --max-virtual-time 3s </dev/null >"$TMP/corrupt.run.log" 2>&1; then
         echo "  (6) FAIL: run booted a corrupted artifact"; ok=0
-      elif grep -q 'MISMATCH' "$TMP/corrupt.run.log"; then
+      elif grep -qi 'mismatch' "$TMP/corrupt.run.log"; then
         echo "  (6) CORRUPTION OK: verify FAILS (nonzero) + run REFUSES (hash mismatch) on a flipped byte"
       else echo "  (6) FAIL: run did not report a hash mismatch"; ok=0; fi
     fi
