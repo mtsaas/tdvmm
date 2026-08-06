@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::compose;
 use crate::engine;
 use crate::ui;
-use super::agent::{agent_cache_input, ensure_agent};
+use super::agent::{agent_src_id, ensure_agent};
 use super::base::{base_cache_store, build_base_rootfs, compute_base_key};
 use super::cache::{cache_is_hit, cache_restore, cache_store, compute_cache_key, resolve_cache_dir};
 use super::fsops::copy_tree;
@@ -45,15 +45,13 @@ fn print_artifact_id_line(sha: &str, path: &Path) {
     }
 }
 
-/// What the overlapped middle of the bake — stages 3-5, with the agent build
-/// and the two pinned downloads running alongside under one thread scope —
-/// hands the serial assemble/pack tail.
+/// What the overlapped middle of the bake — the image/seed/lock stages, with
+/// the two pinned downloads running alongside under one thread scope — hands
+/// the serial assemble/pack tail. (The agent compile is a SERIAL step before
+/// the scope: one live build at a time keeps the viewport tail coherent, and
+/// on a warm agent cache — every bake after the machine's first — the lost
+/// overlap costs nothing.)
 struct MidBake {
-    /// Where the agent binary landed: the cache (fetched release asset) or the
-    /// bake scratch dir (from-source fallback).
-    agent_path: PathBuf,
-    agent_build_hash: String,
-    agent_sha: String,
     selftest_pin: String,
     seedpins: HashMap<String, String>,
     lock_sha: String,
@@ -139,10 +137,12 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     ux.progress.detail(format!("   cache-dir: {} (source: {cache_src})", cache_dir.display()));
     diag.push_str(&format!("cache_dir: {} (source: {cache_src})\n", cache_dir.display()));
 
-    // --- kernel (Fable Part C): fetch the pinned release asset (embedded pin),
-    //     else reproducibly build it in the pinned container; verified against
-    //     kernel.lock. Done BEFORE the cache key so the kernel bytes are a
-    //     present, hashable input. ---
+    // --- kernel (Fable Part C): sha-verified cache hit, else reproducibly
+    //     compiled from the pinned source in the pinned container (its live
+    //     output streams into this step's tail); verified against kernel.lock.
+    //     Done BEFORE the cache key so the kernel bytes are a present,
+    //     hashable input. ---
+    ux.progress.step(2, TOTAL_STEPS, "guest kernel");
     let kernel = ensure_kernel(&cache_dir, false, &ux)?;
     diag.push_str(&format!("kernel: {} sha256={}\n", kernel.display(), sha256_file_hex(&kernel).unwrap_or_default()));
 
@@ -191,13 +191,11 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     // gone), the tdvmm binary itself (all compiled-in pins + bake logic), and the
     // sizing knobs. `tdvmm build` is deterministic (artifact_test gate 1), so a hit
     // reusing the prior `.tdvmm` is byte-identical to a fresh bake.
-    ux.progress.step(2, TOTAL_STEPS, "bake cache");
-    let cache = match agent_cache_input().map_err(|e| e.to_string()).and_then(|agent_pin| {
-        compute_cache_key(
-            &self_exe, &compose_dir, &stack_name, mem_mib, working_set_mib,
-            squash_threshold_mib, &cache_dir, &kernel, &builders, &agent_pin,
-        )
-    }) {
+    ux.progress.step(3, TOTAL_STEPS, "bake cache");
+    let cache = match compute_cache_key(
+        &self_exe, &compose_dir, &stack_name, mem_mib, working_set_mib,
+        squash_threshold_mib, &cache_dir, &kernel, &builders, &agent_src_id(),
+    ) {
         Ok(c) => Some(c),
         Err(e) => {
             ux.progress.println(format!("{}: bake cache disabled (key error: {e})", compose::WARN));
@@ -245,6 +243,19 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     // their ScratchDir guard could run (best-effort).
     sweep_stale_scratch();
 
+    // --- agent (Fable §2): sidecar-verified cache hit, else reproducibly
+    //     compiled from the EMBEDDED source in the pinned container (its live
+    //     output streams into this step's tail). Serial by design — see
+    //     [`MidBake`]. Its file sha256 goes in the ledger + anchors and feeds
+    //     the base key. ---
+    ux.progress.step(4, TOTAL_STEPS, "guest agent");
+    let (agent_path, agent_build_hash) = ensure_agent(&cache_dir, &ux)?;
+    let agent_sha = sha256_file_hex(&agent_path)?;
+    // TTY: deliberately NOT shown on the step line — it's diagnostic (relocated
+    // to `diag`), not routine build progress.
+    ux.progress.detail(format!("   tdvmm-agent: sha256 {agent_sha}  build {agent_build_hash}"));
+    diag.push_str(&format!("agent_sha256: {agent_sha}\nagent_build_hash: {agent_build_hash}\n"));
+
     // --- scratch workdir + clean CONTAINERS_CONF ---
     let work_guard = ScratchDir::new()?;
     let work = work_guard.path().to_path_buf();
@@ -260,7 +271,7 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
         .and_then(|s| s.split_whitespace().nth(2).map(|v| v.to_string()))
         .unwrap_or_default();
 
-    ux.progress.step(3, TOTAL_STEPS, "pull + build images");
+    ux.progress.step(5, TOTAL_STEPS, "pull + build images");
     ux.progress.detail(format!("   images: {}", validated.images.join(" ")));
     if !validated.builds.is_empty() {
         let tags: Vec<&str> = validated.builds.iter().map(|b| b.image_tag.as_str()).collect();
@@ -276,10 +287,9 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&bstore)?;
     std::fs::create_dir_all(&brun)?;
 
-    // Stage-6 inputs resolved EARLY (all cheap: embedded-pin reads + path/URL
-    // formatting) so the agent acquisition + the two pinned downloads can start
-    // with the image phase and overlap the whole middle of the bake.
-    let agent_bin = work.join("tdvmm-agent");
+    // Assemble-stage inputs resolved EARLY (all cheap: embedded-pin reads +
+    // path/URL formatting) so the two pinned downloads can start with the
+    // image phase and overlap the whole middle of the bake.
     let mirror = std::env::var("ALPINE_MIRROR").unwrap_or_else(|_| DEFAULT_MIRROR.to_string());
     // sha-verified download caches live under the cache dir (NOT the source tree):
     // an installed `tdvmm` has no writable repo. The pins that DESCRIBE them
@@ -306,14 +316,12 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     let mut plain_refs: Vec<String> = Vec::new();
     let mut plain_pin: HashMap<String, String> = HashMap::new();
 
-    // Stages 3-5 under one thread scope: the reproducible agent build (a full
-    // musl recompile that used to run alone in stage 6) and the two pinned
+    // The image/seed/lock stages under one thread scope: the two pinned
     // downloads proceed alongside the image bakes + seed store + lock emission,
     // joining exactly where their outputs are first needed. Errors are `Send`
     // inside the scope (thread results cross the joins); the `map_err` closure
     // below coerces back to the plain boxed error this function returns.
     let mid = std::thread::scope(|s| -> Result<MidBake, Box<dyn std::error::Error + Send + Sync>> {
-        let agent_t = s.spawn(|| ensure_agent(&cache_dir, &agent_bin, &ux).map_err(|e| e.to_string()));
         let mini_t = s.spawn(|| fetch_verify(&tarball, &mini_url, MINIROOTFS_SHA256, &ux).map_err(|e| e.to_string()));
         let compose_t = s.spawn(|| fetch_verify(&compose_cache, &compose_url, &compose_sha256, &ux).map_err(|e| e.to_string()));
 
@@ -372,7 +380,7 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
         }
 
         // --- 3. build the seed store (podman unshare) ---
-        ux.progress.step(4, TOTAL_STEPS, "seed store");
+        ux.progress.step(6, TOTAL_STEPS, "seed store");
         ux.progress.detail("== build seed store ==");
         std::fs::create_dir_all(&store)?;
         std::fs::create_dir_all(&runroot)?;
@@ -412,7 +420,7 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
         }
 
         // --- 4. emit compose.lock.yml + materialize binds ---
-        ux.progress.step(5, TOTAL_STEPS, "compose.lock + binds");
+        ux.progress.step(7, TOTAL_STEPS, "compose.lock + binds");
         ux.progress.detail("== emit compose.lock.yml ==");
         let mut digests: HashMap<String, String> = HashMap::new();
         for reff in &plain_refs {
@@ -461,22 +469,9 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
         }
 
         // --- 6. assemble the per-stack initramfs ---
-        ux.progress.step(6, TOTAL_STEPS, "assemble initramfs");
+        ux.progress.step(8, TOTAL_STEPS, "assemble initramfs");
         ux.progress.detail("== assemble initramfs (Rust rootfs + cpio) ==");
         // (out_initramfs computed early, above, for the cache path)
-
-        // Join the tdvmm-agent acquisition (release-asset fetch, or the
-        // reproducible from-source container build — spawned at the top of this
-        // scope). Yields the binary path + the embedded build hash (the compat
-        // oracle reported by ping/hello); its file sha256 goes in the ledger +
-        // anchors and feeds the base key.
-        let (agent_path, agent_build_hash) =
-            agent_t.join().map_err(|_| "tdvmm-agent thread panicked")??;
-        let agent_sha = sha256_file_hex(&agent_path)?;
-        // TTY: deliberately NOT shown on the step line — it's diagnostic (relocated
-        // to `diag` below), not routine build progress.
-        ux.progress.detail(format!("   tdvmm-agent: sha256 {agent_sha}  build {agent_build_hash}"));
-        diag.push_str(&format!("agent_sha256: {agent_sha}\nagent_build_hash: {agent_build_hash}\n"));
 
         // Join the pinned minirootfs + compose-binary downloads (fetched and
         // sha-verified in their threads, cached in alpine_dir): both must be on
@@ -484,10 +479,10 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
         mini_t.join().map_err(|_| "minirootfs fetch thread panicked")??;
         compose_t.join().map_err(|_| "compose fetch thread panicked")??;
 
-        Ok(MidBake { agent_path, agent_build_hash, agent_sha, selftest_pin, seedpins, lock_sha, est_mib })
+        Ok(MidBake { selftest_pin, seedpins, lock_sha, est_mib })
     })
     .map_err(|e| -> Box<dyn std::error::Error> { e })?;
-    let MidBake { agent_path, agent_build_hash, agent_sha, selftest_pin, seedpins, lock_sha, est_mib } = mid;
+    let MidBake { selftest_pin, seedpins, lock_sha, est_mib } = mid;
 
     // --- Fable Part D: the shared base-runtime segment cache. Keyed on DECLARED
     //     base pins only (Alpine + package set + overlay + agent + compose engine +
@@ -523,7 +518,7 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     let base_segment = if base_hit { base_seg_cached.clone() } else { work.join("base.cpio") };
 
     // MISS: build the base Alpine rootfs in the pinned rootfs-builder container
-    // (apk --root, NO chroot) BEFORE the unshare — build_agent's slot. Produces
+    // (apk --root, NO chroot) BEFORE the unshare. Produces
     // base-rootfs.tar (untrusted transport) + packages.lock (the resolution
     // ledger). On a HIT this is skipped entirely (cached cpio segment reused).
     let base_build_dir = work.join("base-build");
@@ -575,7 +570,7 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
 
     // --- 7. write stack.lock (the reproducibility ledger — declared inputs only,
     //        NO host-probed values; Fable guardrail §3) ---
-    ux.progress.step(7, TOTAL_STEPS, "pack artifact");
+    ux.progress.step(9, TOTAL_STEPS, "pack artifact");
     write_stack_lock(&stack_lock_out, &stack_name, &project, mem_mib, est_mib, &lock_sha, &art_sha, &agent_sha, &out_initramfs, &records, &plain_refs, &plain_pin, &seedpins, &validated, &builders)?;
 
     // stash the emitted lock beside the artifact in the cache ledgers dir.
@@ -624,7 +619,7 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     ux.progress.suspend(|| print_artifact_id_line(&tdvmm_sha, &out_tdvmm));
 
     // --- 9. populate the bake cache (best-effort; never fails the build) ---
-    ux.progress.step(8, TOTAL_STEPS, "cache");
+    ux.progress.step(10, TOTAL_STEPS, "cache");
     if let Some(c) = &cache {
         match cache_store(c, &out_tdvmm, &out_initramfs, &lock_out, &stack_lock_out, &tdvmm_sha) {
             Ok(true) => {
@@ -646,7 +641,7 @@ pub fn cmd_build(args: BuildArgs) -> Result<i32, Box<dyn std::error::Error>> {
     maybe_regen_fixtures(&stack_name, &lock_out, &stack_lock_out, &packages_lock_out, &ux);
 
     // TTY: the aligned final summary block (Fix: the bar is cleared FIRST, so
-    // the step counter deterministically reaches [8/8] with no stale spinner
+    // the step counter deterministically reaches [10/10] with no stale spinner
     // frame). A no-op in frozen mode — the plain `DONE` block above already
     // covers it byte-for-byte.
     ux.progress.print_summary(&out_tdvmm, &tdvmm_sha, tdvmm_len, progress.elapsed(), diag_path.as_deref());

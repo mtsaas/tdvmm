@@ -1,17 +1,24 @@
 //! `tdvmm build`'s progress UI (Fable CLI-UX ruling), on ratatui's INLINE
 //! viewport.
 //!
-//! Interactive TTY: a 1-line live region below the cursor holds the current
-//! step's spinner (`⠙ [3/8] label … 12s`, cyan-bold glyph + counter), animated
-//! by a background ticker (mirroring indicatif's steady tick). On every step
-//! transition the finished step PERSISTS into terminal scrollback — its
-//! `✓ [i/n] label` line (plus an aligned indented sub-list for multi-item steps,
-//! via [`Progress::item`], or a short inline note, via [`Progress::note`]) — via
-//! [`Terminal::insert_before`], so completed lines survive above the redrawing
-//! region and remain after exit (the alternate screen is NEVER used — it would
-//! wipe scrollback). [`Progress::finish_steps`] flushes the LAST step's checkmark
-//! and blanks the live region; [`Progress::finish`] then collapses it, reclaiming
-//! the row so nothing stale is left behind (never dependent on tick timing).
+//! Interactive TTY: a fixed live region below the cursor — the current step's
+//! spinner row (`⠙ [3/10] label … 12s`, cyan-bold glyph + counter) over a dim,
+//! bounded tail of streamed child output (the kernel/agent container compiles,
+//! BuildKit-style; see [`Progress::tail_line`]) — animated by a background
+//! ticker (mirroring indicatif's steady tick). The inline viewport cannot
+//! resize after creation, so its height (1 + [`MAX_TAIL_ROWS`], terminal
+//! permitting) is decided once at start and unused tail rows render blank. On
+//! every step transition the finished step PERSISTS into terminal scrollback —
+//! its `✓ [i/n] label` line (plus an aligned indented sub-list for multi-item
+//! steps, via [`Progress::item`], or a short inline note, via
+//! [`Progress::note`]); the tail is ephemeral (success collapses it, BuildKit
+//! behavior) — via [`Terminal::insert_before`], so completed lines survive
+//! above the redrawing region and remain after exit (the alternate screen is
+//! NEVER used — it would wipe scrollback). [`Progress::finish_steps`] flushes
+//! the LAST step's checkmark and blanks the live region; [`Progress::finish`]
+//! then collapses it, reclaiming the rows so nothing stale is left behind
+//! (never dependent on tick timing) — and a step still pending at collapse did
+//! NOT succeed, so it persists as a red `✗` plus its final tail lines instead.
 //! Gated on `stderr.is_terminal()` — NEVER the run-loop's `interactive` gate.
 //!
 //! Non-terminal stderr, `CI`, `TERM=dumb`, `--no-progress`, OR a failed terminal
@@ -40,6 +47,7 @@
 //! rule): it cannot outlive a bake, so it can never coexist with a running
 //! VM's raw-tty console.
 
+use std::collections::VecDeque;
 use std::io::{IsTerminal, Stderr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -51,6 +59,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::cursor::MoveTo;
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{Clear, ClearType};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::{Terminal, TerminalOptions, Viewport};
@@ -66,6 +75,12 @@ const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 /// Ticker cadence — the old bar's steady tick.
 const TICK: Duration = Duration::from_millis(120);
 
+/// Live-tail height budget: the viewport is `1 + min(MAX_TAIL_ROWS,
+/// term_height - 4)` rows, fixed at [`Live::start`] (the inline viewport
+/// cannot resize, and tearing the terminal down mid-build to grow it is
+/// exactly the corruption this module exists to prevent).
+const MAX_TAIL_ROWS: u16 = 6;
+
 /// One in-flight step's render state (frozen/non-TTY mode never builds one —
 /// [`Progress::step`] no-ops when the viewport is inactive).
 struct StepState {
@@ -74,6 +89,9 @@ struct StepState {
     label: String,
     note: Option<String>,
     items: Vec<(String, u64)>,
+    /// The bounded live tail of streamed child output (display ring only —
+    /// the full transcript lives in the build log, not the UI).
+    tail: VecDeque<String>,
     /// When this step's `step()` began; its `✓` line renders `start.elapsed()`
     /// right-aligned as the step's wall-clock duration.
     start: Instant,
@@ -89,6 +107,9 @@ struct Renderer {
     frame: usize,
     /// `NO_COLOR` snapshot: cyan-bold spinner + green checkmark when true.
     color: bool,
+    /// Tail rows below the spinner row (fixed at [`Live::start`]; unused rows
+    /// render blank).
+    tail_rows: u16,
 }
 
 impl Renderer {
@@ -101,25 +122,39 @@ impl Renderer {
         }
     }
 
-    /// Redraw the live region with the current step's spinner (or a blank row
-    /// when no step is active). Best-effort: terminal write errors are dropped —
+    /// Redraw the live region: the current step's spinner row (or blank when
+    /// no step is active) over the step's dim live tail, blank-padded to the
+    /// fixed viewport height. Best-effort: terminal write errors are dropped —
     /// the UI must never break the build.
     fn redraw(&mut self) {
-        let Renderer { term, current, frame, color } = self;
+        let Renderer { term, current, frame, color, tail_rows } = self;
         let Some(term) = term.as_mut() else { return };
         let width = term.get_frame().area().width as usize;
         let glyph = SPINNER[*frame % SPINNER.len()];
-        let line = match current.as_ref() {
+        let mut rows = Vec::with_capacity(1 + *tail_rows as usize);
+        rows.push(match current.as_ref() {
             Some(st) => spinner_line(glyph, st, *color),
             None => Line::raw(""),
-        };
-        // Pad to full width so a shorter frame can't leave a previous step's
-        // trailing glyphs behind (a bare `Line` only writes its own cells).
-        let line = pad_to_width(line, width);
+        });
+        for i in 0..*tail_rows as usize {
+            rows.push(match current.as_ref().and_then(|st| st.tail.get(i)) {
+                Some(text) => tail_row(text, *color, width),
+                None => Line::raw(""),
+            });
+        }
+        // Pad every row to full width so a shorter frame can't leave a previous
+        // frame's trailing glyphs behind (a bare `Line` only writes its own cells).
+        let rows: Vec<Line> = rows.into_iter().map(|row| pad_to_width(row, width)).collect();
         let _ = term.draw(|f| {
             let area = f.area();
-            f.render_widget(&line, area);
-            // Park a VISIBLE cursor on the live row: ratatui hides the hardware
+            for (i, row) in rows.iter().enumerate() {
+                let y = area.y.saturating_add(i as u16);
+                if y >= area.bottom() {
+                    break;
+                }
+                f.render_widget(row, Rect { x: area.x, y, width: area.width, height: 1 });
+            }
+            // Park a VISIBLE cursor on the spinner row: ratatui hides the hardware
             // cursor on every frame that sets none, and only Drop restores it — so
             // a Ctrl-C mid-build (there is no SIGINT handler) would otherwise leave
             // the user's shell cursor invisible until `reset`.
@@ -142,7 +177,8 @@ impl Renderer {
     }
 
     /// Persist a finished step (`✓` line + item sub-list) into scrollback, with
-    /// the step's wall-clock duration right-aligned on the `✓` line.
+    /// the step's wall-clock duration right-aligned on the `✓` line. The live
+    /// tail is ephemeral by design — success collapses it (BuildKit behavior).
     fn flush_step(&mut self, st: StepState) {
         let width = self.width();
         let color = self.color;
@@ -152,9 +188,24 @@ impl Renderer {
         self.push_before(&lines);
     }
 
-    /// Remove the 1-line viewport and park the cursor on the reclaimed row, so
-    /// the shell prompt (or later output) doesn't sit under a stale/blank
-    /// spinner. Idempotent — takes `term`, so a second call is a no-op.
+    /// Persist a FAILED step into scrollback: its red `✗` line plus the final
+    /// live tail, so multi-minute compile context survives the viewport
+    /// collapse (a vanished failed step is not acceptable at these durations).
+    fn flush_failed(&mut self, mut st: StepState) {
+        let width = self.width();
+        let color = self.color;
+        st.note = Some("failed".to_string());
+        let mut lines = Vec::with_capacity(1 + st.tail.len());
+        lines.push(failed_step_line(&st, color, width));
+        for text in &st.tail {
+            lines.push(tail_row(text, color, width));
+        }
+        self.push_before(&lines);
+    }
+
+    /// Remove the inline viewport and park the cursor on its reclaimed top
+    /// row, so the shell prompt (or later output) doesn't sit under a stale
+    /// spinner/tail. Idempotent — takes `term`, so a second call is a no-op.
     fn collapse(&mut self) {
         let Some(mut term) = self.term.take() else { return };
         self.current = None;
@@ -183,12 +234,23 @@ struct Live {
 impl Live {
     /// Build the inline viewport over stderr and start the ticker. Returns
     /// `None` if the terminal can't be initialized (e.g. no controlling tty),
-    /// so the caller falls back to the frozen/plain path.
+    /// so the caller falls back to the frozen/plain path. The viewport height
+    /// (spinner row + tail rows) is decided HERE, once — the inline viewport
+    /// cannot resize afterwards.
     fn start(color: bool) -> Option<Live> {
+        let tail_rows = ratatui::crossterm::terminal::size()
+            .map(|(_, h)| h.saturating_sub(4).min(MAX_TAIL_ROWS))
+            .unwrap_or(MAX_TAIL_ROWS);
         let backend = CrosstermBackend::new(std::io::stderr());
-        let opts = TerminalOptions { viewport: Viewport::Inline(1) };
+        let opts = TerminalOptions { viewport: Viewport::Inline(1 + tail_rows) };
         let term = Terminal::with_options(backend, opts).ok()?;
-        let inner = Arc::new(Mutex::new(Renderer { term: Some(term), current: None, frame: 0, color }));
+        let inner = Arc::new(Mutex::new(Renderer {
+            term: Some(term),
+            current: None,
+            frame: 0,
+            color,
+            tail_rows,
+        }));
         let stop = Arc::new(AtomicBool::new(false));
         let ticker = spawn_ticker(Arc::clone(&inner), Arc::clone(&stop));
         Some(Live { inner, stop, ticker: Mutex::new(Some(ticker)) })
@@ -315,10 +377,50 @@ impl Progress {
             r.flush_step(prev);
         }
         r.current = Some(StepState {
-            i, n, label: label.to_string(), note: None, items: Vec::new(), start: Instant::now(),
+            i,
+            n,
+            label: label.to_string(),
+            note: None,
+            items: Vec::new(),
+            tail: VecDeque::new(),
+            start: Instant::now(),
         });
         r.frame = 0;
         r.redraw();
+    }
+
+    /// Replace the CURRENT step's spinner label (e.g. `guest kernel` →
+    /// `guest kernel · compiling 6.1.128 (first run)` once a compile actually
+    /// starts). TTY-only; a no-op in frozen mode.
+    pub fn relabel(&self, label: impl Into<String>) {
+        if let Some(live) = &self.live {
+            if let Some(st) = live.lock().current.as_mut() {
+                st.label = label.into();
+            }
+        }
+    }
+
+    /// One streamed line of the CURRENT step's child output (the live build
+    /// tail). Pushes into the step's bounded ring under the renderer lock and
+    /// returns WITHOUT redrawing — the ticker paints the next frame, so
+    /// thousands of lines/sec (a kernel `make -j`) coalesce into at most ~8
+    /// repaints/sec, and every terminal write still happens under the one
+    /// renderer Mutex (scrollback pushes, warnings, and the tail can never
+    /// interleave corruptly). Frozen/non-TTY: a no-op — those steps' children
+    /// inherit the terminal, keeping the frozen byte contract.
+    pub fn tail_line(&self, line: &str) {
+        let Some(live) = &self.live else { return };
+        let mut r = live.lock();
+        let cap = r.tail_rows as usize;
+        if cap == 0 {
+            return;
+        }
+        if let Some(st) = r.current.as_mut() {
+            if st.tail.len() == cap {
+                st.tail.pop_front();
+            }
+            st.tail.push_back(line.to_string());
+        }
     }
 
     /// A short inline note for the CURRENT step's `✓` line (e.g. `miss → full
@@ -443,13 +545,20 @@ impl Progress {
 
     /// Collapse the viewport for good (idempotent — safe to call more than once,
     /// e.g. once explicitly on the cache-hit path and again via `Drop`). Stops
-    /// the ticker first, then reclaims the live row. Does NOT flush a pending
-    /// step's checkmark (a failed/aborted step should never appear to have
-    /// succeeded) — use [`Progress::finish_steps`] on success paths instead.
+    /// the ticker first, then reclaims the live rows. A step still pending here
+    /// did NOT succeed — success paths flush it via [`Progress::step`] /
+    /// [`Progress::finish_steps`] first — so it persists into scrollback as a
+    /// red `✗` line plus its final tail (never a `✓`), which is how a failed
+    /// multi-minute compile keeps its context on every `?`-propagated error
+    /// path (`Drop` runs this).
     pub fn finish(&self) {
         if let Some(live) = &self.live {
             live.stop_ticker();
-            live.lock().collapse();
+            let mut r = live.lock();
+            if let Some(st) = r.current.take() {
+                r.flush_failed(st);
+            }
+            r.collapse();
         }
     }
 }
@@ -485,16 +594,32 @@ fn spinner_line(glyph: &'static str, st: &StepState, color: bool) -> Line<'stati
     ])
 }
 
-/// The persistent `  ✓ [i/n] label [note]` line, with `dur` right-aligned to
+/// The persistent `  ✓ [i/n] label [note]` line (see [`finished_line`]).
+fn step_line(st: &StepState, color: bool, width: usize) -> Line<'static> {
+    finished_line("\u{2713}", Color::Green, st, color, width)
+}
+
+/// The persistent `  ✗ [i/n] label failed` line for a step pending at collapse.
+fn failed_step_line(st: &StepState, color: bool, width: usize) -> Line<'static> {
+    finished_line("\u{2717}", Color::Red, st, color, width)
+}
+
+/// A persistent `  <mark> [i/n] label [note]` line, with `dur` right-aligned to
 /// `width` (buildkit-style). The 4 fixed leading columns (`"  "` + the
-/// 1-visible-column `✓` + `" "`) plus the clamped, colorless remainder never
+/// 1-visible-column mark + `" "`) plus the clamped, colorless remainder never
 /// overflow `width`; only the remainder is clamped, so the colored mark is never
 /// split. `dur` is reserved its own width plus a one-space minimum gap flush at
 /// the right edge; when the remainder is shorter, the gap grows so `dur` still
 /// lands at column `width`. Narrow terminals degrade gracefully: the remainder
 /// shrinks to whatever remains, and if even the mark + gap + `dur` won't fit,
 /// `dur` is dropped rather than wrapping the line.
-fn step_line(st: &StepState, color: bool, width: usize) -> Line<'static> {
+fn finished_line(
+    glyph: &'static str,
+    glyph_color: Color,
+    st: &StepState,
+    color: bool,
+    width: usize,
+) -> Line<'static> {
     const PREFIX: usize = 4;
     // The note column is fixed (matches the mockup): long enough for the longest
     // step label ("compose.lock + binds", 21 chars) plus a gap.
@@ -504,9 +629,9 @@ fn step_line(st: &StepState, color: bool, width: usize) -> Line<'static> {
         None => format!("[{}/{}] {}", st.i, st.n, st.label),
     };
     let mark = if color {
-        Span::styled("\u{2713}", Style::new().fg(Color::Green))
+        Span::styled(glyph, Style::new().fg(glyph_color))
     } else {
-        Span::raw("\u{2713}")
+        Span::raw(glyph)
     };
     let dur = human_duration(st.start.elapsed());
     let dur_len = dur.chars().count();
@@ -525,6 +650,17 @@ fn step_line(st: &StepState, color: bool, width: usize) -> Line<'static> {
         Span::raw(" ".repeat(gap)),
         Span::raw(dur),
     ])
+}
+
+/// One dim, indented live-tail row (streamed child output under the spinner,
+/// or the final tail lines kept under a failed step's `✗`).
+fn tail_row(text: &str, color: bool, width: usize) -> Line<'static> {
+    let body = clamp(&format!("      {text}"), width);
+    if color {
+        Line::from(Span::styled(body, Style::new().fg(Color::DarkGray)))
+    } else {
+        Line::from(body)
+    }
 }
 
 /// The aligned indented sub-list under a finished step (`            name  size`,

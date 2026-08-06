@@ -1,34 +1,29 @@
 #!/usr/bin/env bash
-# Phase-2 acceptance: bake from an INSTALLED binary in an EMPTY cwd (no checkout).
+# Standalone acceptance: a FULL successful bake from an INSTALLED binary in an
+# EMPTY cwd (no checkout, fresh cache).
 #
 # Simulates "install the binary, bake your compose file": copies the release
 # tdvmm somewhere with NO repo around it, cd's into a bare project dir holding
 # only the user's compose file (+ its bind sources), points --cache-dir at a
-# FRESH dir, and bakes. Kernel (embedded pin -> release asset), minirootfs,
-# compose CLI, overlay, and every builder pin must resolve from embedded data +
-# the cache — no guest/ tree anywhere.
+# FRESH dir, and bakes. Everything must resolve from embedded data + the
+# sha-pinned fetches: the kernel compiles from the pinned source tarball in the
+# pinned container (embedded config), the agent compiles from the EMBEDDED
+# source in the pinned container, the minirootfs + compose CLI download against
+# embedded pins, and a .tdvmm must come out. Nothing precompiled is downloaded.
 #
-# KNOWN GAP (documented in HANDOFF-standalone-build-assets.md + agent.lock): no
-# tdvmm-agent release asset is published/recorded yet, so with no checkout the
-# agent CANNOT be acquired and the bake must fail AT THE AGENT STEP with the
-# documented error — after sourcing everything else standalone. Once the owner
-# records the first agent release into agent.lock, run with EXPECT_AGENT_GAP=0
-# and this script requires the FULL bake to succeed.
+# The in-container kernel compile is minutes long, so by default the fresh
+# cache's kernel is seeded from an existing SHA-VERIFIED copy — the exact
+# pinned bytes a cold build produces, nothing faked. FULL_COLD=1 skips the
+# seeding and compiles the kernel for real (the true cold path; CI-nightly).
 #
-# KNOWN ISSUE (kernel-6.1.128 release asset, found 2026-08-05): the published
-# vmlinux asset is STALE (sha 98d75369…) vs kernel.lock (19506f47…), so the
-# standalone kernel fetch fails until the owner re-uploads the asset. When that
-# happens this script reports it, then SEEDS the fresh cache with the checkout's
-# sha-verified vmlinux (the exact pinned bytes a corrected asset would serve)
-# and continues, so the rest of the standalone path is still exercised.
-#
-# Usage: scripts/standalone_bake_test.sh [stack]       (default: insert-trim)
-# Env:   EXPECT_AGENT_GAP(1)  — set 0 after the first agent release is recorded.
+# Usage: scripts/standalone_bake_test.sh [stack]     (default: insert-trim)
+# Env:   FULL_COLD=1  — true cold cache (in-container kernel compile, ~minutes)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 STACK="${1:-insert-trim}"
-EXPECT_AGENT_GAP="${EXPECT_AGENT_GAP:-1}"
+FULL_COLD="${FULL_COLD:-0}"
+KERNEL_VER="$(sed -n 's/^KERNEL_VERSION=//p' "$ROOT/guest/kernel/kernel.lock")"
 KERNEL_SHA="$(sed -n 's/^KERNEL_SHA256=//p' "$ROOT/guest/kernel/kernel.lock")"
 
 BIN="$ROOT/target/release/tdvmm"
@@ -46,50 +41,63 @@ cp "$BIN" "$INSTALL/tdvmm"
 for f in "$ROOT/guest/stacks/$STACK"/*; do
   case "$(basename "$f")" in
     compose.lock.yml|stack.lock) ;;
-    *) cp "$f" "$PROJECT/" ;;
+    *) cp -r "$f" "$PROJECT/" ;;
   esac
 done
 [ -f "$PROJECT/compose.yml" ] || { echo "FAIL: no compose.yml for stack $STACK"; exit 3; }
 
-bake() { # -> $rc, log in $LOG
-  LOG="$TMP/bake-$1.log"
-  ( cd "$PROJECT" && env -u TDVMM_CACHE_DIR \
-      "$INSTALL/tdvmm" build --no-cache --cache-dir "$CACHE" "$STACK-standalone" compose.yml \
-  ) >"$LOG" 2>&1
-  rc=$?
-}
+# Seed the kernel unless FULL_COLD: any existing copy whose sha256 matches the
+# embedded pin is byte-identical to what the in-container build produces.
+if [ "$FULL_COLD" != "1" ]; then
+  for k in "${TDVMM_CACHE_DIR:-$HOME/.tdvmm}/kernel/vmlinux-$KERNEL_VER" \
+           "$ROOT/.tdvmm-tmp/tdvmm-cache/kernel/vmlinux-$KERNEL_VER" \
+           "$ROOT/guest/kernel/vmlinux-$KERNEL_VER"; do
+    if [ -f "$k" ] && echo "$KERNEL_SHA  $k" | sha256sum -c --quiet - 2>/dev/null; then
+      mkdir -p "$CACHE/kernel"
+      cp "$k" "$CACHE/kernel/vmlinux-$KERNEL_VER"
+      echo "[standalone] seeded sha-verified kernel from $k"
+      break
+    fi
+  done
+fi
 
+LOG="$TMP/bake.log"
 echo "== standalone bake: installed binary, empty cwd, fresh cache =="
 echo "   bin:     $INSTALL/tdvmm"
 echo "   project: $PROJECT"
 echo "   cache:   $CACHE"
+# Snapshot the repo guest/ state so the untouched-repo check below compares
+# against it (uncommitted work in a dev checkout must not fail the test).
+GUEST_BEFORE="$(cd "$ROOT" && git status --porcelain guest/ 2>/dev/null)"
+( cd "$PROJECT" && env -u TDVMM_CACHE_DIR \
+    "$INSTALL/tdvmm" build --no-cache --cache-dir "$CACHE" "$STACK-standalone" compose.yml \
+) >"$LOG" 2>&1
+rc=$?
+
 ok=1
-kernel_standalone=1
-bake bare
-if grep -q "kernel release asset unavailable and no source checkout" "$LOG"; then
-  # The pinned release asset did not deliver the recorded bytes (today: the
-  # stale-asset issue) and the rebuild fallback correctly refused without a
-  # checkout. Seed the exact pinned kernel bytes and re-run the rest.
-  kernel_standalone=0
-  echo "KNOWN ISSUE  kernel release asset did not match kernel.lock; owner must re-upload it"
-  echo "             (bake correctly refused the checkout-only rebuild fallback)"
-  if echo "$KERNEL_SHA  $ROOT/guest/kernel/vmlinux-6.1.128" | sha256sum -c --quiet - 2>/dev/null; then
-    mkdir -p "$CACHE/kernel"
-    cp "$ROOT/guest/kernel/vmlinux-6.1.128" "$CACHE/kernel/vmlinux-6.1.128"
-    echo "             seeded the sha-verified pinned vmlinux; continuing the standalone run"
-    bake seeded
-  else
-    echo "FAIL cannot seed: checkout vmlinux does not match kernel.lock"; ok=0
-  fi
+if [ $rc -ne 0 ]; then
+  echo "FAIL standalone bake failed (rc=$rc); tail of log:"; tail -30 "$LOG"; ok=0
+else
+  sha="$(sha256sum "$CACHE/artifacts/$STACK-standalone.tdvmm" | awk '{print $1}')"
+  echo "OK   full standalone bake succeeded"
+  echo "     .tdvmm sha256: $sha"
 fi
 
-# Every non-agent input must now be in the fresh cache.
-if [ "$kernel_standalone" = "1" ] && [ -f "$CACHE/kernel/vmlinux-6.1.128" ]; then
-  echo "OK   kernel fetched standalone via embedded pin"
-elif [ -f "$CACHE/kernel/vmlinux-6.1.128" ]; then
-  echo "OK   kernel present (seeded; standalone fetch blocked by the stale asset above)"
+# Every build input must now be in the fresh cache.
+if [ -f "$CACHE/kernel/vmlinux-$KERNEL_VER" ] \
+   && echo "$KERNEL_SHA  $CACHE/kernel/vmlinux-$KERNEL_VER" | sha256sum -c --quiet - 2>/dev/null; then
+  if [ "$FULL_COLD" = "1" ]; then
+    echo "OK   kernel compiled in-container from the embedded config + pinned source"
+  else
+    echo "OK   kernel present + sha-verified (seeded; FULL_COLD=1 compiles it for real)"
+  fi
 else
-  echo "FAIL kernel missing from fresh cache"; ok=0
+  echo "FAIL kernel missing/mismatched in fresh cache"; ok=0
+fi
+if ls "$CACHE"/agent/tdvmm-agent-* >/dev/null 2>&1; then
+  echo "OK   agent compiled in-container from the embedded source (cached)"
+else
+  echo "FAIL agent missing from fresh cache"; ok=0
 fi
 if ls "$CACHE"/downloads/alpine-minirootfs-*.tar.gz >/dev/null 2>&1; then
   echo "OK   alpine minirootfs downloaded (embedded pin)"
@@ -102,36 +110,18 @@ else
   echo "FAIL compose CLI missing from fresh cache"; ok=0
 fi
 
-if [ "$EXPECT_AGENT_GAP" = "1" ]; then
-  # The bake must have gotten to the AGENT step and failed there — with the
-  # documented no-release-no-checkout error, not anything earlier.
-  if [ $rc -eq 0 ]; then
-    echo "FAIL bake unexpectedly SUCCEEDED with no checkout and no recorded agent release"
-    echo "     (did agent.lock get recorded? then run with EXPECT_AGENT_GAP=0)"; ok=0
-  elif grep -q "tdvmm-agent unavailable" "$LOG"; then
-    echo "OK   bake stopped at the agent step with the documented release-gap error"
-  else
-    echo "FAIL bake failed before the agent step; tail of log:"; tail -20 "$LOG"; ok=0
-  fi
-else
-  if [ $rc -eq 0 ]; then
-    echo "OK   full standalone bake succeeded (agent from recorded release asset)"
-    sha="$(sha256sum "$CACHE/artifacts/$STACK-standalone.tdvmm" | awk '{print $1}')"
-    echo "     .tdvmm sha256: $sha"
-  else
-    echo "FAIL full standalone bake failed; tail of log:"; tail -30 "$LOG"; ok=0
-  fi
-fi
-
-# The repo must be untouched (nothing may write into guest/).
-if [ -n "$(cd "$ROOT" && git status --porcelain guest/ 2>/dev/null)" ]; then
-  echo "FAIL bake dirtied the repo guest/ tree:"; ( cd "$ROOT" && git status --porcelain guest/ ); ok=0
+# The repo must be untouched (nothing may write into guest/) — compared
+# against the pre-bake snapshot, so pre-existing uncommitted work doesn't trip.
+GUEST_AFTER="$(cd "$ROOT" && git status --porcelain guest/ 2>/dev/null)"
+if [ "$GUEST_AFTER" != "$GUEST_BEFORE" ]; then
+  echo "FAIL bake dirtied the repo guest/ tree:"
+  diff <(printf '%s' "$GUEST_BEFORE") <(printf '%s' "$GUEST_AFTER"); ok=0
 else
   echo "OK   repo guest/ tree untouched"
 fi
 
 if [ "$ok" = "1" ]; then
-  echo "== STANDALONE BAKE TEST PASS ==  (kernel standalone: $([ "$kernel_standalone" = 1 ] && echo yes || echo 'NO - stale asset'))"
+  echo "== STANDALONE BAKE TEST PASS ==  (kernel: $([ "$FULL_COLD" = 1 ] && echo compiled-in-container || echo seeded))"
   exit 0
 fi
 cp "$LOG" /tmp/standalone_bake.log 2>/dev/null

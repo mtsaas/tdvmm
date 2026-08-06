@@ -17,9 +17,8 @@ use super::ux::{run, Ux};
 const ROOTFS_BUILDER_LOCK: &str = include_str!("../../guest/initramfs-alpine/rootfs-builder.lock");
 
 /// The pinned rust+musl agent-builder ledger (`tdvmm-agent/images.lock`),
-/// embedded. Deliberately a SEPARATE file from agent.lock: images.lock sits
-/// inside the tree `agent_src_id` hashes (a builder bump must change the agent's
-/// build hash), while agent.lock is excluded from it (recording a pin must not).
+/// embedded. Deliberately INSIDE the tree `agent_src_id` hashes: a builder
+/// bump is a real toolchain change and must change the agent's build hash.
 const AGENT_IMAGES_LOCK: &str = include_str!("../../tdvmm-agent/images.lock");
 
 /// The pinned Docker Compose CLI ledger (`guest/initramfs-alpine/

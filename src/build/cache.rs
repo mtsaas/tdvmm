@@ -17,8 +17,10 @@ use super::pins::COMPOSE_ENGINE_LOCK;
 use super::util::{now_nanos, sha256_file_hex};
 
 /// Cache-entry format version. Bump when the cached fileset or key inputs change
-/// in a way older entries can't satisfy.
-pub(super) const CACHE_VERSION: u32 = 5;
+/// in a way older entries can't satisfy. v6: the `agent:` line is always the
+/// embedded source identity (the release-sha alternative is gone — the agent is
+/// only ever built from the embedded source).
+pub(super) const CACHE_VERSION: u32 = 6;
 
 pub(super) struct CacheCtx {
     /// The per-key entry directory: <cache-root>/<key>.
@@ -61,10 +63,10 @@ pub(super) fn compute_cache_key(
 ) -> Result<CacheCtx, String> {
     let self_sha = sha256_file_hex(self_exe).map_err(|x| format!("hashing tdvmm binary: {x}"))?;
     let kernel_sha = sha256_file_hex(kernel).map_err(|x| format!("hashing kernel: {x}"))?;
-    // The agent input is its PINNED identity (`agent_cache_input`): the recorded
-    // release sha, or the source identity when the from-source fallback applies.
-    // The overlay + compose-engine pins are embedded in the binary (also covered
-    // by `self_sha`, but kept as named lines so the key form stays legible).
+    // The agent input is its embedded source identity (`agent_src_id`) — the
+    // identity of the agent that ends up in the artifact. The overlay +
+    // compose-engine pins are embedded in the binary (also covered by
+    // `self_sha`, but kept as named lines so the key form stays legible).
     let overlay_id = overlay::overlay_id();
     let engine_sha = artifact::sha256_hex(COMPOSE_ENGINE_LOCK.as_bytes());
     // the stack dir: compose.yml + build contexts + bind sources + service source,

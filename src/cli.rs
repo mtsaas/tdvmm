@@ -78,17 +78,18 @@ pub(crate) enum Cmd {
     /// and the busybox clock guest — so a bare `tdvmm boot` smoke-boots the minimal
     /// guest; pass --kernel / --initrd to override.
     Boot(BootArgs),
-    /// Fetch or build the pinned guest kernel.
+    /// Build the pinned guest kernel from source.
     ///
-    /// Fetches the pinned GitHub release asset (PRIMARY, sha256-verified against
-    /// kernel.lock), or reproducibly builds it in the pinned builder container
-    /// (FALLBACK). `--record` bootstraps kernel.lock.
+    /// Reproducibly compiles the sha-pinned kernel source in the pinned builder
+    /// container, verifies the result against kernel.lock, and caches it.
+    /// `--record` bootstraps kernel.lock.
     #[command(name = "build-kernel", hide = true)]
     BuildKernel(BuildKernelArgs),
     /// Build the reproducible guest agent binary.
     ///
-    /// Builds the static-musl tdvmm-agent in the pinned builder container and prints
-    /// `<sha256>  <path>`. Used by the size / double-build gates.
+    /// Builds the static-musl tdvmm-agent from the embedded source in the pinned
+    /// builder container and prints `<sha256>  <path>`. Used by the size /
+    /// double-build gates.
     #[command(name = "build-agent", hide = true)]
     BuildAgent(BuildAgentArgs),
     /// Print the effective guest clock/timer CPUID profile.
@@ -170,15 +171,6 @@ pub(crate) struct BuildAgentArgs {
     /// Output path for the built static-musl agent binary.
     #[arg(short, long, value_name = "PATH", default_value = "tdvmm-agent.bin")]
     pub(crate) out: String,
-    /// Record this build's sha256 + build hash + release-asset URL (for --tag)
-    /// into tdvmm-agent/agent.lock (the agent mirror of `build-kernel --record`;
-    /// step 1 of the record-before-tag agent release flow).
-    #[arg(long, requires = "tag")]
-    pub(crate) record: bool,
-    /// The `agent-<version>` tag you will push after committing the recorded
-    /// agent.lock (with --record).
-    #[arg(long, value_name = "TAG")]
-    pub(crate) tag: Option<String>,
 }
 
 /// `tdvmm build-kernel` args.
@@ -191,8 +183,8 @@ pub(crate) struct BuildKernelArgs {
     /// Precedence: this flag > $TDVMM_CACHE_DIR > $HOME/.tdvmm.
     #[arg(long, value_name = "PATH")]
     pub(crate) cache_dir: Option<String>,
-    /// Force the reproducible container build even if a release asset is available
-    /// (used by the two-build byte-identity gate).
+    /// Force the reproducible container build even if a sha-verified kernel is
+    /// already cached (used by the byte-identity gates).
     #[arg(long)]
     pub(crate) force_build: bool,
     /// Bootstrap/update kernel.lock: run the container build, then WRITE the

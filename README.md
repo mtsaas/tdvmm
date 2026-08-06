@@ -43,9 +43,11 @@ tdvmm test demo --scenario guest/stacks/demo/demo.yml
 
 - **To run** a `.tdvmm`: Linux on x86_64 with `/dev/kvm` (read + write). Nothing
   else.
-- **To build** one: `podman` (plus network access the first time, to pull the
-  pinned images and kernel). No compiler and no kernel toolchain — the build runs
-  those in pinned containers.
+- **To build** one: `podman` (plus network access the first time, to fetch the
+  pinned images and sources). Nothing precompiled is downloaded: the first build
+  compiles the guest kernel (a few minutes) and the guest agent from pinned
+  sources inside pinned containers, then caches them — later builds reuse the
+  cache. No compiler and no kernel toolchain needed on your machine.
 
 Build tdvmm itself from source with `cargo build --release`
 (→ `./target/release/tdvmm`), a single self-contained binary.

@@ -33,6 +33,59 @@ pub(super) fn run(cmd: &mut Command, mode: engine::OutputMode) -> Result<(), Str
     engine::run(cmd, mode)
 }
 
+/// How many transcript lines a failed build's error surfaces inline (the full
+/// log is on disk at the printed path — dumping a multi-MB `make` log to the
+/// terminal helps nobody).
+const FAIL_EXCERPT_LINES: usize = 100;
+
+/// Run a long BUILD-step child (the kernel/agent container compiles). With the
+/// viewport active: stream its output into the live tail
+/// ([`ui::Progress::tail_line`]) and write the full transcript to `log_path`
+/// on success AND failure (a once-per-machine compile log is cheap and gold);
+/// a failure's error carries the last [`FAIL_EXCERPT_LINES`] lines plus the
+/// log path — nothing is swallowed. With the viewport inactive this is exactly
+/// `engine::run(cmd, ux.mode)`, keeping the frozen non-TTY bytes for these
+/// steps byte-identical (they inherit, as before).
+pub(super) fn run_build(
+    cmd: &mut Command,
+    ux: &Ux,
+    log_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !ux.progress.active() {
+        return Ok(run(cmd, ux.mode)?);
+    }
+    let result = engine::run_streamed(cmd, &|line| ux.progress.tail_line(line));
+    let transcript = match &result {
+        Ok(t) => t.as_str(),
+        Err(e) => e.transcript.as_str(),
+    };
+    // Best-effort log write: losing the log must not fail a successful build.
+    let logged = log_path
+        .parent()
+        .map(std::fs::create_dir_all)
+        .unwrap_or(Ok(()))
+        .and_then(|()| std::fs::write(log_path, transcript))
+        .is_ok();
+    match result {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            let lines: Vec<&str> = e.transcript.lines().collect();
+            let shown = &lines[lines.len().saturating_sub(FAIL_EXCERPT_LINES)..];
+            let mut msg = format!(
+                "{}\n--- last {} of {} output lines ---\n{}",
+                e.message,
+                shown.len(),
+                lines.len(),
+                shown.join("\n")
+            );
+            if logged {
+                msg.push_str(&format!("\nfull log: {}", log_path.display()));
+            }
+            Err(msg.into())
+        }
+    }
+}
+
 /// Bundles the progress handle + child-output mode threaded through the bake
 /// pipeline's helper functions. A plain borrowed local — never a global
 /// (Fable coexistence rule) — so it cannot outlive `cmd_build`'s call.

@@ -38,7 +38,9 @@ tdvmm build demo guest/stacks/demo/compose.yml
 
 That resolves each image to a digest, pulls and packs it, bakes a kernel and an in-RAM
 root filesystem, and writes one file under `~/.tdvmm/artifacts/`. Same inputs always
-produce the same bytes. The first argument is the stack name (`demo` here) — the store
+produce the same bytes. The very first build also compiles the guest kernel and agent
+from pinned sources inside pinned containers (the kernel takes a few minutes — watch
+the live build output); both are cached, so every later build skips the compiles. The first argument is the stack name (`demo` here) — the store
 key you'll later `tdvmm run <name>` and see in `tdvmm ls`; it must be a single path
 component. (`-o path.tdvmm` changes only where the file is written, not the stored name.)
 

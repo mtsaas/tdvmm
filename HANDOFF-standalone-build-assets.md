@@ -1,31 +1,91 @@
 # Handoff — make `tdvmm build` work from an installed binary (assets → cache, `guest/` → `testdata/`)
 
 **Branch:** `feat/standalone-build-assets` (off `main`)
-**Status:** Phase 2 complete + verified + committed as a checkpoint. **DIRECTION CHANGE
-(owner, 2026-08-05) — see below.** Phase 3 (rename/docs) not started.
+**Status:** Phase 2 complete + committed (b89b14f). **DIRECTION CHANGE (owner,
+2026-08-05) — IMPLEMENTED + verified, see "Direction change result" below.**
+Phase 3 (rename/docs) not started.
 
 ## ⚠ DIRECTION CHANGE — build from source in containers, no precompiled artifacts
 Owner ruling (2026-08-05): **precompiled artifacts are a security risk**, especially
 run privileged in the VM. So the CLI must **compile the kernel and the tdvmm-agent
 from source in containers, then extract the artifacts** — do NOT download prebuilt
-binaries. Consequences:
-- **CANCELLED (no longer needed):** the agent release asset + `agent-release.yml`
-  workflow, `agent.lock`-as-a-download-pin, the kernel release-asset fetch, and the
-  stale-kernel-asset re-upload. No outward-facing publishing.
-- **INVERT:** the container-build paths that Phase 2 built as *fallbacks*
-  (`ensure_kernel` reproducible build in `kernel.rs`; the agent musl build in
-  `agent.rs`) become the **PRIMARY** (and only) path. Kernel already fetches sha-pinned
-  SOURCE (cdn.kernel.org) + builds in a pinned container — that IS the model.
-- **KEEP from Phase 2:** overlay embedding, the cache relocation (Phase 1), `self_here`
-  → optional repo locator, and the container-build code. Pins become build-input /
-  reproducibility verification, not a download source.
-- **NEW crux:** for a no-repo install to build the agent from source, the agent source
-  (tdvmm-agent + tdvmm-proto) must travel with the binary (embed) or be a pinned source
-  tarball. Kernel-source model to mirror.
-- **NEW requirement:** a good terminal UI showing the container BUILD progress (kernel +
-  agent compiles) — stream container output into the ratatui progress UI (BuildKit-style).
-- Design + implementation delegated to Fable. Reproducibility (byte-identical `.tdvmm`,
-  the double-build gates) is preserved — the built bytes are the same reproducible outputs.
+binaries. Design: `DESIGN-source-build-containers.md`. **DONE** (all phases A-D).
+
+## Direction change result (2026-08-05) — DONE
+Both guest binaries now compile from source inside pinned containers and land in
+the cache; nothing precompiled is ever downloaded. Verified against the full
+byte-identity suite (golden `2b86ab69…` unchanged).
+
+**Kernel (build-only).** `ensure_kernel` = sha-verified cache hit → reproducible
+container build from the sha-pinned cdn.kernel.org tarball → hard-verify against
+the embedded `KERNEL_SHA256`. The release-asset fetch and the
+`RELEASE_ASSET_URL/NAME` lock fields are GONE (kernel.lock rewritten; the stale
+`kernel-6.1.128` GitHub release asset is moot and can be deleted). The kernel
+CONFIG is now embedded beside the pin, tripwired against
+`KERNEL_CONFIG_SHA256` (unit test + runtime check — a config edit without
+`build-kernel --record` fails instantly). `build-kernel --record` stays the
+maintainer bootstrap (reads/writes the checkout lock + config).
+
+**Agent (embedded source).** The whole release/download mechanism is DELETED:
+`agent.lock` (file + embed + parse + `--record --tag`) and
+`.github/workflows/agent-release.yml`. The agent source now travels EMBEDDED in
+the tdvmm binary: a root `build.rs` generates an `include_bytes!` table over
+exactly the set `agent_src_id` hashes (`tdvmm-agent/` + `tdvmm-proto/` + root
+`Cargo.lock`; ~300 KB, no new deps), plus the root `Cargo.toml` verbatim
+(materialize-only: carries `[profile.agent-release]` — a checkout's local
+profile edit can no longer change agent bytes) and a stub root `src/main.rs`.
+`ensure_agent` materializes the set into a scratch dir, mounts it at `/src:ro`
+(same path, same remap, same `TDVMM_AGENT_BUILD`), builds, and caches. The
+identity is unchanged: build `a14c50c8…`, agent sha `1c0b5393…` — the exact
+golden bake's agent. Tripwire unit test: embedded set == checkout set (identity
+value + file list, both directions). `build-agent` (no flags now beyond `-o`)
+always does a fresh container build from the embed — the double-build gate
+still means two fresh containers.
+
+**Cache.** `CACHE_VERSION` 5 → 6 (the bake key's `agent:` line is always the
+source identity now). New cache paths:
+- `<cache>/agent/tdvmm-agent-<build_key16>` + `.sha256` sidecar (verified on
+  every reuse). `build_key` = sha256 over source-id + root-manifest sha +
+  RUSTFLAGS sha + build-script sha + BUILD_EPOCH — everything that shapes the
+  bytes, so no stale binary can ever be served (closes the documented
+  profile-edit hole).
+- `<cache>/diagnostics/kernel-build-<ver>.log` + `agent-build.log`: full build
+  transcripts, written on success and failure.
+- kernel/kernel-src/downloads/ledgers/artifacts/bake/base-runtime: unchanged.
+
+**Terminal UI.** The `tdvmm build` inline viewport is now `1 + tail` rows
+(tail = min(6, height-4), fixed at start): the spinner row over a dim bounded
+live tail of the streamed container output (BuildKit-style) during the two
+compile steps. Additive `engine::run_streamed(cmd, sink)` (two drain threads,
+full transcript kept); `ux::run_build` dispatches: viewport active → streamed +
+transcript to `<cache>/diagnostics/`, failure error carries the last 100 lines
++ the log path; inactive → `Inherit` (non-TTY bytes frozen). `tail_line` only
+mutates the ring under the single renderer Mutex — the 120 ms ticker is the
+only painter (a kernel `make -j` cannot corrupt the viewport). Steps went
+8 → 10: "guest kernel" (2) and "guest agent" (4) are real steps with
+cached/compiled notes; a bake-cache HIT still exits at step 3. The agent left
+the mid-bake thread scope (serial step; zero cost warm, coherent tail cold).
+On failure the pending step persists as a red `✗` plus its final tail lines
+(flushed by `Progress::finish`, which `Drop` runs on every error path).
+
+**Gates (all run 2026-08-05, on this code).**
+- insert-trim two-bake `--no-cache`: `2b86ab69…` at every phase boundary — PASS.
+- `scripts/bake_repeat_test.sh`: PASS (identical lock + ledger).
+- `scripts/agent_double_build.sh`: PASS — both builds `1c0b5393…`, build
+  `a14c50c8…`, byte-identical, from the embedded source.
+- `cargo test --release`: 210 green (incl. new kernel-config + embedded-source
+  tripwires); build + clippy clean on the new code.
+- `scripts/standalone_bake_test.sh` REWRITTEN: a full standalone bake must now
+  SUCCEED (no agent-gap logic, no stale-asset branch). Default seeds only the
+  sha-verified kernel; `FULL_COLD=1` compiles the kernel in-container for real.
+  `FULL_COLD=1` run (2026-08-05): installed binary, empty cwd, fresh cache, NO
+  repo → the kernel was fetched as the pinned source tarball and compiled in
+  the pinned container from the EMBEDDED config, and the result byte-matched
+  `KERNEL_SHA256` (19506f47…); the agent compiled from the embedded source
+  (1c0b5393…, build a14c50c8…); minirootfs + compose CLI verified against
+  embedded pins; a `.tdvmm` was produced. The zero-checkout promise holds with
+  zero prebuilt downloads.
+- `git status guest/` clean through all bakes.
 
 ## Why
 `tdvmm build` silently requires running from a full source checkout, so the

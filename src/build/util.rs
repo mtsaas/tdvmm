@@ -35,13 +35,6 @@ pub(super) fn find_guest_dir() -> Option<PathBuf> {
     cwd.is_dir().then_some(cwd)
 }
 
-/// The checkout's repo root (the dir holding `guest/`, `tdvmm-agent/`, …), if a
-/// checkout is present. See [`find_guest_dir`] for who may consume this.
-pub(super) fn find_repo_root() -> Option<PathBuf> {
-    let guest = find_guest_dir()?;
-    guest.parent().map(Path::to_path_buf)
-}
-
 /// Filename prefix for every build scratch dir (`tdvmm-build-<pid>-<nanos>`). The
 /// pid is the first hyphen-field after it — [`sweep_stale_scratch`] parses it, so
 /// keep the two in sync.
