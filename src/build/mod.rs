@@ -33,6 +33,7 @@ mod kernel;
 mod overlay;
 mod pack;
 mod pins;
+mod prewarm;
 mod seed;
 mod stack_lock;
 mod util;
@@ -43,7 +44,9 @@ pub use bake::cmd_build;
 pub use initramfs::cmd_assemble_initramfs;
 pub use kernel::cmd_build_kernel;
 pub use kernel::resolve_boot_inputs;
+pub use prewarm::prewarm;
 pub use seed::cmd_seed_build;
+pub(crate) use cache::resolve_cache_dir;
 pub(crate) use util::civil_from_days;
 
 // ---- pins (from the retired shell bake pipeline) ---------------------------

@@ -33,7 +33,7 @@ pub(super) struct CacheCtx {
 ///   `--cache-dir <path>` (the `flag`)  >  `$TDVMM_CACHE_DIR`  >  `$HOME/.tdvmm`.
 /// Returns `(dir, source)` where `source` is the provenance word for the log line.
 /// Cache entries are disposable, so no migration between locations is needed.
-pub(super) fn resolve_cache_dir(flag: Option<&str>) -> (PathBuf, &'static str) {
+pub(crate) fn resolve_cache_dir(flag: Option<&str>) -> (PathBuf, &'static str) {
     if let Some(f) = flag {
         if !f.is_empty() {
             return (PathBuf::from(f), "--cache-dir flag");

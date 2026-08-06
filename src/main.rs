@@ -43,6 +43,7 @@ mod control;
 mod cpio;
 mod cpuid;
 mod diag;
+mod doctor;
 mod doorbell;
 mod egress;
 mod egress_test_server;
@@ -276,6 +277,7 @@ fn dispatch() -> Result<i32, Box<dyn std::error::Error>> {
         Cmd::AssembleInitramfs { config } => build::cmd_assemble_initramfs(&config),
         Cmd::EgressTestServer(args) => Ok(egress_test_server::run(&args.behavior, &args.args)),
         Cmd::Boot(args) => cmd_boot(args),
+        Cmd::Doctor(args) => doctor::cmd_doctor(args.skip_downloads, no_progress),
         Cmd::Run(args) => cmd_run(args),
         Cmd::Test(args) => cmd_test(args),
         Cmd::Inspect(a) => cmd_inspect(&a.artifact),
