@@ -3,12 +3,12 @@ stack     egress-probe
 project   tdvmm_egress-probe
 mem_mib   3072
 ram_estimate_mib  1087
-compose_lock_sha256  31980906744826cdeb238dd194aef8636f62a662b08dea502ab110247488d2b6
-initramfs_sha256     8ca4c2034d39ae5143b66c2038548b2d7680aa5888f9817b3cd28a03786de63c  initramfs-alpine-egress-probe.cpio.gz
-agent_sha256         e27dbbb0f0730c5489734394649c809e8bca8aa2c5a4cb6e519d7cbcc66ab780  tdvmm-agent
+compose_lock_sha256  a832f138d219a17ae2b709a0f501d49b618f36c3ffcdb6c5e56f7f268f2721f6
+initramfs_sha256     045816adb0d53cd106a3409bae1149c549f249a84ba09a6b8573727a9f672986  initramfs-alpine-egress-probe.cpio.gz
+agent_sha256         9b548f2cbbae11a0d11e5bb18e7275f23f86b3a0d8b490a7ecf9eb7f9b790c51  tdvmm-agent
 builder_image        docker.io/library/alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
 builder_image        docker.io/library/debian:bookworm-slim@sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e
 builder_image        docker.io/library/rust:1.97-alpine3.22@sha256:b348cb409ac0a73de15065997a360063cf87465574a15e3e4469862cb8996f02
   image  policy=plain   upstream=docker.io/curlimages/curl@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69  diffid=sha256:3e01818d79cd3467f1d60e54224f3f6ce5170eceb54e265d96bb82344b8c24e7sha256:47f700d46e8a78ec5278107460349b8392e454014ed0bb48a1cd04fe1781f69dsha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef  size_mib=21
   image  policy=plain   upstream=docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616  diffid=sha256:0958e0fef2d6a31e1325b8bfecd99dead933363682d69850a7606599023751bc  size_mib=4
-tdvmm_sha256          4501a3f41906f1ef636827ac7a99c3eb8def1e16755d1a0d23460edd07d46b7a  egress-probe.tdvmm
+tdvmm_sha256          9bacc857580bbc88eac704af0ecd9dd3f2c13655f99ac12c2d29a3e6dd4b32ca  egress-probe.tdvmm

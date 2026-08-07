@@ -14,7 +14,7 @@ services:
       PGHOST: postgres
       PGUSER: postgres
       REDIS_HOST: redis
-    image: localhost/tdvmm-webstack-api@sha256:725a5858940a1cf6b383e16c994de637c1caccae9a91eac0dc6d1eba611b55b1
+    image: localhost/tdvmm-webstack-api@sha256:5bbe856ac82101b30aacee2c151f64d84cc4c0cb05fcf58c607321fce6ca6ce1
     volumes:
     - /run/tdvmm/events:/run/tdvmm/events:rw
     - /run/tdvmm/ctl:/run/tdvmm/ctl:rw

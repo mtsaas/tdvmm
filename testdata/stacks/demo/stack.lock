@@ -3,9 +3,9 @@ stack     demo
 project   tdvmm_demo
 mem_mib   3072
 ram_estimate_mib  2414
-compose_lock_sha256  ca1636ee34215a4817212f5860d912d8c5633a3306a9d43630723539c76ec22c
-initramfs_sha256     3aa75844ba88f5885b866c039c52e3400ef186160b60093aa37bc29de6a09d40  initramfs-alpine-demo.cpio.gz
-agent_sha256         809d48451b49084a84b43b153e88219dcf52f0793437a51720dbdbf659082424  tdvmm-agent
+compose_lock_sha256  a532e324b70eb70ff2c9958380f6305e94a5d8425f7158a8acb797eaf547401e
+initramfs_sha256     6c71f1bbfe3b6c03857965e272b74be544605ca1875e38371ab38035947df2dd  initramfs-alpine-demo.cpio.gz
+agent_sha256         9b548f2cbbae11a0d11e5bb18e7275f23f86b3a0d8b490a7ecf9eb7f9b790c51  tdvmm-agent
 builder_image        docker.io/library/alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
 builder_image        docker.io/library/debian:bookworm-slim@sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e
 builder_image        docker.io/library/rust:1.97-alpine3.22@sha256:b348cb409ac0a73de15065997a360063cf87465574a15e3e4469862cb8996f02
@@ -20,4 +20,4 @@ builder_image        docker.io/library/rust:1.97-alpine3.22@sha256:b348cb409ac0a
   image  policy=squash  upstream=docker.io/library/postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777  seed_tag=localhost/tdvmm-postgres-57c72fd2a128:baked  src_diffid=sha256:af5b54b4903175790ece7037a66fd16496658d7030a59e2e2360f66038d74c8c  size_mib=283  GATE=ok
   pin    upstream=docker.io/library/postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777  pinned=localhost/tdvmm-postgres-57c72fd2a128@sha256:cbf217007d0742829dc120c3ea9cd2621e90eb3adfeaf6684e87ce268a2ca368
   pin    upstream=localhost/tdvmm-demo-app:demo  pinned=localhost/tdvmm-demo-app@sha256:b40cb88833813fc1ffdb52d014420e0ff408749a56b1471b0508ee19306db9b4
-tdvmm_sha256          1b86636d88f18e23f88826f804687dd5ad87b3f6fd9f5639a6ca2642355fefc5  demo.tdvmm
+tdvmm_sha256          e64edc6f7d1fa059110714cacc33e5af2e515ecf379b552680ce83f03b682c83  demo.tdvmm
