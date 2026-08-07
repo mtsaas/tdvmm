@@ -1,33 +1,105 @@
-# Design — driver-controlled scenarios: the harness driven from inside the stack
+# Design — driver-controlled tests: the harness driven from inside the stack
 
-**Status:** DESIGN ONLY — nothing implemented. Fable design, 2026-08-06.
+**Status:** IMPLEMENTED on `feat/driver-control-socket`. This document is the
+original proposal, annotated where the owner's rulings during implementation
+superseded it. Fable design, 2026-08-06.
 
 Owner ruling: the scenario system is too brute-ish. A host-side declarative YAML
 timeline externally scripts faults at fixed `at:` virtual times, but realistically
 one of the stack's own containers is already driving the application workload —
 that same container should drive the *test*: trigger partitions, kill/heal peers,
-assert, and end the run. Mechanism: expose a local socket the designated driver
-container can reach; when that driver container exits, the test ends and its exit
-becomes the verdict signal.
+assert, and end the run.
+
+---
+
+## SUPERSEDED — read this first
+
+Four owner rulings landed after this proposal was written. Where the sections
+below disagree with this list, **this list is what was built.**
+
+1. **No `tdvmm-ctl` client binary.** A container speaks the socket through a thin
+   language SDK instead — `sdk/python/tdvmm.py`, stdlib-only. §9's CLI sketch is
+   dead; the SDK's API is in `sdk/python/README.md`.
+2. **The scenario system is DELETED, not kept.** §8's "coexistence, no
+   deprecation" is reversed: `src/scenario/` is gone, and so is the `tdvmm test`
+   verb. There is no declarative timeline and no host-side assertion ledger.
+   Consequently the "declarative mode stays the reproducibility anchor" argument
+   in §7.4 no longer has a second mode to lean on — see *What this cost us*.
+3. **There is no `test` verb at all: a test is a run with a driver.** `tdvmm run`
+   boots the stack; if some container ends the run with a verdict, that verdict
+   is `run`'s exit code. With no driver, `run` is exactly what it always was.
+4. **No access control and no driver designation.** §3/§5's `x-tdvmm-driver`
+   marker and mount-scoped authorization are gone: the guest is a closed test
+   world, so the socket directory is bind-mounted into EVERY container, exactly
+   like the events FIFO. Nothing identifies "the driver" — which removed the need
+   for SO_PEERCRED, container identification, and `podman wait` exit-watching
+   entirely (§6 is void). A run becomes a test purely because some container
+   called `finish()`.
+
+### What was actually built
+
+| Piece | Where |
+|---|---|
+| The socket: `/run/tdvmm/ctl/sock`, served by the agent under its existing blocked poll | `tdvmm-agent/src/bridge.rs` (`run_loop`, `handle_ctl_line`) |
+| The wire: unchanged `Request`/`Reply` line JSON, `SCHEMA` 3 → 4 | `tdvmm-proto/src/lib.rs` |
+| The terminal op: `finish(exit, message)`, first-wins | `tdvmm-agent/src/agent.rs` (`do_finish`) |
+| The bind into every service | `src/compose/emit.rs` (`rewrite_volumes`) |
+| Host verdict + exit-code mapping | `src/driver.rs`, `src/exit.rs` |
+| The SDK | `sdk/python/tdvmm.py` + its README |
+| Worked example (partition mid-write) | `testdata/stacks/pgcluster/` |
+| Verdict-contract gate | `scripts/driver_test.sh`, `testdata/stacks/driverlab/` |
+
+### The exit-code mapping (decided during implementation)
+
+`run` already owns 0/1/2/3, so a driver's raw code is **not** propagated
+verbatim — a driver exiting 2 or 3 would be indistinguishable from "the tool
+broke" and "the horizon fired", the two outcomes CI most needs to tell apart from
+a test failure. The raw code survives in the run summary and `--metrics-out`
+(`driver_exit_raw`).
+
+| outcome | `tdvmm run` exits |
+|---|---|
+| `finish(0)` | 0 — PASS |
+| `finish(n)`, n ≠ 0 | 1 — FAIL |
+| no `finish`, guest stopped on its own | 0 — unchanged |
+| no `finish`, `--max-virtual-time` fired | 3 — unchanged |
+| no `finish`, `--wall-timeout` fired | 2 |
+| bad artifact / agent never came up | 2 |
+
+`scripts/driver_test.sh` gates every row; the FAIL case deliberately uses
+`finish(3)` to prove a driver cannot impersonate a VMM outcome.
+
+### What this cost us, honestly
+
+* **The FF phase-gate e2e suite is gone.** `egress_safety_test.sh` drove the
+  `--allow-egress` invariants (INV-E1..E4) through scenarios and asserted on the
+  JSONL. Its unit tests and the always-on `assert_ff_jump_legal` tripwire remain,
+  but there is no end-to-end gate. This is the largest coverage regression and
+  wants a driver-based replacement.
+* **No JSONL run log and no JSON report.** The evidence trail is now the console
+  fault trace (each control command stamped with the virtual time it landed) plus
+  `--metrics-out`. Machine-readable per-step history is gone.
+* **§7.4's determinism trade is now unhedged.** With the declarative mode
+  deleted, there is no exact-timestamp mode to fall back on for golden runs. The
+  bake stays bit-reproducible; a *run's* timing does not.
+
+---
 
 ## 0. The recommendation in one paragraph
 
-Add a **driver mode** beside (not replacing) the declarative engine. The
-designated driver is one of the user's own compose services, marked at bake time
-(`x-tdvmm-driver: true`), which alone receives a bind-mount of a control
-directory `/run/tdvmm/ctl/` containing a **unix-domain socket served by the
-in-guest `tdvmm-agent`** and a static `tdvmm-ctl` client binary. The socket
-speaks the existing `tdvmm-proto` line-JSON `Request`/`Reply` verbatim; the
-agent executes fault ops locally (it already owns kill/partition/heal) and
-mirrors every command + result to the host over ttyS1 as bridged events, so the
-host keeps the JSONL log, the assertion ledger, and the verdict. The agent
-watches the driver container with a `podman wait` child under its existing
-blocked poll; driver exit becomes a `driver_exit` event, and the host folds
-(driver exit code, assertion ledger, final census) into the unchanged 0/1/2
-`test` contract. Because the entire control loop is guest-internal, it holds
-**zero host-side real-time state** — unlike egress, nothing pins real rate, and
-the driver expresses virtual time with plain `sleep`, which HLTs the guest and
-fast-forwards exactly like every workload today.
+*(As shipped, per the rulings above.)* The in-guest `tdvmm-agent` serves a
+unix-domain socket whose directory is bind-mounted into every container. It
+speaks the existing `tdvmm-proto` line JSON, and a socket request is dispatched
+through the **same `Agent::handle`** as a host request — so a container injects
+the very faults the host can, with no fault-injection code duplicated. The agent
+mirrors each command to the host as a `ctl` event (the run's fault trace, stamped
+with the virtual time it landed) and turns the terminal `finish` op into a
+`finish` event that the HOST ends the run on, mapping the verdict onto `run`'s
+0/1/2/3 contract. Because the whole control loop is guest-internal, it holds zero
+host-side real-time state: unlike egress, nothing pins real rate, the agent's
+poll keeps its infinite timeout, and a driver expresses virtual time with a plain
+`sleep` that fast-forwards exactly like any workload. Measured on the worked
+example: 9.5× speedup over 13,714 jumps with the socket in active use.
 
 ## 1. Current architecture — what gets inverted
 
@@ -497,3 +569,88 @@ kill fires at ~1h, not exactly 1h (§7.4).
    10s` now; inotify only if hop cost ever shows up in practice.
 6. **Coexistence (§8)** — recommendation: add driver mode, keep YAML as the
    reproducibility anchor, no deprecation path implied or scheduled.
+
+---
+
+## 13. Coupling a fault to a workload event (added during implementation)
+
+*"I'm about to fire this request to the cluster and I want the fault to trigger
+at that time."* The spectrum, with what shipped and what would be real work.
+
+### 13.1 What already holds — apply-and-ack (shipped, free)
+
+Every SDK fault call is synchronous, and not by accident: the agent installs the
+nftables ruleset (`Agent::apply_partitions`, which waits for `nft` to exit) or
+waits for the container to actually stop (`do_lifecycle`'s `podman wait`) BEFORE
+building the reply the SDK is blocked on. So
+
+```python
+h.partition("a", "b")   # returns only once the rule is installed
+fire_request()          # this request meets a partitioned network. Guaranteed.
+```
+
+There is no "did it land yet?" window in either direction — a fault issued after
+a request is likewise ordered after it in program order, on a single-threaded
+driver. This was already the semantics; the work was to *document and guarantee*
+it (SDK README, `sdk/python/tdvmm.py`) rather than leave it incidental. It is the
+cheap win, and it is the default shape of every fault call.
+
+What it does NOT give you is a zero-width gap. `partition(); fire()` guarantees
+ordering, not simultaneity: real milliseconds pass between them, during which the
+cluster is partitioned but idle. For most tests that is exactly right.
+
+### 13.2 What the worked example does instead — make the window explicit
+
+`testdata/stacks/pgcluster/` sidesteps the gap rather than shrinking it: it opens
+a transaction, INSERTs **without committing**, and partitions while that write is
+genuinely in flight. The operation spans the fault by construction, so no timing
+precision is needed at all. This is the pattern to reach for first — a
+state-based in-flight window beats a timing-based one, and it is reproducible.
+
+### 13.3 Event hooks — app-level is sugar, system-level is real work
+
+App-level (`on_before_request`) is not worth building: the driver already decides
+when it fires, so a hook adds a callback where a statement would do.
+
+System/network-level ("partition when the leader actually receives the write
+packet") is a genuinely different capability and genuinely expensive. Sketch of
+the cheapest credible version: an nft rule with a `counter` matching the
+destination service and port, plus an agent op `wait_for_packets(a, b, port, n)`
+that blocks until the counter passes `n` and then applies a queued fault in the
+same `nft -f` transaction. That gets "apply the partition after the Nth packet to
+the leader" with no eBPF and no new dependency — but it is packet-count
+granularity, not semantic ("the write packet"), and it puts a blocking op in the
+agent, which today never blocks on anything but its poll. **Recommendation:
+file it, don't build it** until a real test needs it.
+
+### 13.4 The VMM lever — honest answer: not tractable for this
+
+The intuition is right that the VMM has powers nothing else does: it owns the
+vCPU and the virtual clock. But the two are not usable here.
+
+*Pausing the vCPU is free and exact.* The VMM can already stop the guest at any
+exit boundary. But "freeze the guest, apply the fault, resume" does not help: the
+fault is applied BY the guest (the agent shells out to `nft`), so freezing the
+guest freezes the mechanism that would apply it. Making faults host-applied would
+mean moving network emulation out of the guest and into a host-side dataplane —
+a different product.
+
+*Virtual-time manipulation is the wrong tool by construction.* Fast-forward only
+moves the clock when the guest is idle (`fast_forward_until_deliverable` jumps
+only at a HLT park). A live in-flight request means the guest is busy, so there
+is no clock lever available in precisely the regime the owner is asking about.
+This is not an implementation gap; it is what "fast-forward idle time" means.
+
+*Instruction-precise coupling would need a different machine.* To land a fault at
+a chosen guest instruction you would need single-stepping or a hardware
+watchpoint on the vCPU, a way to name the interesting instruction (debug symbols
+for a container process you did not build), and a fault mechanism that works with
+the guest frozen. Each is a project; together they are a research VMM, not a
+feature. The one tractable relative — deterministic replay — would require making
+the whole guest deterministic (no host entropy, no real-rate I/O), which egress
+and podman both violate today.
+
+**Recommendation:** ship 13.1 (done), teach 13.2 (done, in the SDK README and the
+worked example), file 13.3 as a future extension with the counter sketch, and
+close 13.4 as out of scope with the reasoning above rather than leaving it as an
+open "maybe someday" the owner has to re-litigate.
