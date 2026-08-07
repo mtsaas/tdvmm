@@ -35,8 +35,9 @@ tdvmm build demo ./demo/compose.yml   # -> ~/.tdvmm/artifacts/demo.tdvmm
 # Run it offline; idle time fast-forwards automatically:
 tdvmm run demo --max-virtual-time 24h
 
-# Drive it through a scenario and get a pass/fail verdict:
-tdvmm test demo --scenario ./demo/scenario.yml
+# Add a driver container that tests the stack from the inside; its verdict
+# becomes the exit code (0 = pass, 1 = fail). A test is just a run with a driver:
+tdvmm run demo --wall-timeout 900
 ```
 
 ## Requirements

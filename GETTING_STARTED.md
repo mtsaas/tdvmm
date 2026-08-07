@@ -18,7 +18,6 @@ Three commands do everything:
 |--------------|----------------------------------------------------------|
 | `tdvmm build` | bake a `compose.yml` into a `.tdvmm`                       |
 | `tdvmm run`   | boot a `.tdvmm` and watch it                               |
-| `tdvmm test`  | drive a `.tdvmm` through a scenario, get a pass/fail verdict |
 
 ## Requirements
 
@@ -117,143 +116,124 @@ tdvmm run demo --max-virtual-time 1h --logs-dir ./logs \
 ```
 
 Each file is one service's output with RFC3339 timestamps and `stdout`/`stderr` tags.
-`--logs-dir` works on `tdvmm test` too — it's how you get a post-mortem of a test run.
+`--logs-dir` is how you get a post-mortem of a failed test run.
 
-## 4. Test a service against a scenario
+## 4. Test a stack — from inside it
 
-Running is watching. **Testing** is asserting. A *scenario* is a small YAML timeline: at
-each virtual time, do something — wait for readiness, run a command and check its output,
-or inject a fault. Run one against the demo:
+Running is watching. **Testing** is asserting. In tdvmm a test is not a separate
+verb or a separate file: it is one of your own containers — a **driver** — that
+talks to the harness while it drives the workload.
 
-```sh
-tdvmm test demo \
-  --scenario testdata/stacks/demo/demo.yml --logs-dir ./logs
+The driver does two things an ordinary container cannot:
+
+- **inject faults into its own cluster** — partition the network, kill a node,
+  heal it;
+- **end the run with a verdict** — `finish(0)` passes, `finish(1, "why")` fails.
+
+Because the workload and the faults are the same program, a fault can land in the
+middle of an operation the driver has in flight — the thing you actually want to
+test about a distributed system, and the thing an external timeline cannot express.
+
+Add a driver service to your compose file:
+
+```yaml
+  driver:
+    build: ./driver               # any image with Python 3
+    depends_on: [postgres, api]
+    volumes:
+      - ./tdvmm.py:/app/tdvmm.py:ro       # the SDK (sdk/python/tdvmm.py)
+      - ./driver.py:/app/driver.py:ro
+    command: ["/app/driver.py"]
 ```
 
-Without `--jsonl`/`--report`, the run log and report default to `./demo.jsonl` and
-`./demo.report.json` in the current directory (named after the stack).
+...and write the test:
+
+```python
+import tdvmm
+
+h = tdvmm.connect()
+h.wait_for_services(["postgres", "api"])
+
+# Cut the api off from its database while it is serving.
+h.partition("api", "postgres")
+if api_still_claims_healthy():
+    h.finish(1, "the api reported healthy with its database unreachable")
+h.heal()
+
+h.finish(0)
+```
+
+Then just run it:
+
+```sh
+tdvmm run demo --wall-timeout 900 --logs-dir ./logs
+```
 
 The exit code is the verdict:
 
-- **0** — every assertion passed.
-- **1** — an assertion failed (your stack is wrong).
-- **2** — something broke (bad scenario, boot/agent failure).
+- **0** — the driver called `finish(0)`, or there was no driver and the guest
+  stopped on its own.
+- **1** — the driver called `finish` with a nonzero code (your stack is wrong).
+  Its raw code is in the summary line and `--metrics-out`.
+- **2** — something broke: a bad artifact, an unreachable agent, or the
+  `--wall-timeout` safety net firing because the driver died without finishing.
+- **3** — `--max-virtual-time` ran out first.
 
-That split lets CI tell "the code is wrong" from "the tool broke."
+That split lets CI tell "the code is wrong" from "the tool broke." Set
+`--wall-timeout` on any driven run: it is the only thing that ends a test whose
+driver crashed.
 
-### Write your own
+### Virtual time is `sleep`
 
-The smallest useful scenario waits for a service to be ready, then checks something:
+There is no "advance the clock" call, and there could not be one — virtual time
+moves only while the guest is idle, and the guest is the authority on its own
+idleness. So you just sleep:
 
-```yaml
-name: my-first-test
-
-steps:
-  # Wait (in virtual time) until Postgres accepts connections.
-  - name: wait-ready
-    at: 0s
-    wait_for:
-      probe:
-        exec: { container: postgres, cmd: "pg_isready -U postgres -d appdb" }
-      until: exit_zero
-      every: 5s
-      timeout: 2m
-
-  # Fast-forward an hour, then assert rows have been written.
-  - name: rows-exist
-    at: 1h
-    exec:
-      container: postgres
-      cmd: "psql -U postgres -d appdb -tAc 'select count(*) from summaries;'"
-    expect:
-      exit: 0
-      output_matches: '^[1-9][0-9]*$'   # at least one row
+```python
+h.wait_for_services(["postgres"])
+time.sleep(86400)              # a virtual day, ~instantly
+h.kill("postgres")             # ...then the fault
 ```
 
-The pieces:
+Prefer waiting for an **observed state** over a duration, though — it is what
+keeps a test reproducible:
 
-- **`at:`** — when, in *virtual* time, the step runs. `at: 1h` fast-forwards there; a step
-  at `at: 24h` costs seconds, not a day.
-- **`wait_for`** — poll `probe` every `every:` until it is `until: exit_zero`
-  (or `exit_nonzero`), giving up at `timeout:`. This is readiness.
-- **`exec` + `expect`** — run a command in a container and require an `exit:` code and/or
-  an `output_matches:` regex.
-
-Save it and `tdvmm test <artifact> --scenario my-first-test.yml`.
+```python
+h.kill("postgres")
+h.wait_until(lambda: "postgres" not in h.running(), what="postgres to be down")
+```
 
 ## 5. Design a fault
 
-Faults are just more scenario steps, scheduled at an `at:` time like everything else:
+Every fault is one SDK call, and each returns only once the fault is really
+applied — the nftables rule installed, or the container actually stopped. So
+there is no "did it land yet?" window between a fault and the request you fire
+next.
 
-- **`kill: <svc>`** / **`stop: <svc>`** / **`start: <svc>`** — container lifecycle.
-- **`partition: [A, B]`** / **`heal: [A, B]`** — drop, then restore, all traffic between
-  two services.
+```python
+h.kill("postgres"); h.stop("postgres"); h.start("postgres")
+h.partition("api", "postgres")
+h.heal("api", "postgres")      # or h.heal() for every partition at once
+```
 
 The useful shape is **fault → prove it broke → recover → prove it healed**:
 
-```yaml
-name: survives-db-restart
+```python
+h.wait_for_services(["api", "postgres"])
 
-# A SIGKILLed container exits nonzero on purpose. Declare it, so that death
-# doesn't count as an unexpected crash in the end-of-run check.
-expect_death: [postgres]
+h.partition("api", "postgres")
+h.wait_until(lambda: not api_can_reach_db(), what="the api to lose its database")
 
-steps:
-  - name: wait-ready
-    at: 0s
-    wait_for:
-      probe: { exec: { container: postgres, cmd: "pg_isready -U postgres" } }
-      until: exit_zero
-      every: 5s
-      timeout: 2m
+h.heal()
+h.wait_until(api_can_reach_db, what="the api to recover")
 
-  - name: kill-db
-    at: 1h
-    kill: postgres
-
-  # Prove the outage: the api can no longer reach the db.
-  - name: db-is-down
-    at: 1h
-    wait_for:
-      probe: { exec: { container: api, cmd: "pg_isready -h postgres" } }
-      until: exit_nonzero
-      every: 5s
-      timeout: 2m
-
-  - name: restart-db
-    at: 2h
-    start: postgres
-
-  # Prove recovery: reachable again, and nothing crashed for good.
-  - name: db-recovered
-    at: 2h
-    wait_for:
-      probe: { exec: { container: api, cmd: "pg_isready -h postgres" } }
-      until: exit_zero
-      every: 5s
-      timeout: 2m
-
-  - name: all-up
-    at: 2.5h
-    containers: all_running
+h.finish(0)
 ```
 
-A network partition is the same idea without killing anything:
-
-```yaml
-  - name: cut-the-link
-    at: 1h
-    partition: [api, postgres]
-  # ... assert the api can't reach postgres, then ...
-  - name: restore-the-link
-    at: 2h
-    heal: [api, postgres]
-```
-
-Because every fault fires at a scheduled virtual time, `at: 24h` fast-forwards straight
-to it — you can test "what happens after a day of running, then a crash" without waiting
-a day. `testdata/stacks/faultlab/` has complete kill/recover and partition/heal scenarios
-to crib from.
+`testdata/stacks/pgcluster/` is a complete worked example: a Postgres pair with
+synchronous replication, whose driver opens a transaction, partitions the two
+nodes **while the write is in flight**, proves the commit blocks, then heals and
+proves it completes on both nodes. `sdk/python/README.md` is the full API.
 
 ## Looking at an artifact
 

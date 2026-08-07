@@ -1,0 +1,14 @@
+# tdvmm driverlab — a minimal driver image: python3 and nothing else.
+#
+# The SDK is stdlib-only, so a driver needs no packages at all. Base is
+# DIGEST-PINNED and the apk is version-pinned so two --no-cache bakes are
+# byte-identical; the .pyc recompile is the reproducibility fix the demo image
+# documents (Alpine's apk trigger embeds source mtimes).
+FROM docker.io/library/alpine@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
+RUN apk add --no-cache python3=3.12.13-r0
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+WORKDIR /app
+RUN find / -name '*.pyc' -delete 2>/dev/null; \
+    python3 -m compileall -q -f --invalidation-mode unchecked-hash /usr/lib/python3.12 2>/dev/null; \
+    true
+ENTRYPOINT ["python3"]

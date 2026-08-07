@@ -39,7 +39,7 @@ src/                 the VMM (the `tdvmm` binary)
   artifact.rs        the `.tdvmm` file format (deterministic tar) + manifest
   cpio.rs            deterministic initramfs packing
   compose.rs         the supported Compose subset (parser + validator + lock emitter)
-  scenario/          `tdvmm test`: the scenario timeline + verdict (schema/engine/eval/ledger/log/report)
+  driver.rs          the verdict a container declared over the control socket -> `run`'s exit code
   vtsc.rs            the virtual clock (the TSC offset; the fast-forward jump)
   park.rs            what happens at an idle HLT: wait real time, or jump
   lapic.rs ioapic.rs pic.rs pit.rs   the userspace interrupt controller + timer
@@ -52,11 +52,11 @@ src/                 the VMM (the `tdvmm` binary)
   exit.rs util.rs    exit codes; small shared helpers
 
 tdvmm-proto/          host <-> guest-agent wire types (shared crate)
-tdvmm-agent/          the tiny in-guest agent that `tdvmm test` drives (static musl)
+tdvmm-agent/          the tiny in-guest agent: serves ttyS1 + the container control socket (static musl)
 testdata/
   kernel/            the pinned kernel config + kernel.lock
   initramfs-alpine/  the in-RAM guest rootfs (overlay files, image/package pins)
-  stacks/            worked example stacks (each a compose.yml + a scenario)
+  stacks/            worked example stacks (a compose.yml; driver stacks add a driver container)
 scripts/             the test suite (see "Building and testing")
 ```
 
@@ -67,7 +67,7 @@ scripts/             the test suite (see "Building and testing")
 | Change how a stack is baked                 | `build.rs` (and `engine.rs` for any podman call) |
 | Support or reject a Compose feature         | `compose.rs` |
 | Change the `.tdvmm` format                   | `artifact.rs` (+ `cpio.rs` for the initramfs) |
-| Add a scenario step or a fault              | `scenario/` + `tdvmm-agent/` (and `tdvmm-proto/` for the wire type) |
+| Add a fault or a driver capability          | `tdvmm-agent/` + `sdk/python/` (and `tdvmm-proto/` for the wire type) |
 | Touch the clock or fast-forward             | `vtsc.rs`, `park.rs`, `lapic.rs` |
 | Change CPU/timer features the guest sees    | `cpuid.rs` (+ `mptable.rs`) |
 | Add a CLI flag or command                   | `cli.rs` (+ `main.rs` dispatch) |
@@ -97,7 +97,7 @@ wrong even if it compiles and the tests pass.
    (apk, wget, tar, gzip) run inside pinned containers or in-process, never as
    host prerequisites.
 
-4. **Clean machine output.** stdout, the `tdvmm test` JSONL/JSON reports, and the
+4. **Clean machine output.** stdout, the `--metrics-out` file, and the
    guest's serial stream are consumed by scripts and must stay byte-clean. Human
    chrome (the progress spinner, log lines) goes to **stderr only**, and only at a
    terminal; piped or CI output must not change.
@@ -113,7 +113,7 @@ wrong even if it compiles and the tests pass.
 cargo build --release
 cargo test --release          # unit + protocol golden tests
 
-scripts/test_scenario.sh      # end-to-end: bake insert-trim, boot it, run a scenario
+scripts/driver_test.sh       # end-to-end: the driver verdict contract (0 / 1 / 2)
 scripts/test.sh --fast        # the fast tier of the suite
 ```
 

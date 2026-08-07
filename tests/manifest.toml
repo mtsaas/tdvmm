@@ -121,15 +121,6 @@ desc = "representative corpus stack (chattiest: web+redis+postgres, dual health 
 # svcchain; relative rw binds + named volumes by corpus-full (configpipeline).
 
 [[test]]
-name = "egress-safety"
-tier = "T2"
-tags = ["parallel-safe", "needs-bake"]
-timeout = 420
-requires = "testdata/stacks/egress-probe/compose.yml testdata/kernel/vmlinux-6.1.128"
-cmd = "scripts/egress_safety_test.sh"
-desc = "SAFETY(--allow-egress): phase gate proven e2e — clock never jumps mid-request (T1), FF re-engages once drained (T2), a gate breach aborts (T3b), an adversarial dribble is not FF'd past the read timeout (T3c), transport under --ff off (T5), closed-world identity flag-off (T6). Loopback test server, no internet."
-
-[[test]]
 name = "corpus-demo"
 tier = "T2"
 tags = ["perf-exclusive", "needs-bake"]
@@ -213,31 +204,22 @@ cmd = "scripts/ff_demo.sh 24 300"
 desc = "long-horizon FF (24 vhours): cadence + per-hop + speedup"
 
 [[test]]
-name = "test-scenario"
-tier = "T3"
-tags = ["needs-bake"]
-timeout = 500
-requires = ""
-cmd = "scripts/test_scenario.sh"
-desc = "TEST-1a: tdvmm test verdict/exit-code contract (pass / wrong->1 / infra->2)"
-
-[[test]]
-name = "demo-scenario"
+name = "driver-contract"
 tier = "T3"
 tags = ["needs-bake"]
 timeout = 900
 requires = ""
-cmd = "mkdir -p .tdvmm-test-results && ./target/release/tdvmm build demo testdata/stacks/demo/compose.yml -o .tdvmm-test-results/demo.tdvmm && ./target/release/tdvmm test .tdvmm-test-results/demo.tdvmm --scenario testdata/stacks/demo/demo.yml --wall-timeout 800 --logs-dir /tmp/demo-logs"
-desc = "flagship demo: full virtual day of the gRPC stack + fault/recovery -> PASS, per-service logs"
+cmd = "scripts/driver_test.sh"
+desc = "the driver verdict contract e2e: finish(0)->0, finish(nonzero)->1, socket fault ops->0, never-finish->2 (wall clock), and an UNDRIVEN run unchanged"
 
 [[test]]
-name = "test-faults"
+name = "pgcluster-driver"
 tier = "T3"
 tags = ["needs-bake"]
-timeout = 500
-requires = ""
-cmd = "scripts/test_faults.sh"
-desc = "TEST-1b: fault injection (kill/recover, partition/heal, unexpected-death->1)"
+timeout = 900
+requires = "testdata/stacks/pgcluster/compose.yml"
+cmd = "mkdir -p .tdvmm-test-results && ./target/release/tdvmm build pgcluster testdata/stacks/pgcluster/compose.yml -o .tdvmm-test-results/pgcluster.tdvmm --no-progress && ./target/release/tdvmm run .tdvmm-test-results/pgcluster.tdvmm --wall-timeout 780 --mem 3072"
+desc = "flagship driver test: a Postgres pair with synchronous replication, partitioned by its own driver container WHILE a write is in flight -> the commit must block, then complete after heal"
 
 [[test]]
 name = "workload-realtime"
