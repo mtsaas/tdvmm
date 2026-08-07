@@ -19,17 +19,15 @@
 //! cursor — never a follow/tail (`-f` would defeat host fast-forward) — so the
 //! agent blocks again immediately after replying, exactly like every other op.
 //!
-//! ## Driver mode (schema 4)
+//! ## The control socket (schema 4)
 //!
-//! With `tdvmm.driver=<service>` on the kernel cmdline the agent also serves the
-//! **driver control socket** ([`tdvmm_proto::CONTROL_SOCKET_PATH`]): the same
+//! The agent also serves [`tdvmm_proto::CONTROL_SOCKET_PATH`]: the same
 //! [`tdvmm_proto::Request`]/[`tdvmm_proto::Reply`] line JSON, over a unix socket
-//! whose directory is bind-mounted into that ONE service — authorization IS the
-//! mount, exactly like the events FIFO. A driver container therefore injects the
-//! very faults the host can, through the very same [`agent::Agent`] dispatch, and
-//! can do so WHILE its own requests to the cluster are in flight (the Jepsen
-//! shape: workload and fault are one program). The agent also watches that
-//! container and reports its exit as the run's verdict (see [`driver`]).
+//! whose directory is bind-mounted into EVERY container, exactly like the events
+//! FIFO. A container therefore injects the very faults the host can, through the
+//! very same [`agent::Agent`] dispatch, and can do so WHILE its own requests to
+//! the cluster are in flight — the Jepsen shape: workload and fault are one
+//! program. `finish` ends the run with a verdict.
 //!
 //! Deps: `tdvmm-proto` + `serde_json` (+ `serde` derive, already transitive) +
 //! `std` ONLY. Raw-mode termios is done with a std-only inline-asm `ioctl`
@@ -45,13 +43,11 @@ use tdvmm_proto::Reply;
 
 mod agent;
 mod bridge;
-mod driver;
 mod forwarder;
 mod sys;
 
 use agent::Agent;
 use bridge::{run_loop, write_line, Sources};
-use driver::DriverWatch;
 
 pub(crate) const AGENT_ID: &str = "tdvmm-agent/1";
 
@@ -119,37 +115,29 @@ fn main() -> ExitCode {
 
     let mut agent = Agent::new();
 
-    // Driver mode (schema 4): `tdvmm.driver=<service>` names the ONE compose
-    // service that drives this test. Bind its control socket and arm the
-    // exit watcher BEFORE the hello, so "agent ready" implies "socket ready" and
-    // a driver that connects the instant its container starts is never refused.
-    let driver_service = driver_service_from_cmdline();
-    let ctl = driver_service.as_deref().and_then(|svc| match bind_control_socket() {
+    // Control socket (schema 4): bound BEFORE the hello, so "agent ready" implies
+    // "socket ready" and a container that connects the instant it starts is never
+    // refused. Unconditional — there is no driver flag to gate on, because a run
+    // becomes a test simply by some container connecting and calling `finish`.
+    let ctl = match bind_control_socket() {
         Ok(l) => {
             eprintln!(
-                "tdvmm-agent: driver control socket on {} for service {svc}",
+                "tdvmm-agent: control socket on {}",
                 tdvmm_proto::CONTROL_SOCKET_PATH
             );
             Some(l)
         }
         Err(e) => {
-            // Without the socket the driver cannot inject faults. Report loudly and
-            // keep serving ttyS1 — the host still gets a verdict from the driver's
-            // exit, and the failure is visible in the console log.
+            // Without the socket no container can drive the harness. Report loudly
+            // and keep serving ttyS1: the console log then says exactly why a
+            // driver's connect failed.
             eprintln!(
-                "tdvmm-agent: cannot bind {} ({e}); the driver cannot control the harness",
+                "tdvmm-agent: cannot bind {} ({e}); no container can control the harness",
                 tdvmm_proto::CONTROL_SOCKET_PATH
             );
             None
         }
-    });
-    let watch = driver_service.as_deref().and_then(|svc| match DriverWatch::spawn(svc) {
-        Ok(w) => Some(w),
-        Err(e) => {
-            eprintln!("tdvmm-agent: cannot watch driver service {svc}: {e}");
-            None
-        }
-    });
+    };
 
     // Proactive hello: the VMM's harness waits for this to mark the agent ready (no
     // ping round-trip needed). Carries schema + build (the compat oracle). If it
@@ -159,36 +147,21 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    // One blocked poll over every source: ttyS1 (control), the event FIFO, and —
-    // in driver mode — the control socket and the driver-exit watcher. An
-    // infinite-timeout poll arms no timer and generates no wakes, so fast-forward
-    // transparency holds no matter how many sources are attached.
-    run_loop(Sources { control: file, events: fifo, ctl, watch }, &mut writer, &mut agent);
+    // One blocked poll over every source: ttyS1 (control), the event FIFO, and the
+    // control socket. An infinite-timeout poll arms no timer and generates no
+    // wakes, so fast-forward transparency holds no matter how many sources are
+    // attached.
+    run_loop(Sources { control: file, events: fifo, ctl }, &mut writer, &mut agent);
     ExitCode::SUCCESS
-}
-
-/// The driver service named by `tdvmm.driver=<service>` on the kernel cmdline.
-/// The VMM appends it exactly when it runs in driver mode, mirroring how
-/// `tdvmm.egress=1` gates the forwarder — so a plain `boot`/`run` never opens a
-/// control socket at all.
-fn driver_service_from_cmdline() -> Option<String> {
-    let cmdline = std::env::var("TDVMM_AGENT_CMDLINE")
-        .ok()
-        .or_else(|| std::fs::read_to_string("/proc/cmdline").ok())?;
-    cmdline
-        .split_whitespace()
-        .find_map(|tok| tok.strip_prefix("tdvmm.driver="))
-        .filter(|s| !s.is_empty())
-        .map(String::from)
 }
 
 /// Create the control directory and bind the listener inside it.
 ///
-/// The socket is made world-read/write on purpose: reaching it at all already
-/// requires the directory bind, which only the driver service has, so the mount
-/// IS the authorization — and the driver's image may well run as a non-root user
-/// that could not otherwise connect. `/run` is a fresh tmpfs each boot, so the
-/// unlink is belt-and-braces against a re-exec, not a real stale-socket case.
+/// The socket is world-read/write: the guest is a closed test world where every
+/// container already has the bind, and a container's image may well run as a
+/// non-root user that could not otherwise connect. `/run` is a fresh tmpfs each
+/// boot, so the unlink is belt-and-braces against a re-exec, not a real
+/// stale-socket case.
 fn bind_control_socket() -> std::io::Result<UnixListener> {
     std::fs::create_dir_all(tdvmm_proto::CONTROL_DIR)?;
     let _ = std::fs::remove_file(tdvmm_proto::CONTROL_SOCKET_PATH);
@@ -394,19 +367,53 @@ mod tests {
 
     #[test]
     fn the_fifo_cannot_forge_an_agent_originated_event() {
-        // The events FIFO is bound into EVERY container. A plain service must not
-        // be able to end the run with a verdict of its choosing, nor fake a fault
-        // mirror — those kinds are agent-originated only.
-        let forged_exit = parse_event(b"{\"kind\":\"driver_exit\",\"exit\":0}\n");
-        assert_eq!(forged_exit.kind, "invalid");
-        assert_eq!(forged_exit.exit, None, "the forged verdict is discarded, not passed on");
-        assert!(forged_exit.details.unwrap()["rejected"]
+        // A verdict and a fault trace must come from a command the agent actually
+        // SERVED on the control socket, never from a line anyone can echo into the
+        // shared pipe — otherwise `finish` would have a second, unserved path into
+        // the host that is unordered with respect to the commands it concludes.
+        let forged_finish = parse_event(b"{\"kind\":\"finish\",\"exit\":0}\n");
+        assert_eq!(forged_finish.kind, "invalid");
+        assert_eq!(forged_finish.exit, None, "the forged verdict is discarded, not passed on");
+        assert!(forged_finish.details.unwrap()["rejected"]
             .as_str()
             .unwrap()
             .contains("reserved"));
 
         let forged_ctl = parse_event(b"{\"kind\":\"ctl\",\"name\":\"kill\",\"ok\":true}\n");
         assert_eq!(forged_ctl.kind, "invalid");
+    }
+
+    #[test]
+    fn first_finish_wins_and_a_second_is_refused() {
+        // The run has exactly one outcome. A second `finish` — a retry, or another
+        // container racing — must not be able to overwrite the recorded verdict.
+        let mut a = Agent::new();
+        let fin = |exit: i64| Request {
+            id: 1,
+            op: "finish".into(),
+            exit: Some(exit),
+            ..Default::default()
+        };
+        let first = a.handle(&fin(0));
+        assert_eq!(first.ok, Some(true));
+        assert!(a.accepted_finish(&fin(0), &first), "the first finish ends the run");
+
+        let second = a.handle(&fin(1));
+        assert_eq!(second.ok, Some(false));
+        assert!(second.error.as_deref().unwrap().contains("already finished"));
+        assert!(
+            !a.accepted_finish(&fin(1), &second),
+            "a refused finish must not emit a second terminal event"
+        );
+    }
+
+    #[test]
+    fn finish_defaults_to_pass_and_carries_a_message() {
+        let mut a = Agent::new();
+        // No `exit` means "passed" — `finish()` with no argument is the happy path.
+        let r = a.handle(&Request { id: 1, op: "finish".into(), ..Default::default() });
+        assert_eq!(r.ok, Some(true));
+        assert_eq!(r.stdout.as_deref(), Some("finish 0"));
     }
 
     #[test]
