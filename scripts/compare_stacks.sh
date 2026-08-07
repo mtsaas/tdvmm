@@ -3,8 +3,8 @@
 #
 # Runs ANY TWO baked stacks under fast-forward and emits a STABLE, side-by-side
 # report of how each behaves. Generic: pass any two stack names that emit the
-# TDVMM_ROWCOUNT marker (e.g. insert-trim vs svcchain). It isolates the per-hop
-# VMM property and the busy-wait tripwire across two different workloads.
+# TDVMM_ROWCOUNT marker. It isolates the per-hop VMM property and the busy-wait
+# tripwire across two different workloads.
 #
 # It consumes the VMM's EXISTING per-run fast-forward metrics (tdvmm --metrics-out:
 # the jump/speedup accounting + the Δvtsc histogram + the real-vs-virtual
@@ -22,7 +22,7 @@
 # interval, cap holds) and the per-hop <=500us mean gate (the VMM property).
 #
 # Usage: scripts/compare_stacks.sh [stackA] [stackB] [target_virtual_hours]
-#   stackA/stackB: stack names (default: insert-trim svcchain); each is baked to a .tdvmm
+#   stackA/stackB: stack names (each must emit TDVMM_ROWCOUNT); each is baked to a .tdvmm
 # Env: INTERVAL (3600) MAX_ROWS (1000) MEM (3072) MAX_JUMP_SECS (300)
 #      WALL_TIMEOUT (400)  GATE_HOP_US (500)
 set -uo pipefail
@@ -36,7 +36,7 @@ STACKS_DIR="$ROOT/testdata/stacks"
 OUTDIR="${TDVMM_OUT_DIR:-$ROOT/.tdvmm-test-results}"; mkdir -p "$OUTDIR"
 
 STACK_A="${1:-insert-trim}"
-STACK_B="${2:-svcchain}"
+STACK_B="${2:-insert-trim}"
 TARGET_HOURS="${3:-6}"
 INTERVAL="${INTERVAL:-3600}"
 MAX_ROWS="${MAX_ROWS:-1000}"

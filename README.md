@@ -14,8 +14,9 @@ one self-contained `.tdvmm` file. Pin it, share it, and re-test it offline.
   clock to the next event. A day of a scheduled job runs in seconds.
 - **One file per stack.** A `.tdvmm` holds the kernel, the images, and the root
   filesystem.
-- **Fault injection.** Kill a container, or partition the network between two
-  services, then assert the stack recovers.
+- **Fault injection.** A driver container written with the Go SDK (`sdk/go`) can
+  kill a container or partition the network between two services, then assert the
+  stack recovers. Its `Finish` verdict is the run's exit code.
 - **A subset of Compose.** `image:` and `build:` services, service-name
   networking, healthchecks and `depends_on`, bind mounts, and named volumes.
   Anything that needs the outside world is rejected at build time.

@@ -6,24 +6,18 @@ networks:
       config:
       - subnet: 10.240.0.0/24
 services:
-  client:
+  driver:
     depends_on:
     - replica0
     - replica1
     - replica2
-    entrypoint:
-    - /bin/sh
-    - /scripts/client.sh
-    environment:
-      INTERVAL_SECONDS: ${TDVMM_INTERVAL:-3600}
-    image: ghcr.io/tigerbeetle/tigerbeetle@sha256:177d6fbd12a3dab1782212cdaf034b5f9cb1bf73804b66116980bfe1064cc3b6
+    image: localhost/tdvmm-tigerbeetle-driver@sha256:fd64123fc1551bfe4f405bf036f2ab4058ca4b1478eb9dd57462b61d16e23224
     networks:
       tb:
         ipv4_address: 10.240.0.20
     security_opt:
     - seccomp=unconfined
     volumes:
-    - /var/lib/tdvmm-stack/binds/client/client.sh:/scripts/client.sh:ro
     - /run/tdvmm/events:/run/tdvmm/events:rw
     - /run/tdvmm/ctl:/run/tdvmm/ctl:rw
   replica0:

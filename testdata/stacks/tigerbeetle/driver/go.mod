@@ -1,4 +1,4 @@
-module tdvmm.local/driverlab-driver
+module tdvmm.local/tigerbeetle-driver
 
 go 1.26
 

@@ -5,8 +5,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::artifact;
 use crate::compose;
+use super::fsops::copy_tree;
+use super::util::find_testdata_dir;
 use super::ux::{capture, podman, run, Ux};
 use super::BUILD_EPOCH;
+
+/// The go.mod marker that flags a driver `build:` context: it declares a local
+/// `replace` onto the committed tdvmm Go SDK at `sdk/go`. The SDK source is
+/// single-sourced there (never copied under `testdata/`), so the bake stages it
+/// into the context at build time — see [`stage_driver_context`].
+const DRIVER_SDK_REPLACE: &str = "github.com/mtsaas/tdvmm/sdk/go => ./sdk";
 
 #[derive(Clone)]
 pub(super) struct ImgRecord {
@@ -194,7 +202,12 @@ pub(super) fn build_one(
     ux: &Ux,
 ) -> Result<BakedImage, Box<dyn std::error::Error + Send + Sync>> {
     ux.progress.detail(format!("   [build]  service={}  context={}  dockerfile={}  -> {}", b.service, b.context, b.dockerfile, b.image_tag));
-    run(podman(bstore, brun, conf).args(["build", "--squash-all", "--timestamp", BUILD_EPOCH, "-t", &b.image_tag, "-f", &b.dockerfile, &b.context]), ux.mode)?;
+    // A driver context declares `replace <sdk> => ./sdk`; stage the context plus the
+    // single-sourced SDK into scratch so `COPY sdk/ ...` resolves offline. Others
+    // build straight from their on-disk context.
+    let staged = stage_driver_context(Path::new(&b.context), idx, work)?;
+    let ctx = staged.as_deref().map_or(b.context.as_str(), |p| p.to_str().unwrap_or(b.context.as_str()));
+    run(podman(bstore, brun, conf).args(["build", "--squash-all", "--timestamp", BUILD_EPOCH, "-t", &b.image_tag, "-f", &b.dockerfile, ctx]), ux.mode)?;
     let bytes: u64 = capture(podman(bstore, brun, conf).args(["image", "inspect", &b.image_tag, "--format", "{{.Size}}"]))?
         .trim()
         .parse()
@@ -218,6 +231,35 @@ pub(super) fn build_one(
         plain: None,
         squash: Some((b.image_tag.clone(), b.image_tag.clone(), tar)),
     })
+}
+
+/// If `ctx` is a driver context (its `go.mod` carries [`DRIVER_SDK_REPLACE`]),
+/// stage it into `<work>/driverctx-<idx>` alongside a copy of the committed SDK at
+/// `sdk/go` (materialized as `./sdk`), and return that staged path. Otherwise
+/// return `None` (build straight from `ctx`).
+///
+/// This keeps the SDK single-sourced in `sdk/go`: no copy is committed under
+/// `testdata/`, yet the offline `podman build` (`GOPROXY=off`) still finds the
+/// `./sdk` the driver's `go.mod` replace points at, in the build context.
+fn stage_driver_context(
+    ctx: &Path,
+    idx: usize,
+    work: &Path,
+) -> Result<Option<PathBuf>, Box<dyn std::error::Error + Send + Sync>> {
+    let gomod = std::fs::read_to_string(ctx.join("go.mod")).unwrap_or_default();
+    if !gomod.contains(DRIVER_SDK_REPLACE) {
+        return Ok(None);
+    }
+    let sdk_src = find_testdata_dir()
+        .and_then(|td| td.parent().map(|repo| repo.join("sdk").join("go")))
+        .filter(|p| p.is_dir())
+        .ok_or("driver stack build needs the tdvmm Go SDK source (sdk/go); run from a source checkout")?;
+    let staged = work.join(format!("driverctx-{idx}"));
+    let _ = std::fs::remove_dir_all(&staged);
+    copy_tree(ctx, &staged)?;
+    let _ = std::fs::remove_dir_all(staged.join("sdk")); // drop any stale/committed copy
+    copy_tree(&sdk_src, &staged.join("sdk"))?;
+    Ok(Some(staged))
 }
 
 /// `echo ref | sed -E 's#[@:].*$##; s#.*/##'` — the image name (postgres).

@@ -334,7 +334,7 @@ echo "  JSON results: $JSON"
 # ---------------------------------------------------------------------------
 echo
 echo "  advisory (not enforced):"
-echo "    * touched src/{lapic,park,vtsc}.rs ?  -> run T3 perf locally:  scripts/test.sh compare-stacks ff-demo-long"
+echo "    * touched src/{lapic,park,vtsc}.rs ?  -> run T3 perf locally:  scripts/test.sh ff-demo-long ff-repeat"
 echo "    * touched src/build.rs or a stack ?   -> run bake-repeat locally: scripts/test.sh bake-repeat-insert-trim"
 
 if [ "$n_fail" -gt 0 ] || [ "$n_err" -gt 0 ]; then

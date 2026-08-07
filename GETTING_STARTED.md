@@ -36,7 +36,7 @@ tdvmm build myapp ./compose.yml
 # -> ~/.tdvmm/artifacts/myapp.tdvmm
 ```
 
-The worked examples in this guide (`demo`, `insert-trim`, `faultlab`, …) live
+The worked examples in this guide (`demo`, `insert-trim`, `pgcluster`, …) live
 under `testdata/stacks/` in a repo checkout, so clone the repo to follow along.
 This guide uses the bundled demo (Postgres + Redis + a small gRPC api/worker/client):
 
@@ -143,6 +143,11 @@ SDK. Add it to your compose file:
     build: ./driver               # a multi-stage Go build; see testdata/stacks/pgcluster
     depends_on: [postgres, api]
 ```
+
+The driver's `go.mod` has `replace github.com/mtsaas/tdvmm/sdk/go => ./sdk`. The
+SDK is single-sourced in `sdk/go`; the bake stages a copy into the build context
+as `./sdk` so the offline (`GOPROXY=off`) build resolves it — nothing is copied
+under `testdata/`.
 
 Write the test with the Go SDK (`sdk/go`, package `tdvmm`):
 
@@ -276,8 +281,8 @@ tdvmm verify  demo   # check nothing changed; print its sha256
 ## Where to go next
 
 - `testdata/stacks/` — worked examples: `demo` (the full gRPC stack),
-  `insert-trim` (minimal), `faultlab` (faults), `webstack`, `svcchain`,
-  `pgcluster` (the driver-controlled test).
+  `insert-trim` (minimal), `pgcluster` (a partition-under-in-flight-write driver
+  test), `tigerbeetle` (a consensus kill-a-replica driver test).
 - `sdk/go/README.md` — the driver SDK API.
 - `CONTRIBUTING.md` — code layout and where to change things.
 - `ARCHITECTURE.md` — how tdvmm works inside.

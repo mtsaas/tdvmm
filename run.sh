@@ -4,7 +4,7 @@
 # (or stop the VMM from another terminal, e.g. `pkill tdvmm`).
 #
 # Boots a baked stack (default: spinner) via `tdvmm run`. Override the stack:
-#   STACK=webstack ./run.sh
+#   STACK=demo ./run.sh
 # For the minimal busybox clock guest instead:
 #   ./target/release/tdvmm boot --kernel testdata/kernel/vmlinux-6.1.128 \
 #     --initrd testdata/initramfs/initramfs.cpio.gz --mem 256 --ff off

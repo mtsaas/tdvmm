@@ -49,6 +49,7 @@ src/                 the VMM (the `tdvmm` binary)
 
 tdvmm-proto/          host <-> guest-agent wire types (shared crate)
 tdvmm-agent/          the tiny in-guest agent: serves ttyS1 + the container control socket (static musl)
+sdk/go/              the Go driver SDK — the ONE source of truth (driver stacks stage a copy in at bake time via `replace ... => ./sdk`; no copy is committed under testdata/)
 testdata/
   kernel/            the pinned kernel config + kernel.lock
   initramfs-alpine/  the in-RAM guest rootfs (overlay files, image/package pins)
@@ -106,8 +107,8 @@ A change that violates one is wrong even if it compiles and the tests pass.
 cargo build --release
 cargo test --release          # unit + protocol golden tests
 
-scripts/driver_test.sh        # end-to-end: the driver verdict contract (0 / 1 / 2)
 scripts/test.sh --fast        # the fast tier of the suite
+scripts/test.sh pgcluster-driver   # end-to-end: bake + run a self-testing driver stack
 ```
 
 If a change touches the bake pipeline, prove reproducibility directly: two

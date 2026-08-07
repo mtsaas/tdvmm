@@ -106,19 +106,9 @@ requires = ""
 cmd = "scripts/ff_repeat.sh 6 150"
 desc = "FLOOR(repeatability): ff_demo twice -> identical guest row sequence"
 
-[[test]]
-name = "corpus-webstack"
-tier = "T2"
-tags = ["perf-exclusive", "needs-bake"]
-timeout = 320
-requires = ""
-cmd = "scripts/corpus_test.sh webstack"
-desc = "representative corpus stack (chattiest: web+redis+postgres, dual health gates)"
-
-# NOTE: the standalone `healthgate` (health-gate stack) and `binds` (rwbind stack)
-# tests were retired with those stacks. Their coverage is preserved by the corpus:
-# depends_on service_healthy gating is exercised by corpus-webstack / corpus-demo /
-# svcchain; relative rw binds + named volumes by corpus-full (configpipeline).
+# NOTE: the corpus is now the flagship `demo` stack (corpus-demo). It exercises
+# depends_on service_healthy gating, build: contexts, and named/bind volumes
+# together, so the retired single-feature corpus stacks add nothing over it.
 
 [[test]]
 name = "corpus-demo"
@@ -150,15 +140,6 @@ cmd = "scripts/agent_double_build.sh"
 desc = "FLOOR(agent repro): two fresh-container builds of tdvmm-agent are byte-identical"
 
 [[test]]
-name = "corpus-full"
-tier = "T3"
-tags = ["perf-exclusive", "needs-bake"]
-timeout = 600
-requires = ""
-cmd = "scripts/corpus_test.sh configpipeline svcchain"
-desc = "remaining corpus (configpipeline + svcchain); with T2's webstack + corpus-demo = full corpus"
-
-[[test]]
 name = "bake-repeat-insert-trim"
 tier = "T3"
 tags = ["needs-bake"]
@@ -182,17 +163,8 @@ tier = "T3"
 tags = ["perf-exclusive", "needs-bake"]
 timeout = 900
 requires = ""
-cmd = "scripts/artifact_test.sh insert-trim svcchain"
+cmd = "scripts/artifact_test.sh insert-trim"
 desc = "FLOOR(artifact repro): .tdvmm bit-identical, inspect/verify, run offline, run==boot"
-
-[[test]]
-name = "compare-stacks"
-tier = "T3"
-tags = ["perf-exclusive", "needs-bake"]
-timeout = 600
-requires = ""
-cmd = "scripts/compare_stacks.sh insert-trim svcchain 6"
-desc = "FLOOR(per-hop budget): per-hop perf gate + side-by-side (insert-trim vs svcchain)"
 
 [[test]]
 name = "ff-demo-long"
@@ -204,15 +176,6 @@ cmd = "scripts/ff_demo.sh 24 300"
 desc = "long-horizon FF (24 vhours): cadence + per-hop + speedup"
 
 [[test]]
-name = "driver-contract"
-tier = "T3"
-tags = ["needs-bake"]
-timeout = 900
-requires = ""
-cmd = "scripts/driver_test.sh"
-desc = "the driver verdict contract e2e: finish(0)->0, finish(nonzero)->1, socket fault ops->0, never-finish->2 (wall clock), and an UNDRIVEN run unchanged"
-
-[[test]]
 name = "pgcluster-driver"
 tier = "T3"
 tags = ["needs-bake"]
@@ -220,6 +183,15 @@ timeout = 900
 requires = "testdata/stacks/pgcluster/compose.yml"
 cmd = "mkdir -p .tdvmm-test-results && ./target/release/tdvmm build pgcluster testdata/stacks/pgcluster/compose.yml -o .tdvmm-test-results/pgcluster.tdvmm --no-progress && ./target/release/tdvmm run .tdvmm-test-results/pgcluster.tdvmm --wall-timeout 780 --mem 3072"
 desc = "flagship driver test: a Postgres pair with synchronous replication, partitioned by its own driver container WHILE a write is in flight -> the commit must block, then complete after heal"
+
+[[test]]
+name = "tigerbeetle-driver"
+tier = "T3"
+tags = ["needs-bake"]
+timeout = 900
+requires = "testdata/stacks/tigerbeetle/compose.yml"
+cmd = "mkdir -p .tdvmm-test-results && ./target/release/tdvmm build tigerbeetle testdata/stacks/tigerbeetle/compose.yml -o .tdvmm-test-results/tigerbeetle.tdvmm --no-progress && ./target/release/tdvmm run .tdvmm-test-results/tigerbeetle.tdvmm --wall-timeout 300 --mem 10240"
+desc = "consensus driver test: a 3-replica TigerBeetle cluster whose driver KILLS a minority replica with a transfer batch in flight -> commits keep landing on the quorum, then the replica restarts and rejoins"
 
 [[test]]
 name = "workload-realtime"

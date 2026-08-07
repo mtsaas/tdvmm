@@ -806,10 +806,7 @@ mod tests {
     /// byte-identical output. This pins emitter fidelity against the real corpus.
     #[test]
     fn round_trips_committed_locks_byte_for_byte() {
-        let stacks = [
-            "insert-trim", "svcchain", "webstack", "configpipeline", "faultlab",
-            "demo",
-        ];
+        let stacks = ["insert-trim", "demo", "pgcluster", "tigerbeetle"];
         for stack in stacks {
             let path = format!("testdata/stacks/{stack}/compose.lock.yml");
             let raw = std::fs::read_to_string(&path)

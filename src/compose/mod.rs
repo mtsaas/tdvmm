@@ -102,18 +102,18 @@ mod tests {
             "docker.io/library/postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777";
         const PG_PIN: &str =
             "localhost/tdvmm-postgres-57c72fd2a128@sha256:cbf217007d0742829dc120c3ea9cd2621e90eb3adfeaf6684e87ce268a2ca368";
-        for stack in ["faultlab", "svcchain", "configpipeline"] {
+        for stack in ["insert-trim", "demo"] {
             let compose_path = format!("testdata/stacks/{stack}/compose.yml");
             let raw = std::fs::read_to_string(&compose_path).unwrap();
             let doc: Value = serde_yaml::from_str(&raw).unwrap();
             let mut digests: HashMap<String, String> = HashMap::new();
             digests.insert(PG.into(), PG_PIN.into());
-            // configpipeline: a build: service (worker) pinned by its output tag.
+            // demo: three build: services share one output image, pinned by its tag.
             digests.insert(
-                "localhost/tdvmm-configpipeline-worker:corpus".into(),
-                "localhost/tdvmm-configpipeline-worker@sha256:c05937c63df870e5f337543187d64a50975ec54794df45ed06e4182348dc4422".into(),
+                "localhost/tdvmm-demo-app:demo".into(),
+                "localhost/tdvmm-demo-app@sha256:b40cb88833813fc1ffdb52d014420e0ff408749a56b1471b0508ee19306db9b4".into(),
             );
-            let project = format!("tdvmm_{}", stack.replace('-', "_"));
+            let project = format!("tdvmm_{stack}");
             let out = emit_lock(EmitLockRequest {
                 doc: &doc,
                 compose_path: Path::new(&compose_path),
