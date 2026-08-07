@@ -1,74 +1,48 @@
-# tdvmm -- TigerBeetle cluster stack (3 replicas + a demo client).
+# tdvmm — TIGERBEETLE: a driver-controlled consensus fault test.
 #
-# ============================================================================
-#  STATUS: PASSING. The 3-replica cluster forms and runs.
+# A 3-replica TigerBeetle consensus cluster (replica0/1/2) doing double-entry
+# accounting, plus a DRIVER container that tests it from the inside. There is no
+# scenario file and no `tdvmm test` verb: the driver drives real transfers with
+# the image's own REPL, injects a fault over the control socket (bind-mounted into
+# every service automatically), and ends the run with a verdict.
 #
-#  Post-doorbell (commit b60dde8: tick doorbell + wedge observability), the
-#  cluster bakes, boots, and BRINGS UP all three replicas: they form a quorum,
-#  elect a primary, and synchronize clocks. The client opens two accounts and,
-#  each interval, moves money A->B and reads the balances back -- double-entry
-#  holds (debits == credits, e.g. 83500/83500). Replicas 0/1/2 stay in NORMAL
-#  status for a full virtual hour, then shut down cleanly at the
-#  --max-virtual-time horizon.
+#   tdvmm build tigerbeetle ./compose.yml
+#   tdvmm run tigerbeetle --wall-timeout 300 --mem 10240   # 0 = PASS, 1 = FAIL
 #
-#  The one loud observable is a flood of `loop_run_for_ns too slow` warnings.
-#  These are NOT a wedge and NOT a fast-forward bug: the idle time-jump is exact
-#  (tdvmm advances virtual time straight to the next armed deadline). The warnings
-#  are the guest truthfully measuring real single-vCPU contention -- four busy
-#  co-tenants (3 replicas + client) serialized on ONE vCPU, exactly as they
-#  would on real single-core hardware. Their magnitude is host-load-dependent.
-#  Execution time (not just idle) is real time by design -- see ARCHITECTURE.md
-#  section 12.
-# ============================================================================
+# What it proves is the point of a consensus cluster: it tolerates a MINORITY
+# failure. The driver opens two accounts, moves money A->B, then KILLS one replica
+# (a minority of three) with a transfer batch in flight. Commits must keep landing
+# on the surviving quorum; the killed replica must really be down; and after a
+# restart it must rejoin and accounting must continue. Kill/restart is the stack's
+# first-class fault (stable addresses — below — make a restarted replica reachable
+# at the same IP, so it rejoins the quorum).
 #
-# WHAT THIS IS
-#   A 3-replica TigerBeetle consensus cluster (replica0/1/2) doing double-entry
-#   accounting, plus a REPL-based client that opens two accounts and, each
-#   virtual interval, moves money A->B and reads the balances back. The scenario
-#   (tigerbeetle.yml) kills a replica, proves the client keeps transacting on the
-#   surviving quorum, then heals it -- the whole point of a consensus cluster.
+# CLOSED-WORLD NOTES (measured on the host with this exact image):
 #
-# FINDINGS (measured on the host with this exact image, runc + netavark +
-# seccomp=unconfined, which mirrors the guest's podman/DNS/io_uring path):
+#   ADDRESSING. TigerBeetle's --addresses accepts only IPv4/IPv6 LITERALS; service
+#   names are rejected. Each replica resolves the replica service names to their
+#   netavark IPs at start via getent, in fixed replica order (see replica.sh); the
+#   driver uses the static IPs directly. No host networking, no hard-coded host IPs.
 #
-#   1. ADDRESSING. TigerBeetle's --addresses accepts only IPv4/IPv6 LITERALS;
-#      service names are rejected ("--addresses: invalid IPv4 or IPv6 address").
-#      We stay closed-world by resolving the replica SERVICE NAMES to their
-#      netavark IPs at start via getent, in fixed replica order (see replica.sh
-#      / client.sh). The cluster forms, elects a primary, and synchronizes
-#      clocks. No host networking, no hard-coded IPs.
+#   RAM. TigerBeetle statically commits ~1.5 GiB of heap per replica at init (a
+#   compile-time floor; no runtime flag lowers it). Three replicas need ~4.6 GiB
+#   of anonymous heap; with the base runtime, the RAM-backed container storage,
+#   and the driver, `--mem 6144` OOMs the guest at start — run with `--mem 10240`.
 #
-#   2. RAM. TigerBeetle statically commits ~1537 MiB of anonymous (private-dirty,
-#      unreclaimable) heap PER replica at init -- even with --development and
-#      --cache-grid=64MiB (the smallest knobs it exposes; the ~1.5 GiB floor is
-#      compile-time, no runtime flag lowers it). Three replicas need ~4.6 GiB
-#      before the base runtime, the client, or the (RAM-backed tmpfs) data files.
-#      The high-memory split (guest RAM across the 32-bit MMIO gap) lifted the old
-#      3072 MiB cap; this stack runs with `--mem 6144`+, so RAM no longer blocks.
+#   IO_URING. Blocked by podman's default seccomp profile; the closed-world guest
+#   kernel has CONFIG_IO_URING=y, so every TigerBeetle service unconfines seccomp.
 #
-#   3. FAST-FORWARD. Idle replicas do NOT busy-poll the CPU (~0.25% of one core;
-#      they HLT), which is good. BUT each replica wakes ~103 times/second even
-#      when idle -- TigerBeetle's ~100 Hz VSR consensus tick
-#      (ping/heartbeat/clock-sync), a compile-time constant with no CLI knob. A
-#      guest woken ~100x/s per replica fast-forwards poorly: speedup is
-#      cadence-bound, not idle-collapsed (the same reason the demo dropped Redis
-#      to --hz 1 and stretched Postgres timers).
-#
-# Image pinned by digest (closed world): resolve `ghcr.io/tigerbeetle/tigerbeetle`
-# tag 0.17.7 -> the index digest below (amd64, Alpine 3.24 + busybox base,
-# entrypoint `tini -- /tigerbeetle`, binary at /tigerbeetle, ~28 MiB).
+# Image pinned by digest (closed world): ghcr.io/tigerbeetle/tigerbeetle 0.17.7
+# (amd64, Alpine 3.24 + busybox base, binary at /tigerbeetle, ~28 MiB).
 
 services:
   replica0:
     image: ghcr.io/tigerbeetle/tigerbeetle@sha256:177d6fbd12a3dab1782212cdaf034b5f9cb1bf73804b66116980bfe1064cc3b6
-    # io_uring is blocked by podman's DEFAULT seccomp profile (TigerBeetle then
-    # dies with "io_uring is not available ... SystemOutdated"); the closed-world
-    # guest kernel has CONFIG_IO_URING=y, so unconfine seccomp to let it through.
     security_opt: ["seccomp=unconfined"]
     entrypoint: ["/bin/sh", "/scripts/replica.sh", "0"]
     # Static IP on the user-defined `tb` network: a container's static address is
     # part of its stored network config, so netavark re-applies it on every
-    # `podman start` -- including after a `kill:` fault. Dynamic IPAM would hand a
+    # `podman start` — including after a `kill:` fault. Dynamic IPAM would hand a
     # restarted replica a NEW ip, and since TigerBeetle fixes --addresses at start
     # (IP literals only, resolved once via getent), its peers would keep dialing
     # the dead old address and it could never rejoin the quorum. Stable addresses
@@ -93,19 +67,18 @@ services:
     volumes:
       - ./replica.sh:/scripts/replica.sh:ro
 
-  client:
-    image: ghcr.io/tigerbeetle/tigerbeetle@sha256:177d6fbd12a3dab1782212cdaf034b5f9cb1bf73804b66116980bfe1064cc3b6
+  driver:
+    build:
+      context: ./driver
+      dockerfile: Containerfile
+    image: localhost/tdvmm-tigerbeetle-driver:corpus
+    # The driver runs the cluster's REPL (io_uring), so it unconfines seccomp too.
     security_opt: ["seccomp=unconfined"]
-    entrypoint: ["/bin/sh", "/scripts/client.sh"]
     networks: { tb: { ipv4_address: 10.240.0.20 } }
     depends_on:
       - replica0
       - replica1
       - replica2
-    environment:
-      INTERVAL_SECONDS: "${TDVMM_INTERVAL:-3600}"
-    volumes:
-      - ./client.sh:/scripts/client.sh:ro
 
 # User-defined bridge network with a fixed subnet, so per-service ipv4_address is
 # honored and stable across container restarts (closed-world: this is an internal

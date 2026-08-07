@@ -1,0 +1,23 @@
+# tdvmm tigerbeetle — the driver image.
+#
+# The container that TESTS the cluster. A static Go binary (the tdvmm Go SDK,
+# staged under ./sdk at bake time from the single-sourced sdk/go) drives the
+# harness; the final stage IS the pinned TigerBeetle image, so the driver runs the
+# cluster's own REPL (/tigerbeetle) to move money and read balances. Nothing else.
+#
+# Built HOST-SIDE at bake time. Both base images are DIGEST-PINNED; the Go build is
+# CGO-free and -trimpath, so two --no-cache bakes are byte-identical.
+
+# --- build stage: compile the static driver binary --------------------------
+FROM docker.io/library/golang@sha256:457d8584db11412777c4196146b8060fdaabe0b0ba7b62c553d08e07d8c22bd3 AS build
+WORKDIR /src
+COPY go.mod ./
+COPY sdk/ ./sdk/
+COPY driver.go ./
+ENV CGO_ENABLED=0 GOFLAGS=-mod=mod GOPROXY=off GOTOOLCHAIN=local
+RUN go build -trimpath -ldflags "-s -w -buildid=" -o /driver .
+
+# --- final stage: the TigerBeetle image (provides /tigerbeetle) + the binary ---
+FROM ghcr.io/tigerbeetle/tigerbeetle@sha256:177d6fbd12a3dab1782212cdaf034b5f9cb1bf73804b66116980bfe1064cc3b6
+COPY --from=build /driver /usr/local/bin/driver
+ENTRYPOINT ["/usr/local/bin/driver"]

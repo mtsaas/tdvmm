@@ -10,6 +10,7 @@ services:
     volumes:
     - /var/lib/tdvmm-stack/binds/postgres/schema.sql:/docker-entrypoint-initdb.d/10-schema.sql:ro
     - /run/tdvmm/events:/run/tdvmm/events:rw
+    - /run/tdvmm/ctl:/run/tdvmm/ctl:rw
   service:
     depends_on:
     - postgres
@@ -26,3 +27,4 @@ services:
     volumes:
     - /var/lib/tdvmm-stack/binds/service/service-loop.sh:/opt/tdvmm/service-loop.sh:ro
     - /run/tdvmm/events:/run/tdvmm/events:rw
+    - /run/tdvmm/ctl:/run/tdvmm/ctl:rw

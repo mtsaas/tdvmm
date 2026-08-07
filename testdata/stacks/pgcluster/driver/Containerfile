@@ -1,0 +1,24 @@
+# tdvmm pgcluster — the driver image.
+#
+# The container that TESTS the cluster. A static Go binary (the tdvmm Go SDK,
+# vendored under ./sdk) drives the harness; psql (postgresql16-client) talks to
+# Postgres over its wire protocol. Nothing else.
+#
+# Built HOST-SIDE at bake time. Both base images are DIGEST-PINNED and the apk is
+# version-pinned; the Go build is CGO-free and -trimpath, so two --no-cache bakes
+# are byte-identical.
+
+# --- build stage: compile the static driver binary --------------------------
+FROM docker.io/library/golang@sha256:457d8584db11412777c4196146b8060fdaabe0b0ba7b62c553d08e07d8c22bd3 AS build
+WORKDIR /src
+COPY go.mod ./
+COPY sdk/ ./sdk/
+COPY driver.go ./
+ENV CGO_ENABLED=0 GOFLAGS=-mod=mod GOPROXY=off GOTOOLCHAIN=local
+RUN go build -trimpath -ldflags "-s -w -buildid=" -o /driver .
+
+# --- final stage: psql + the binary -----------------------------------------
+FROM docker.io/library/alpine@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
+RUN apk add --no-cache postgresql16-client=16.14-r0
+COPY --from=build /driver /usr/local/bin/driver
+ENTRYPOINT ["/usr/local/bin/driver"]

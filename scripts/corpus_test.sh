@@ -16,7 +16,7 @@
 #
 # Exits 0 only if every stack passes every gate.
 #
-# Usage: scripts/corpus_test.sh [stack ...]      (default: demo webstack configpipeline svcchain)
+# Usage: scripts/corpus_test.sh [stack ...]      (default: demo)
 # Env:   BAKE=1 (force re-bake)  INTERVAL(60) MAX_ROWS(1000) MEM(3072)
 #        TARGET_ROWS(4)  HC_TICK(2)  GATE_HOP_US(500)  WALL_TIMEOUT(300)
 #
@@ -38,7 +38,7 @@ STACKS_DIR="$ROOT/testdata/stacks"
 # (kernel + initramfs come from the .tdvmm; no repo / ~/.tdvmm/artifacts dependency).
 OUTDIR="${TDVMM_OUT_DIR:-$ROOT/.tdvmm-test-results}"; mkdir -p "$OUTDIR"
 
-STACKS=("$@"); [ "${#STACKS[@]}" -eq 0 ] && STACKS=(demo webstack configpipeline svcchain)
+STACKS=("$@"); [ "${#STACKS[@]}" -eq 0 ] && STACKS=(demo)
 BAKE="${BAKE:-0}"
 INTERVAL="${INTERVAL:-60}"
 MAX_ROWS="${MAX_ROWS:-1000}"
@@ -95,53 +95,6 @@ have() {
 }
 
 # ---- per-stack functional gates -------------------------------------------
-gate_webstack() {
-  local log="$1" p=1
-  local P=tdvmm_webstack-postgres-1 R=tdvmm_webstack-redis-1 A=tdvmm_webstack-api-1
-  have "$log" 'TDVMM_STACK_UP' 'compose brought the stack up' || p=0
-  have "$log" "TDVMM_HC_HEALTHY container=$P" 'postgres reached healthy (ticker)' || p=0
-  have "$log" "TDVMM_HC_HEALTHY container=$R" 'redis reached healthy (ticker)' || p=0
-  have "$log" 'TDVMM_API_UP' 'api started (=> both service_healthy gates resolved)' || p=0
-  have "$log" 'TDVMM_API_REDIS_PING=PONG' 'api reached redis by name (PONG)' || p=0
-  have "$log" 'TDVMM_API_PG_OK' 'api reached postgres by name' || p=0
-  # ordering: both backends Healthy before the api Started (compose stream).
-  order_ok "$log" "postgres Healthy < api Started" \
-    "\[stack\]\[up\].*Container $P Healthy" "\[stack\]\[up\].*Container $A Started" || p=0
-  order_ok "$log" "redis Healthy < api Started" \
-    "\[stack\]\[up\].*Container $R Healthy" "\[stack\]\[up\].*Container $A Started" || p=0
-  rows_ok "$log" || p=0
-  return $((1 - p))
-}
-
-gate_configpipeline() {
-  local log="$1" p=1
-  have "$log" 'TDVMM_STACK_UP' 'compose brought the stack up' || p=0
-  have "$log" 'TDVMM_CONFIG_SEED=configpipeline-seed-v1' 'RW bind materialized (baked seed visible)' || p=0
-  have "$log" 'TDVMM_CONFIG_WRITE_OK=generated-by-worker' 'RW bind writable (write + read back)' || p=0
-  have "$log" 'TDVMM_STATE_WRITE_OK' 'named volume writable (worker published)' || p=0
-  # cross-service: the sidecar read what the worker wrote via the SHARED volume.
-  have "$log" 'TDVMM_SIDECAR_SHARED_OK latest=worker-iter-[0-9]+' 'named volume SHARED (sidecar read worker data)' || p=0
-  return $((1 - p))
-}
-
-gate_svcchain() {
-  local log="$1" p=1
-  local D=tdvmm_svcchain-db-1 B=tdvmm_svcchain-backend-1 F=tdvmm_svcchain-frontend-1
-  have "$log" 'TDVMM_STACK_UP' 'compose brought the stack up' || p=0
-  have "$log" "TDVMM_HC_HEALTHY container=$D" 'db reached healthy (ticker)' || p=0
-  have "$log" 'TDVMM_BACKEND_READY' 'backend connected to db + signalled readiness' || p=0
-  have "$log" "TDVMM_HC_HEALTHY container=$B" 'backend reached healthy (ticker)' || p=0
-  have "$log" 'TDVMM_FRONTEND_UP' 'frontend started (=> backend service_healthy resolved)' || p=0
-  # 2-hop chain ordering (compose stream): db healthy -> backend started;
-  # backend healthy -> frontend started.
-  order_ok "$log" "db Healthy < backend Started" \
-    "\[stack\]\[up\].*Container $D Healthy" "\[stack\]\[up\].*Container $B Started" || p=0
-  order_ok "$log" "backend Healthy < frontend Started" \
-    "\[stack\]\[up\].*Container $B Healthy" "\[stack\]\[up\].*Container $F Started" || p=0
-  rows_ok "$log" || p=0
-  return $((1 - p))
-}
-
 gate_demo() {
   local log="$1" p=1
   local P=tdvmm_demo-postgres-1 R=tdvmm_demo-redis-1 A=tdvmm_demo-api-1

@@ -1,0 +1,80 @@
+# tdvmm — PGCLUSTER: the driver-controlled test reference.
+#
+# A two-node Postgres cluster (primary + streaming standby) and a DRIVER
+# container that tests it from the inside. There is no scenario file and no
+# `tdvmm test` verb: the driver reaches the harness over the control socket
+# (bind-mounted into every service automatically), injects a network partition
+# into its OWN cluster, and ends the run with a verdict.
+#
+#   tdvmm build pgcluster ./compose.yml
+#   tdvmm run pgcluster --wall-timeout 900     # 0 = PASS, 1 = FAIL
+#
+# What it proves is the Jepsen shape: a write is IN FLIGHT — a transaction is
+# open on the primary with an uncommitted INSERT — when the replication link is
+# cut. Because synchronous replication is on, the COMMIT that follows must reach
+# the standby to succeed, so the partition is observable as a hung commit rather
+# than as a lost row. Heal, and the same commit completes.
+#
+# Two services reuse the ONE pinned Postgres digest (image-based, closed world);
+# the driver is a small build: context (a static Go binary + psql), the same
+# reproducible pattern the demo stack uses.
+
+services:
+  pg-primary:
+    image: docker.io/library/postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+    environment:
+      POSTGRES_HOST_AUTH_METHOD: trust
+      POSTGRES_DB: appdb
+    shm_size: 256m
+    volumes:
+      # Replication connections match `replication` in pg_hba, not `all`, so the
+      # image's trust line is not enough for a remote standby. Runs once, at
+      # initdb, before the real server starts.
+      - ./primary-hba.sh:/docker-entrypoint-initdb.d/10-replication-hba.sh:ro
+    # Quiet Postgres' idle background timers so an idle guest parks (HLT) instead
+    # of waking ~10x/s — that is what lets fast-forward collapse the waits.
+    # NOTE: synchronous_standby_names is deliberately NOT set here. It is enabled
+    # by the driver once the standby is actually streaming, because a primary
+    # that demands a synchronous standby before one exists cannot commit at all —
+    # including the driver's own CREATE TABLE.
+    command:
+      - postgres
+      - -c
+      - bgwriter_delay=10000
+      - -c
+      - wal_writer_delay=10000
+      - -c
+      - checkpoint_timeout=3600
+      - -c
+      - autovacuum=off
+      - -c
+      - wal_level=replica
+      - -c
+      - max_wal_senders=4
+      - -c
+      - wal_sender_timeout=0
+
+  pg-standby:
+    image: docker.io/library/postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+    depends_on:
+      - pg-primary
+    # The image's entrypoint would initdb a fresh, unrelated database. A standby
+    # is instead cloned from the primary with pg_basebackup, so it runs its own
+    # entrypoint — as root, dropping to postgres with su-exec (see standby.sh).
+    entrypoint: ["/bin/sh", "/opt/standby.sh"]
+    shm_size: 256m
+    volumes:
+      - ./standby.sh:/opt/standby.sh:ro
+
+  driver:
+    build:
+      context: ./driver
+      dockerfile: Containerfile
+    image: localhost/tdvmm-pgcluster-driver:corpus
+    depends_on:
+      - pg-primary
+      - pg-standby
+    environment:
+      PGHOST: pg-primary
+      PGUSER: postgres
+      PGDATABASE: appdb

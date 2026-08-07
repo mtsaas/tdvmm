@@ -1,24 +1,33 @@
-//! Run-stop bookkeeping: why the vCPU loop stopped, and the process exit code
-//! that maps to.
+//! Run-stop bookkeeping: why the vCPU loop stopped, and the process exit code it
+//! maps to. Each distinct stop reason maps to a distinct code (see `StopReason`).
 //!
-//! Process exit codes. A testing platform wants the *cause* of a stop to be a
-//! first-class, machine-readable outcome, so each distinct stop reason maps to a
-//! distinct code (see `StopReason` and the shutdown-cause logging near the exit
-//! handlers).
+//! The shared 0/1/2/3 contract:
+//!
+//! * **0** — the run completed cleanly: a driver's `finish(0)`, or a driverless
+//!   guest that stopped on its own.
+//! * **1** — FAIL: a driver called `finish` with a nonzero verdict. Its raw code
+//!   is reported in the summary and `--metrics-out`, not returned (see
+//!   [`crate::driver`]).
+//! * **2** — infrastructure: a bad artifact, an unreachable agent, or the
+//!   wall-clock safety timeout.
+//! * **3** — a VMM policy stop: the `--max-virtual-time` horizon fired. Also
+//!   `build`'s REJECTED code.
 
 /// Guest-initiated stop: the guest shut down or rebooted on its own (triple
-/// fault / system event, e.g. panic+reboot or `reboot -f`). The "normal" way a
-/// test guest ends.
+/// fault / system event). Also the code a passing driver run returns.
 pub(crate) const EXIT_GUEST_STOP: i32 = 0;
+/// A passing verdict; an alias of [`EXIT_GUEST_STOP`].
+pub(crate) const EXIT_PASS: i32 = EXIT_GUEST_STOP;
+/// FAIL: a driver declared a nonzero verdict.
+pub(crate) const EXIT_FAIL: i32 = 1;
 /// A VMM policy stop: `--max-virtual-time` horizon reached. Distinct from a
 /// guest-initiated stop so a harness can tell "the guest ended" from "we cut it
 /// off at the virtual-time budget".
 pub(crate) const EXIT_HORIZON: i32 = 3;
-/// Infrastructure-error exit code for `tdvmm test` (the CI contract): 0 = all
-/// assertions passed, 1 = an assertion / readiness failure (from the scenario
-/// verdict), 2 = an infrastructure error (bad scenario, or a boot/bake/agent
-/// failure — the tool broke, not your stack).
-pub(crate) const EXIT_TEST_INFRA: i32 = 2;
+/// Infrastructure error: a bad/unreadable artifact, an agent that never came up,
+/// or the wall-clock safety timeout. The timeout path exits the process directly,
+/// so it has no [`StopReason`].
+pub(crate) const EXIT_INFRA: i32 = 2;
 
 /// Why the run loop stopped. Mapped to a distinct process exit code (above) and
 /// logged distinguishably at the stop site (guest-initiated vs VMM policy).
@@ -39,9 +48,9 @@ pub(crate) enum StopReason {
     /// `--max-virtual-time` horizon fired as a `(vtsc, StopRun)` queue event.
     /// VMM policy stop, deterministic in virtual time.
     Horizon,
-    /// TEST-1a: the `--scenario` reached a verdict (all steps done, or a failure).
-    /// The process exit code comes from the scenario verdict, not `exit_code()`.
-    Scenario,
+    /// A container called `finish` on the control socket: the run has a verdict.
+    /// The process exit code comes from that verdict, not `exit_code()`.
+    DriverFinish,
 }
 
 impl StopReason {
@@ -51,9 +60,9 @@ impl StopReason {
             | StopReason::GuestSystemEvent
             | StopReason::GuestHalt => EXIT_GUEST_STOP,
             StopReason::Horizon => EXIT_HORIZON,
-            // Placeholder: a scenario run's real exit code is the verdict's (see
-            // `RunOutcome` / `ScenarioEngine::finalize`); this is never used.
-            StopReason::Scenario => EXIT_GUEST_STOP,
+            // Placeholder: a driven run's real exit code is the verdict's (see
+            // `driver::Verdict::exit_code`); this is never used.
+            StopReason::DriverFinish => EXIT_PASS,
         }
     }
 
@@ -65,7 +74,7 @@ impl StopReason {
             StopReason::GuestSystemEvent => "guest_system_event",
             StopReason::GuestHalt => "guest_halt",
             StopReason::Horizon => "horizon",
-            StopReason::Scenario => "scenario",
+            StopReason::DriverFinish => "driver_finish",
         }
     }
 
@@ -76,14 +85,14 @@ impl StopReason {
             StopReason::GuestSystemEvent => "guest requested reset or shutdown",
             StopReason::GuestHalt => "guest halted (poweroff)",
             StopReason::Horizon => "--max-virtual-time horizon reached",
-            StopReason::Scenario => "scenario reached a verdict",
+            StopReason::DriverFinish => "a container finished the run with a verdict",
         }
     }
 }
 
-/// The result of a full boot+run: why it stopped, and the process exit code. For
-/// `boot`/`run` the code is `stop.exit_code()`; for `test` it is the scenario
-/// verdict's code (0 pass / 1 assertion fail / 2 infrastructure).
+/// The result of a full boot+run: why it stopped, and the process exit code —
+/// `stop.exit_code()`, except for a run a container finished, where the code is
+/// that verdict's (see [`crate::driver`]).
 pub(crate) struct RunOutcome {
     #[allow(dead_code)]
     pub(crate) stop: StopReason,

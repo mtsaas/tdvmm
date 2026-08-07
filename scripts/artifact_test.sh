@@ -20,7 +20,7 @@
 #
 # Exits 0 only if every gate passes.
 #
-# Usage: scripts/artifact_test.sh [stack ...]     (default: insert-trim svcchain)
+# Usage: scripts/artifact_test.sh [stack ...]     (default: insert-trim)
 # Env:   MEM(3072)  INTERVAL(3)  MAX_ROWS(5)  HORIZON(24s)  WALL_TIMEOUT(120)
 #        GATE_HOP_US(500)
 set -uo pipefail
@@ -36,7 +36,7 @@ CACHE="${TDVMM_TEST_CACHE:-$ROOT/.tdvmm-tmp/tdvmm-cache}"; mkdir -p "$CACHE"
 # testdata/kernel/). Gate 8's raw boot reads it; the first build below populates it.
 KERNEL="$CACHE/kernel/vmlinux-6.1.128"
 
-STACKS=("$@"); [ "${#STACKS[@]}" -eq 0 ] && STACKS=(insert-trim svcchain)
+STACKS=("$@"); [ "${#STACKS[@]}" -eq 0 ] && STACKS=(insert-trim)
 MEM="${MEM:-3072}"
 INTERVAL="${INTERVAL:-3}"
 MAX_ROWS="${MAX_ROWS:-5}"

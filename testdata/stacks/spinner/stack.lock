@@ -3,12 +3,12 @@ stack     spinner
 project   tdvmm_spinner
 mem_mib   3072
 ram_estimate_mib  1044
-compose_lock_sha256  d961b1375e964b35119e2d4fe780b3535066cf9ff365c73356b7efb5d6d9398a
-initramfs_sha256     960ac129a6cd41416f17ab71f7645bf9aaa7b393127949707dbd3c0dfc4b7483  initramfs-alpine-spinner.cpio.gz
-agent_sha256         809d48451b49084a84b43b153e88219dcf52f0793437a51720dbdbf659082424  tdvmm-agent
+compose_lock_sha256  053ecee1c7cf265e62dbcf8aa8b350782063b73d82fc47e1d0141b88937c1942
+initramfs_sha256     3e0e468c0030acc1a5bcfb99ec15c48cd819d0b2721c058ddf8d2707554f5c99  initramfs-alpine-spinner.cpio.gz
+agent_sha256         1e01d9ccc767b05de3e42b657a0240666d4c8daf83a329061c17d270bb63a7f0  tdvmm-agent
 builder_image        docker.io/library/alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
 builder_image        docker.io/library/debian:bookworm-slim@sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e
 builder_image        docker.io/library/rust:1.97-alpine3.22@sha256:b348cb409ac0a73de15065997a360063cf87465574a15e3e4469862cb8996f02
   image  policy=plain   upstream=docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616  diffid=sha256:0958e0fef2d6a31e1325b8bfecd99dead933363682d69850a7606599023751bc  size_mib=4
   image  policy=plain   upstream=docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616  diffid=sha256:0958e0fef2d6a31e1325b8bfecd99dead933363682d69850a7606599023751bc  size_mib=4
-tdvmm_sha256          efc7d39590abf8d4840e19fc2bd9f13ba8266324eccb214c33d363ad91ab39d8  spinner.tdvmm
+tdvmm_sha256          888eaa60b3e77711bd22c538b572db72b1da001974388df04d3c63d873fcf64d  spinner.tdvmm

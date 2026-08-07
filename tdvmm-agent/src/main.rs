@@ -1,30 +1,28 @@
 //! `tdvmm-agent` — the guest-side control-channel executor.
 //!
-//! A tiny STATIC (musl) binary baked into every `.tdvmm`, running OUTSIDE the
-//! workload containers. It is the guest end of the modeled control channel: the
-//! 2nd 16550 (COM2 / ttyS1). Protocol: line-delimited JSON ([`tdvmm_proto`]), one
-//! request per line in, one reply per line out.
-//!
-//! **Fast-forward transparency is the whole point of the transport:** the agent
-//! BLOCKS reading `/dev/ttyS1`. A blocked read arms no timer and generates no
-//! wakes, so an idle guest with the agent baked in fast-forwards exactly as it
-//! would without it. When the VMM delivers a command (at its scheduled virtual
-//! time) it raises IRQ3; the agent wakes, runs the command, writes one reply
-//! line, and blocks again.
+//! A static (musl) binary baked into every `.tdvmm`, running outside the workload
+//! containers. It speaks [`tdvmm_proto`] line-JSON over COM2/ttyS1 and blocks
+//! reading `/dev/ttyS1`; a blocked read arms no timer, so an idle guest with the
+//! agent baked in stays fast-forward-transparent. The VMM raises IRQ3 to deliver a
+//! command; the agent wakes, replies with one line, and blocks again.
 //!
 //! Ops: `ping`, `exec`, `containers`, `kill`, `stop`, `start`, `partition`,
-//! `heal`, `logs`. An unknown op is rejected. kill/stop/start WAIT for the
-//! container to reach its new state so a following census is deterministic.
-//! `logs` is a single BOUNDED read of a container's k8s-file log at a byte
-//! cursor — never a follow/tail (`-f` would defeat host fast-forward) — so the
-//! agent blocks again immediately after replying, exactly like every other op.
+//! `heal`, `logs`; an unknown op is rejected. `kill`/`stop`/`start` wait for the
+//! container to reach its new state; `logs` is a single bounded read at a byte
+//! cursor, never a follow/tail.
 //!
-//! Deps: `tdvmm-proto` + `serde_json` (+ `serde` derive, already transitive) +
-//! `std` ONLY. Raw-mode termios is done with a std-only inline-asm `ioctl`
-//! syscall — no `libc`.
+//! The agent also serves [`tdvmm_proto::CONTROL_SOCKET_PATH`], the same line JSON
+//! over a unix socket bind-mounted into every container: a container injects the
+//! host's faults through the same [`agent::Agent`] dispatch while its own requests
+//! are in flight, and ends the run with `finish`.
+//!
+//! Deps: `tdvmm-proto` + `serde_json` + `std` only; raw-mode termios uses a
+//! std-only inline-asm `ioctl`, no `libc`.
 
 use std::fs::OpenOptions;
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixListener;
 use std::process::ExitCode;
 
 use tdvmm_proto::Reply;
@@ -35,7 +33,7 @@ mod forwarder;
 mod sys;
 
 use agent::Agent;
-use bridge::{run_loop, write_line};
+use bridge::{run_loop, write_line, Sources};
 
 pub(crate) const AGENT_ID: &str = "tdvmm-agent/1";
 
@@ -47,9 +45,8 @@ pub(crate) const BUILD: &str = match option_env!("TDVMM_AGENT_BUILD") {
 };
 
 fn main() -> ExitCode {
-    // `tdvmm-agent forward` runs the egress SOCKS5h forwarder (COM4/ttyS3) instead
-    // of the control-channel loop. The guest init starts it as a SEPARATE process
-    // only on `tdvmm.egress=1`, so the default (no arg) path is unchanged.
+    // `tdvmm-agent forward` runs the egress forwarder (COM4/ttyS3) instead of the
+    // control-channel loop; the guest init starts it only on `tdvmm.egress=1`.
     if std::env::args().nth(1).as_deref() == Some("forward") {
         return forwarder::run();
     }
@@ -66,13 +63,10 @@ fn main() -> ExitCode {
         }
     };
 
-    // Raw mode is REQUIRED, not best-effort. The default tty line discipline ECHOes
-    // input, which would bounce every received command straight back to the VMM as
-    // spurious "reply" bytes and desync the line-delimited protocol; it also does
-    // canonical line-buffering and \n<->\r\n translation, so the bytes on the wire
-    // would no longer be what each side wrote. There is no usable fallback, so a
-    // failure here is fatal. (VMIN=1/VTIME=0 => a read blocks until >=1 byte, arming
-    // no timer, so it stays fast-forward-transparent.)
+    // Raw mode is required: the default line discipline would echo input back to
+    // the VMM as spurious reply bytes and rewrite the wire bytes (\n<->\r\n,
+    // canonical buffering), desyncing the protocol. VMIN=1/VTIME=0 keeps the read
+    // blocking with no timer armed. A failure here is fatal.
     if let Err(e) = sys::set_raw(file.as_raw_fd()) {
         eprintln!("tdvmm-agent: cannot set raw mode on {dev}: errno {e}");
         return ExitCode::FAILURE;
@@ -87,10 +81,9 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    // Event bridge (schema 3): a guest FIFO the workload containers write assertion
-    // events to. O_RDWR is load-bearing — the agent's open never blocks, a container
-    // `echo > fifo` never blocks, and poll never storms POLLHUP (the agent is always
-    // a writer). An absent FIFO degrades to control-only.
+    // Event bridge: a guest FIFO the workload containers write assertion events to.
+    // O_RDWR keeps the agent a writer, so its open never blocks and poll never
+    // storms POLLHUP. An absent FIFO degrades to control-only.
     let fifo_path = std::env::var("TDVMM_AGENT_FIFO")
         .unwrap_or_else(|_| tdvmm_proto::EVENT_FIFO_PATH.to_string());
     let fifo = match OpenOptions::new().read(true).write(true).open(&fifo_path) {
@@ -103,18 +96,52 @@ fn main() -> ExitCode {
 
     let mut agent = Agent::new();
 
-    // Proactive hello: the VMM's harness waits for this to mark the agent ready (no
-    // ping round-trip needed). Carries schema + build (the compat oracle). If it
+    // Control socket: bound before the hello, so "agent ready" implies "socket
+    // ready" and a container connecting the instant it starts is never refused.
+    let ctl = match bind_control_socket() {
+        Ok(l) => {
+            eprintln!(
+                "tdvmm-agent: control socket on {}",
+                tdvmm_proto::CONTROL_SOCKET_PATH
+            );
+            Some(l)
+        }
+        Err(e) => {
+            // Without the socket no container can drive the harness; keep serving
+            // ttyS1 so the console log says why a driver's connect failed.
+            eprintln!(
+                "tdvmm-agent: cannot bind {} ({e}); no container can control the harness",
+                tdvmm_proto::CONTROL_SOCKET_PATH
+            );
+            None
+        }
+    };
+
+    // Proactive hello: the host waits for this to mark the agent ready. If it
     // cannot be written the control channel is already dead, so give up.
     if let Err(e) = write_line(&mut writer, &Reply::hello(AGENT_ID, BUILD)) {
         eprintln!("tdvmm-agent: cannot write hello on {dev}: {e}");
         return ExitCode::FAILURE;
     }
 
-    // Two-source blocked poll: ttyS1 (control) + the event FIFO. An infinite-timeout
-    // poll arms no timer and generates no wakes, so fast-forward transparency holds.
-    run_loop(file, fifo, &mut writer, &mut agent);
+    // One blocked poll over every source: ttyS1, the event FIFO, and the control
+    // socket. An infinite-timeout poll arms no timer, keeping fast-forward
+    // transparent.
+    run_loop(Sources { control: file, events: fifo, ctl }, &mut writer, &mut agent);
     ExitCode::SUCCESS
+}
+
+/// Create the control directory and bind the listener inside it, world-read/write
+/// so a container running as a non-root user can still connect.
+fn bind_control_socket() -> std::io::Result<UnixListener> {
+    std::fs::create_dir_all(tdvmm_proto::CONTROL_DIR)?;
+    let _ = std::fs::remove_file(tdvmm_proto::CONTROL_SOCKET_PATH);
+    let listener = UnixListener::bind(tdvmm_proto::CONTROL_SOCKET_PATH)?;
+    std::fs::set_permissions(
+        tdvmm_proto::CONTROL_SOCKET_PATH,
+        std::fs::Permissions::from_mode(0o666),
+    )?;
+    Ok(listener)
 }
 
 // ============================================================================
@@ -307,6 +334,57 @@ mod tests {
         // An unknown kind is transport-passed as-is; the host decides policy.
         let unknown = parse_event(b"{\"kind\":\"weird\",\"name\":\"y\"}\n");
         assert_eq!(unknown.kind, "weird");
+    }
+
+    #[test]
+    fn the_fifo_cannot_forge_an_agent_originated_event() {
+        // A verdict and a fault trace must come from a command the agent actually
+        // SERVED on the control socket, never from a line anyone can echo into the
+        // shared pipe — otherwise `finish` would have a second, unserved path into
+        // the host that is unordered with respect to the commands it concludes.
+        let forged_finish = parse_event(b"{\"kind\":\"finish\",\"exit\":0}\n");
+        assert_eq!(forged_finish.kind, "invalid");
+        assert_eq!(forged_finish.exit, None, "the forged verdict is discarded, not passed on");
+        assert!(forged_finish.details.unwrap()["rejected"]
+            .as_str()
+            .unwrap()
+            .contains("reserved"));
+
+        let forged_ctl = parse_event(b"{\"kind\":\"ctl\",\"name\":\"kill\",\"ok\":true}\n");
+        assert_eq!(forged_ctl.kind, "invalid");
+    }
+
+    #[test]
+    fn first_finish_wins_and_a_second_is_refused() {
+        // The run has exactly one outcome. A second `finish` — a retry, or another
+        // container racing — must not be able to overwrite the recorded verdict.
+        let mut a = Agent::new();
+        let fin = |exit: i64| Request {
+            id: 1,
+            op: "finish".into(),
+            exit: Some(exit),
+            ..Default::default()
+        };
+        let first = a.handle(&fin(0));
+        assert_eq!(first.ok, Some(true));
+        assert!(a.accepted_finish(&fin(0), &first), "the first finish ends the run");
+
+        let second = a.handle(&fin(1));
+        assert_eq!(second.ok, Some(false));
+        assert!(second.error.as_deref().unwrap().contains("already finished"));
+        assert!(
+            !a.accepted_finish(&fin(1), &second),
+            "a refused finish must not emit a second terminal event"
+        );
+    }
+
+    #[test]
+    fn finish_defaults_to_pass_and_carries_a_message() {
+        let mut a = Agent::new();
+        // No `exit` means "passed" — `finish()` with no argument is the happy path.
+        let r = a.handle(&Request { id: 1, op: "finish".into(), ..Default::default() });
+        assert_eq!(r.ok, Some(true));
+        assert_eq!(r.stdout.as_deref(), Some("finish 0"));
     }
 
     #[test]

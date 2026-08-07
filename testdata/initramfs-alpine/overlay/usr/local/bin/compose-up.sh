@@ -33,6 +33,9 @@ for tok in $(cat /proc/cmdline 2>/dev/null); do
   case "$tok" in
     tdvmm.interval=*)  export TDVMM_INTERVAL="${tok#tdvmm.interval=}" ;;
     tdvmm.maxrows=*)   export TDVMM_MAXROWS="${tok#tdvmm.maxrows=}" ;;
+    # Lets one baked artifact exercise several driver behaviors (the verdict
+    # contract: pass / fail / never-finish), chosen per RUN via --cmdline.
+    tdvmm.drivermode=*) export TDVMM_DRIVERMODE="${tok#tdvmm.drivermode=}" ;;
     tdvmm.memsample=*) TDVMM_MEMSAMPLE="${tok#tdvmm.memsample=}" ;;
   esac
 done

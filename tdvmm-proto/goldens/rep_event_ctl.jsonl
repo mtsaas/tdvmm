@@ -1,0 +1,1 @@
+{"event":{"details":{"peer":"pg-standby","service":"pg-primary"},"kind":"ctl","name":"partition","ok":true},"seq":7}

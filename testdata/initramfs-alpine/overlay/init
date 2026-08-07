@@ -124,6 +124,13 @@ echo
 mkdir -p /run/tdvmm
 mkfifo -m 0666 /run/tdvmm/events 2>/dev/null || true
 
+# Control socket (schema 4): the DIRECTORY the agent binds its unix socket in,
+# bind-mounted read-write into every service so any container can drive the
+# harness (inject partitions/kills, and end the run with a verdict). Created
+# here so the mount source exists before compose creates containers; the agent
+# binds the socket inside it before announcing itself ready.
+mkdir -p -m 0777 /run/tdvmm/ctl 2>/dev/null || true
+
 # TEST-1a control-channel agent: a static Rust (musl) binary that BLOCKS reading /dev/ttyS1
 # (COM2). A blocked read arms no timer -> no wakes -> fast-forward-transparent. It
 # runs OUTSIDE the containers and services `tdvmm test` control commands (exec /

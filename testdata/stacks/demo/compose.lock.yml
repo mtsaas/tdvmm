@@ -17,6 +17,7 @@ services:
     image: localhost/tdvmm-demo-app@sha256:b40cb88833813fc1ffdb52d014420e0ff408749a56b1471b0508ee19306db9b4
     volumes:
     - /run/tdvmm/events:/run/tdvmm/events:rw
+    - /run/tdvmm/ctl:/run/tdvmm/ctl:rw
   client:
     command:
     - /app/client.py
@@ -29,6 +30,7 @@ services:
     image: localhost/tdvmm-demo-app@sha256:b40cb88833813fc1ffdb52d014420e0ff408749a56b1471b0508ee19306db9b4
     volumes:
     - /run/tdvmm/events:/run/tdvmm/events:rw
+    - /run/tdvmm/ctl:/run/tdvmm/ctl:rw
   postgres:
     command:
     - postgres
@@ -56,6 +58,7 @@ services:
     volumes:
     - /var/lib/tdvmm-stack/binds/postgres/schema.sql:/docker-entrypoint-initdb.d/10-schema.sql:ro
     - /run/tdvmm/events:/run/tdvmm/events:rw
+    - /run/tdvmm/ctl:/run/tdvmm/ctl:rw
   redis:
     command:
     - redis-server
@@ -77,6 +80,7 @@ services:
     image: docker.io/library/redis@sha256:9702d01c1f10c3ea9f48211b4362e44f154ff02d063e6f7268eba804059f53bf
     volumes:
     - /run/tdvmm/events:/run/tdvmm/events:rw
+    - /run/tdvmm/ctl:/run/tdvmm/ctl:rw
   worker:
     command:
     - /app/worker.py
@@ -91,3 +95,4 @@ services:
     image: localhost/tdvmm-demo-app@sha256:b40cb88833813fc1ffdb52d014420e0ff408749a56b1471b0508ee19306db9b4
     volumes:
     - /run/tdvmm/events:/run/tdvmm/events:rw
+    - /run/tdvmm/ctl:/run/tdvmm/ctl:rw

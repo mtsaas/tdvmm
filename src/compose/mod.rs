@@ -46,6 +46,30 @@ pub use emit::{emit_lock, EmitLockRequest};
 pub use error::ValidateError;
 pub use validate::{validate, BuildCtx, Validated};
 
+/// Extract the compose service names from a `compose.lock.yml` byte buffer (the
+/// keys under `services:`). The run-time reader for the artifact's embedded lock,
+/// used to populate `--logs-dir` capture.
+///
+/// # Errors
+///
+/// [`ValidateError::Reject`] if the lock does not parse or declares no services.
+pub fn lock_service_names(compose_lock: &[u8]) -> Result<Vec<String>, ValidateError> {
+    let doc: serde_yaml::Value = serde_yaml::from_slice(compose_lock)
+        .map_err(|e| error::reject(format!("parsing compose.lock.yml: {e}")))?;
+    let mut names: Vec<String> = doc
+        .get("services")
+        .and_then(|v| v.as_mapping())
+        .map(|m| m.keys().filter_map(|k| k.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    if names.is_empty() {
+        return Err(error::reject("no services found in compose.lock.yml"));
+    }
+    // Sorted so every consumer (log capture, the console scanner) sees a
+    // deterministic order.
+    names.sort();
+    Ok(names)
+}
+
 /// The diagnostic prefix on a hard rejection (out-of-subset compose); the CLI exits 3.
 pub const REJECT: &str = "TDVMM_BAKE_REJECT";
 /// The diagnostic prefix on a non-fatal warning (e.g. stripped published ports).
@@ -54,7 +78,16 @@ pub const WARN: &str = "TDVMM_BAKE_WARN";
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::emit::EVENT_FIFO;
+    use super::emit::{CONTROL_DIR, EVENT_FIFO};
+
+    #[test]
+    fn lock_service_names_reads_the_artifacts_lock() {
+        let lock = b"services:\n  api: {}\n  db: {}\n";
+        assert_eq!(lock_service_names(lock).unwrap(), vec!["api", "db"]);
+        assert!(lock_service_names(b"services: {}\n").is_err());
+        assert!(lock_service_names(b"not: yaml: [").is_err());
+    }
+
     use serde_yaml::Value;
     use std::collections::HashMap;
     use std::path::Path;
@@ -69,18 +102,18 @@ mod tests {
             "docker.io/library/postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777";
         const PG_PIN: &str =
             "localhost/tdvmm-postgres-57c72fd2a128@sha256:cbf217007d0742829dc120c3ea9cd2621e90eb3adfeaf6684e87ce268a2ca368";
-        for stack in ["faultlab", "svcchain", "configpipeline"] {
+        for stack in ["insert-trim", "demo"] {
             let compose_path = format!("testdata/stacks/{stack}/compose.yml");
             let raw = std::fs::read_to_string(&compose_path).unwrap();
             let doc: Value = serde_yaml::from_str(&raw).unwrap();
             let mut digests: HashMap<String, String> = HashMap::new();
             digests.insert(PG.into(), PG_PIN.into());
-            // configpipeline: a build: service (worker) pinned by its output tag.
+            // demo: three build: services share one output image, pinned by its tag.
             digests.insert(
-                "localhost/tdvmm-configpipeline-worker:corpus".into(),
-                "localhost/tdvmm-configpipeline-worker@sha256:c05937c63df870e5f337543187d64a50975ec54794df45ed06e4182348dc4422".into(),
+                "localhost/tdvmm-demo-app:demo".into(),
+                "localhost/tdvmm-demo-app@sha256:b40cb88833813fc1ffdb52d014420e0ff408749a56b1471b0508ee19306db9b4".into(),
             );
-            let project = format!("tdvmm_{}", stack.replace('-', "_"));
+            let project = format!("tdvmm_{stack}");
             let out = emit_lock(EmitLockRequest {
                 doc: &doc,
                 compose_path: Path::new(&compose_path),
@@ -91,17 +124,23 @@ mod tests {
             .unwrap_or_else(|e| panic!("emit_lock {stack}: {e}"));
             let got = String::from_utf8_lossy(&out.lock_yaml).into_owned();
 
-            // schema-3: every service carries the event-bridge FIFO bind.
+            // Every service carries BOTH harness binds: the schema-3 event FIFO
+            // (fire-and-forget assertions) and the schema-4 control-socket
+            // directory (drive the harness / end the run).
             let locked: Value = serde_yaml::from_str(&got).unwrap();
             let services = locked.get("services").and_then(|v| v.as_mapping()).unwrap();
-            let want_fifo = format!("{EVENT_FIFO}:{EVENT_FIFO}:rw");
-            for (name, cfg) in services {
-                let present = cfg
-                    .get("volumes")
-                    .and_then(|v| v.as_sequence())
-                    .map(|vs| vs.iter().any(|e| e.as_str() == Some(&want_fifo)))
-                    .unwrap_or(false);
-                assert!(present, "{stack}: service {name:?} missing the event FIFO bind");
+            for (want, what) in [
+                (format!("{EVENT_FIFO}:{EVENT_FIFO}:rw"), "event FIFO"),
+                (format!("{CONTROL_DIR}:{CONTROL_DIR}:rw"), "control socket"),
+            ] {
+                for (name, cfg) in services {
+                    let present = cfg
+                        .get("volumes")
+                        .and_then(|v| v.as_sequence())
+                        .map(|vs| vs.iter().any(|e| e.as_str() == Some(&want)))
+                        .unwrap_or(false);
+                    assert!(present, "{stack}: service {name:?} missing the {what} bind");
+                }
             }
 
             // The committed lock is a generated file; TDVMM_REGEN_LOCKS=1 rewrites it

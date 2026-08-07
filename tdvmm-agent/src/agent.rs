@@ -98,9 +98,9 @@ impl std::error::Error for AgentError {
     }
 }
 
-/// Which container of a service [`resolve_by_service`] should return: the running one
-/// (lifecycle / partition / logs) or a non-running one (to `start`, or to read a
-/// killed service's logs). Replaces a boolean so call sites read for themselves.
+/// Which container of a service [`resolve_by_service`] should return: the running
+/// one (lifecycle / partition / logs) or a non-running one (`start`, or a killed
+/// service's logs).
 #[derive(Clone, Copy)]
 enum Want {
     Running,
@@ -113,19 +113,22 @@ enum Want {
 
 pub(crate) struct Agent {
     /// Canonical unordered service-pair key -> the two container IPs to drop
-    /// between. The whole nft ruleset is rebuilt from this on every change, so the
-    /// installed rules are always exactly the active set. The `BTreeMap` iterates in
-    /// sorted key order, so the emitted ruleset is deterministic.
+    /// between. The nft ruleset is rebuilt from this on every change; the
+    /// `BTreeMap`'s sorted iteration keeps the emitted ruleset deterministic.
     partitions: BTreeMap<String, [String; 2]>,
+    /// The verdict of the first [`tdvmm_proto::OP_FINISH`] served. First finish
+    /// wins: a second caller is rejected rather than overwriting the outcome.
+    finished: Option<i64>,
 }
 
 impl Agent {
     pub(crate) fn new() -> Self {
-        Agent { partitions: BTreeMap::new() }
+        Agent { partitions: BTreeMap::new(), finished: None }
     }
 
     pub(crate) fn handle(&mut self, req: &Request) -> Reply {
         match req.op.as_str() {
+            tdvmm_proto::OP_FINISH => self.do_finish(req),
             "ping" => Reply {
                 id: Some(req.id),
                 ok: Some(true),
@@ -151,6 +154,35 @@ impl Agent {
                 ..Default::default()
             },
         }
+    }
+
+    /// The terminal op: record the run's verdict and answer. This stops nothing in
+    /// the guest; the run ends when the host sees the `finish` event the bridge
+    /// emits. First finish wins — a second is refused with the recorded verdict.
+    fn do_finish(&mut self, req: &Request) -> Reply {
+        let verdict = req.exit.unwrap_or(0);
+        match self.finished {
+            Some(first) => err(
+                req.id,
+                tdvmm_proto::OP_FINISH,
+                format!("run already finished with exit {first}"),
+            ),
+            None => {
+                self.finished = Some(verdict);
+                ok_stdout(
+                    req.id,
+                    tdvmm_proto::OP_FINISH,
+                    format!("finish {verdict}"),
+                )
+            }
+        }
+    }
+
+    /// Whether this request was the accepted [`tdvmm_proto::OP_FINISH`] — i.e.
+    /// the bridge must now tell the host to end the run. True for exactly one
+    /// request per boot.
+    pub(crate) fn accepted_finish(&self, req: &Request, reply: &Reply) -> bool {
+        req.op == tdvmm_proto::OP_FINISH && reply.ok == Some(true)
     }
 
     fn do_containers(&self, req: &Request) -> Reply {
