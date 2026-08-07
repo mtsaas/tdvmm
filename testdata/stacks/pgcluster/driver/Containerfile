@@ -1,0 +1,20 @@
+# tdvmm pgcluster — the driver image.
+#
+# The container that TESTS the cluster: it talks to Postgres like any client
+# (py3-psycopg2, the real wire protocol) and to the tdvmm harness over the
+# control socket (the stdlib-only SDK, bind-mounted in). Nothing else.
+#
+# Built HOST-SIDE at bake time. The base is DIGEST-PINNED and every apk is
+# version-pinned so two --no-cache bakes are byte-identical; the .pyc recompile
+# is the same reproducibility fix the demo image documents (Alpine's apk trigger
+# embeds source mtimes, which vary by the wall-clock second of the build).
+FROM docker.io/library/alpine@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
+RUN apk add --no-cache \
+      python3=3.12.13-r0 \
+      py3-psycopg2=2.9.10-r0
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+WORKDIR /app
+RUN find / -name '*.pyc' -delete 2>/dev/null; \
+    python3 -m compileall -q -f --invalidation-mode unchecked-hash /usr/lib/python3.12 2>/dev/null; \
+    true
+ENTRYPOINT ["python3"]
