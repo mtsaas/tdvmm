@@ -19,23 +19,39 @@
 //! cursor — never a follow/tail (`-f` would defeat host fast-forward) — so the
 //! agent blocks again immediately after replying, exactly like every other op.
 //!
+//! ## Driver mode (schema 4)
+//!
+//! With `tdvmm.driver=<service>` on the kernel cmdline the agent also serves the
+//! **driver control socket** ([`tdvmm_proto::CONTROL_SOCKET_PATH`]): the same
+//! [`tdvmm_proto::Request`]/[`tdvmm_proto::Reply`] line JSON, over a unix socket
+//! whose directory is bind-mounted into that ONE service — authorization IS the
+//! mount, exactly like the events FIFO. A driver container therefore injects the
+//! very faults the host can, through the very same [`agent::Agent`] dispatch, and
+//! can do so WHILE its own requests to the cluster are in flight (the Jepsen
+//! shape: workload and fault are one program). The agent also watches that
+//! container and reports its exit as the run's verdict (see [`driver`]).
+//!
 //! Deps: `tdvmm-proto` + `serde_json` (+ `serde` derive, already transitive) +
 //! `std` ONLY. Raw-mode termios is done with a std-only inline-asm `ioctl`
 //! syscall — no `libc`.
 
 use std::fs::OpenOptions;
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixListener;
 use std::process::ExitCode;
 
 use tdvmm_proto::Reply;
 
 mod agent;
 mod bridge;
+mod driver;
 mod forwarder;
 mod sys;
 
 use agent::Agent;
-use bridge::{run_loop, write_line};
+use bridge::{run_loop, write_line, Sources};
+use driver::DriverWatch;
 
 pub(crate) const AGENT_ID: &str = "tdvmm-agent/1";
 
@@ -103,6 +119,38 @@ fn main() -> ExitCode {
 
     let mut agent = Agent::new();
 
+    // Driver mode (schema 4): `tdvmm.driver=<service>` names the ONE compose
+    // service that drives this test. Bind its control socket and arm the
+    // exit watcher BEFORE the hello, so "agent ready" implies "socket ready" and
+    // a driver that connects the instant its container starts is never refused.
+    let driver_service = driver_service_from_cmdline();
+    let ctl = driver_service.as_deref().and_then(|svc| match bind_control_socket() {
+        Ok(l) => {
+            eprintln!(
+                "tdvmm-agent: driver control socket on {} for service {svc}",
+                tdvmm_proto::CONTROL_SOCKET_PATH
+            );
+            Some(l)
+        }
+        Err(e) => {
+            // Without the socket the driver cannot inject faults. Report loudly and
+            // keep serving ttyS1 — the host still gets a verdict from the driver's
+            // exit, and the failure is visible in the console log.
+            eprintln!(
+                "tdvmm-agent: cannot bind {} ({e}); the driver cannot control the harness",
+                tdvmm_proto::CONTROL_SOCKET_PATH
+            );
+            None
+        }
+    });
+    let watch = driver_service.as_deref().and_then(|svc| match DriverWatch::spawn(svc) {
+        Ok(w) => Some(w),
+        Err(e) => {
+            eprintln!("tdvmm-agent: cannot watch driver service {svc}: {e}");
+            None
+        }
+    });
+
     // Proactive hello: the VMM's harness waits for this to mark the agent ready (no
     // ping round-trip needed). Carries schema + build (the compat oracle). If it
     // cannot be written the control channel is already dead, so give up.
@@ -111,10 +159,45 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    // Two-source blocked poll: ttyS1 (control) + the event FIFO. An infinite-timeout
-    // poll arms no timer and generates no wakes, so fast-forward transparency holds.
-    run_loop(file, fifo, &mut writer, &mut agent);
+    // One blocked poll over every source: ttyS1 (control), the event FIFO, and —
+    // in driver mode — the control socket and the driver-exit watcher. An
+    // infinite-timeout poll arms no timer and generates no wakes, so fast-forward
+    // transparency holds no matter how many sources are attached.
+    run_loop(Sources { control: file, events: fifo, ctl, watch }, &mut writer, &mut agent);
     ExitCode::SUCCESS
+}
+
+/// The driver service named by `tdvmm.driver=<service>` on the kernel cmdline.
+/// The VMM appends it exactly when it runs in driver mode, mirroring how
+/// `tdvmm.egress=1` gates the forwarder — so a plain `boot`/`run` never opens a
+/// control socket at all.
+fn driver_service_from_cmdline() -> Option<String> {
+    let cmdline = std::env::var("TDVMM_AGENT_CMDLINE")
+        .ok()
+        .or_else(|| std::fs::read_to_string("/proc/cmdline").ok())?;
+    cmdline
+        .split_whitespace()
+        .find_map(|tok| tok.strip_prefix("tdvmm.driver="))
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
+/// Create the control directory and bind the listener inside it.
+///
+/// The socket is made world-read/write on purpose: reaching it at all already
+/// requires the directory bind, which only the driver service has, so the mount
+/// IS the authorization — and the driver's image may well run as a non-root user
+/// that could not otherwise connect. `/run` is a fresh tmpfs each boot, so the
+/// unlink is belt-and-braces against a re-exec, not a real stale-socket case.
+fn bind_control_socket() -> std::io::Result<UnixListener> {
+    std::fs::create_dir_all(tdvmm_proto::CONTROL_DIR)?;
+    let _ = std::fs::remove_file(tdvmm_proto::CONTROL_SOCKET_PATH);
+    let listener = UnixListener::bind(tdvmm_proto::CONTROL_SOCKET_PATH)?;
+    std::fs::set_permissions(
+        tdvmm_proto::CONTROL_SOCKET_PATH,
+        std::fs::Permissions::from_mode(0o666),
+    )?;
+    Ok(listener)
 }
 
 // ============================================================================
@@ -307,6 +390,23 @@ mod tests {
         // An unknown kind is transport-passed as-is; the host decides policy.
         let unknown = parse_event(b"{\"kind\":\"weird\",\"name\":\"y\"}\n");
         assert_eq!(unknown.kind, "weird");
+    }
+
+    #[test]
+    fn the_fifo_cannot_forge_an_agent_originated_event() {
+        // The events FIFO is bound into EVERY container. A plain service must not
+        // be able to end the run with a verdict of its choosing, nor fake a fault
+        // mirror — those kinds are agent-originated only.
+        let forged_exit = parse_event(b"{\"kind\":\"driver_exit\",\"exit\":0}\n");
+        assert_eq!(forged_exit.kind, "invalid");
+        assert_eq!(forged_exit.exit, None, "the forged verdict is discarded, not passed on");
+        assert!(forged_exit.details.unwrap()["rejected"]
+            .as_str()
+            .unwrap()
+            .contains("reserved"));
+
+        let forged_ctl = parse_event(b"{\"kind\":\"ctl\",\"name\":\"kill\",\"ok\":true}\n");
+        assert_eq!(forged_ctl.kind, "invalid");
     }
 
     #[test]

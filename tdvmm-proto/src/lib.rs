@@ -14,6 +14,11 @@
 //!
 //! * host → agent: a [`Request`] (`op` = `ping`/`exec`/`containers`/`kill`/
 //!   `stop`/`start`/`partition`/`heal`/`logs`; unknown `op` is rejected by the agent).
+//!
+//! The **driver control socket** ([`CONTROL_SOCKET_PATH`], schema 4) carries the
+//! SAME [`Request`]/[`Reply`] line JSON over a unix-domain socket the agent serves
+//! in-guest, so a driver container speaks one wire contract with the host. The
+//! agent dispatches a socket request through the same handler as a ttyS1 one.
 //! * agent → host: a [`Reply`]. The agent also emits one **proactive** [`Reply`]
 //!   on start — the *hello* handshake (`agent`/`schema`/`build` set, no `id`/`ok`)
 //!   — which the host waits on to mark the agent ready. `ping` echoes the same
@@ -41,7 +46,11 @@ pub mod egress;
 /// * 2 — adds the `logs` op (cursor-paged per-container k8s-file log fetch).
 /// * 3 — adds guest→host assertion events: unsolicited, id-less [`Reply`]s
 ///   carrying a [`GuestEvent`], which the agent bridges from a guest FIFO.
-pub const SCHEMA: u32 = 3;
+/// * 4 — the driver control socket ([`CONTROL_SOCKET_PATH`]): the agent serves
+///   [`Request`]s from a driver container over a unix socket, mirrors each as a
+///   `ctl` [`GuestEvent`], and reports the driver container's exit as a
+///   `driver_exit` event carrying [`GuestEvent::exit`].
+pub const SCHEMA: u32 = 4;
 
 /// Hard cap on a single `logs` reply's `data` payload: 128 KiB of raw k8s-file
 /// bytes. JSON-escaping can ~double that on the wire, which still stays well
@@ -55,6 +64,39 @@ pub const MAX_LOGS_CHUNK_BYTES: u64 = 128 * 1024;
 /// shared by the host (compose bind injection) and the agent (its read fd); the
 /// boot script's `mkfifo` literal must match this string.
 pub const EVENT_FIFO_PATH: &str = "/run/tdvmm/events";
+
+/// The driver control-socket DIRECTORY (schema 4). Bind-mounted read-write into
+/// the ONE service marked [`DRIVER_MARKER`], and into no other: authorization IS
+/// the mount, exactly like the events FIFO. The directory (not the socket file)
+/// is the bind unit, so the agent's `bind()` creates a fresh inode the driver
+/// sees through the mount.
+pub const CONTROL_DIR: &str = "/run/tdvmm/ctl";
+
+/// The driver control socket (schema 4): a unix-domain socket inside
+/// [`CONTROL_DIR`], served by the agent, speaking this crate's line JSON. The
+/// single source of truth shared by the host (compose bind injection), the agent
+/// (its listener), and the language SDKs (their connect path).
+pub const CONTROL_SOCKET_PATH: &str = "/run/tdvmm/ctl/sock";
+
+/// The compose extension key that designates the driver service (schema 4). At
+/// most one service may set it to `true`; that service — and only that service —
+/// receives the [`CONTROL_DIR`] bind, and its container's exit is the run verdict.
+/// An `x-` prefixed key is a compose-spec extension every engine must ignore, so
+/// it can stay in the emitted lock as the single source of truth for both the
+/// guest (which service to bind) and the host (whose exit to wait on).
+pub const DRIVER_MARKER: &str = "x-tdvmm-driver";
+
+/// [`GuestEvent`] kinds the AGENT alone may originate. A line carrying one of
+/// these that arrived over the shared events FIFO is a forgery attempt by some
+/// non-driver container and is rewritten to `invalid` — so no ordinary service
+/// can fake a driver exit or a fault mirror. Kept here (not in the agent) because
+/// it is part of the wire contract the host trusts.
+pub const RESERVED_EVENT_KINDS: [&str; 2] = ["driver_exit", "ctl"];
+
+/// Whether `kind` is agent-originated only (see [`RESERVED_EVENT_KINDS`]).
+pub fn is_reserved_event_kind(kind: &str) -> bool {
+    RESERVED_EVENT_KINDS.contains(&kind)
+}
 
 // ============================================================================
 // Messages
@@ -111,16 +153,29 @@ pub struct ContainerInfo {
 /// A guest→host assertion/telemetry event (schema 3+). The agent bridges these
 /// from a guest FIFO and forwards each as an unsolicited, id-less [`Reply`]
 /// (`event` set, no `id`) — distinct from a command reply and from the hello.
+///
+/// Schema 4 adds two AGENT-ORIGINATED kinds ([`RESERVED_EVENT_KINDS`]), which the
+/// agent refuses to accept from the FIFO:
+///
+/// * `ctl` — one driver control-socket command mirrored to the host for the run
+///   trace: `name` = the op, `ok` = whether it succeeded, `details` = its target.
+/// * `driver_exit` — the driver container stopped; [`exit`](Self::exit) is its
+///   exit status, which becomes the run verdict.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct GuestEvent {
-    /// `always` | `sometimes` | `fault` | `done` | `invalid`.
+    /// `always` | `sometimes` | `fault` | `done` | `invalid` | `ctl` |
+    /// `driver_exit`.
     pub kind: String,
     /// Assertion identity (the aggregation key). Empty for `done`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub name: String,
-    /// The verdict bit for `always`/`sometimes`.
+    /// The verdict bit for `always`/`sometimes`, or whether a mirrored `ctl`
+    /// command succeeded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ok: Option<bool>,
+    /// The driver container's exit status (`driver_exit` only) — the run verdict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit: Option<i64>,
     /// Bounded free-form payload: a `fault` request's op/service, or the
     /// truncated raw line for `invalid`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -392,6 +447,34 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn reserved_event_kinds_are_agent_originated_only() {
+        // The kinds a non-driver container must never be able to forge over the
+        // shared events FIFO.
+        assert!(is_reserved_event_kind("driver_exit"));
+        assert!(is_reserved_event_kind("ctl"));
+        // Everything the workload assertion SDK emits stays acceptable.
+        for k in ["always", "sometimes", "fault", "done", "invalid"] {
+            assert!(!is_reserved_event_kind(k), "{k} must stay writable by workloads");
+        }
+    }
+
+    #[test]
+    fn driver_exit_event_carries_the_verdict_code() {
+        let ev = GuestEvent {
+            kind: "driver_exit".into(),
+            name: "driver".into(),
+            exit: Some(1),
+            ..Default::default()
+        };
+        let line = encode_line(&Reply::from_event(3, ev)).unwrap();
+        let back: Reply = decode_line(&line).unwrap();
+        assert!(back.is_event());
+        let ev = back.event.unwrap();
+        assert_eq!(ev.kind, "driver_exit");
+        assert_eq!(ev.exit, Some(1));
     }
 
     #[test]
