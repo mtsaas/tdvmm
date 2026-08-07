@@ -2,8 +2,6 @@
 name: tdvmm_pgcluster
 services:
   driver:
-    command:
-    - /app/driver.py
     depends_on:
     - pg-primary
     - pg-standby
@@ -11,10 +9,8 @@ services:
       PGDATABASE: appdb
       PGHOST: pg-primary
       PGUSER: postgres
-    image: localhost/tdvmm-pgcluster-driver@sha256:3db87a46068e1523369a95282897a3100cbd62826b83647e209058caa2e45b46
+    image: localhost/tdvmm-pgcluster-driver@sha256:992d707510c614cc8b5957b87b53ce1ef802238139ff04dbe7243a9e5a25d01e
     volumes:
-    - /var/lib/tdvmm-stack/binds/driver/tdvmm.py:/app/tdvmm.py:ro
-    - /var/lib/tdvmm-stack/binds/driver/driver.py:/app/driver.py:ro
     - /run/tdvmm/events:/run/tdvmm/events:rw
     - /run/tdvmm/ctl:/run/tdvmm/ctl:rw
   pg-primary:

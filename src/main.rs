@@ -1214,8 +1214,9 @@ fn run_user_backend(
     // background thread, never concurrent with the run — driving the still-alive
     // guest to page each container's k8s-file log out via the agent's `logs` op.
     // Runs only on graceful stops (a driver verdict, or the horizon) where the
-    // guest is still responsive; a guest-death stop is skipped with one warning. Every capture error warns + skips — it NEVER changes the verdict,
-    // exit code, JSONL, or report (Fable guardrails 1-5).
+    // guest is still responsive; a guest-death stop is skipped with one warning.
+    // Every capture error warns + skips — it never changes the verdict, exit
+    // code, JSONL, or report.
     if let Some(cap) = logs.as_ref() {
         if matches!(stop_reason, StopReason::DriverFinish | StopReason::Horizon) {
             capture_logs(
@@ -1403,15 +1404,11 @@ fn park_until_deliverable(
     }
 }
 
-/// Drain the agent's ttyS1 lines from INSIDE the park and fold them into the
-/// driver state. `Some(DriverFinish)` means a container ended the run.
-///
-/// Why the park needs this at all: the agent writes its lines with a PIO exit, so
-/// the bytes are captured while the guest is RUNNING — but a driver that finishes
-/// and then leaves the guest idle would have its verdict sitting in the capture
-/// buffer while we park. Draining here ends the run at the moment the verdict
-/// lands rather than one guest tick later. It is passive (it reads bytes the
-/// guest already emitted, touches no clock and no queue), so it is FF-neutral.
+/// Drain the agent's ttyS1 lines from inside the park and fold them into the
+/// driver state. `Some(DriverFinish)` means a container ended the run. Draining
+/// here ends the run the moment the verdict lands rather than a guest tick later.
+/// Passive (reads already-emitted bytes, touches no clock or queue), so
+/// FF-neutral.
 fn park_drain_agent(
     clock: &VirtualClock,
     vtsc_start: u64,

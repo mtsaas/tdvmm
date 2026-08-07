@@ -16,7 +16,7 @@
 # than as a lost row. Heal, and the same commit completes.
 #
 # Two services reuse the ONE pinned Postgres digest (image-based, closed world);
-# the driver is a small build: context (alpine + py3-psycopg2), the same
+# the driver is a small build: context (a static Go binary + psql), the same
 # reproducible pattern the demo stack uses.
 
 services:
@@ -78,8 +78,3 @@ services:
       PGHOST: pg-primary
       PGUSER: postgres
       PGDATABASE: appdb
-    volumes:
-      # The SDK, straight from the repo — this is exactly how a user vendors it.
-      - ../../../sdk/python/tdvmm.py:/app/tdvmm.py:ro
-      - ./driver/driver.py:/app/driver.py:ro
-    command: ["/app/driver.py"]

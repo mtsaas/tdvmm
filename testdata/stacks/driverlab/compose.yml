@@ -28,7 +28,3 @@ services:
       - peer
     environment:
       DRIVER_MODE: "${TDVMM_DRIVERMODE:-pass}"
-    volumes:
-      - ../../../sdk/python/tdvmm.py:/app/tdvmm.py:ro
-      - ./driver/driver.py:/app/driver.py:ro
-    command: ["/app/driver.py"]

@@ -1,41 +1,32 @@
-//! Run-stop bookkeeping: why the vCPU loop stopped, and the process exit code
-//! that maps to.
+//! Run-stop bookkeeping: why the vCPU loop stopped, and the process exit code it
+//! maps to. Each distinct stop reason maps to a distinct code (see `StopReason`).
 //!
-//! Process exit codes. A testing platform wants the *cause* of a stop to be a
-//! first-class, machine-readable outcome, so each distinct stop reason maps to a
-//! distinct code (see `StopReason` and the shutdown-cause logging near the exit
-//! handlers).
-//!
-//! The shared 0/1/2/3 contract, in one place:
+//! The shared 0/1/2/3 contract:
 //!
 //! * **0** — the run completed cleanly: a driver's `finish(0)`, or a driverless
 //!   guest that stopped on its own.
 //! * **1** — FAIL: a driver called `finish` with a nonzero verdict. Its raw code
 //!   is reported in the summary and `--metrics-out`, not returned (see
-//!   [`crate::driver`] for why).
-//! * **2** — the tool broke, not your stack: a bad artifact, an unreachable
-//!   agent, or the wall-clock safety timeout.
+//!   [`crate::driver`]).
+//! * **2** — infrastructure: a bad artifact, an unreachable agent, or the
+//!   wall-clock safety timeout.
 //! * **3** — a VMM policy stop: the `--max-virtual-time` horizon fired. Also
 //!   `build`'s REJECTED code.
 
 /// Guest-initiated stop: the guest shut down or rebooted on its own (triple
-/// fault / system event, e.g. panic+reboot or `reboot -f`). The "normal" way a
-/// test guest ends, and the code a passing driver run returns.
+/// fault / system event). Also the code a passing driver run returns.
 pub(crate) const EXIT_GUEST_STOP: i32 = 0;
-/// A passing verdict (an alias of [`EXIT_GUEST_STOP`], named for the driver
-/// path's intent).
+/// A passing verdict; an alias of [`EXIT_GUEST_STOP`].
 pub(crate) const EXIT_PASS: i32 = EXIT_GUEST_STOP;
-/// FAIL: a driver declared a nonzero verdict. Distinct from [`EXIT_INFRA`] so CI
-/// can tell "your stack is wrong" from "the tool broke".
+/// FAIL: a driver declared a nonzero verdict.
 pub(crate) const EXIT_FAIL: i32 = 1;
 /// A VMM policy stop: `--max-virtual-time` horizon reached. Distinct from a
 /// guest-initiated stop so a harness can tell "the guest ended" from "we cut it
 /// off at the virtual-time budget".
 pub(crate) const EXIT_HORIZON: i32 = 3;
 /// Infrastructure error: a bad/unreadable artifact, an agent that never came up,
-/// or the wall-clock safety timeout — the tool broke, not your stack. The
-/// timeout path exits the process directly (there is no run left to unwind), so
-/// it has no [`StopReason`].
+/// or the wall-clock safety timeout. The timeout path exits the process directly,
+/// so it has no [`StopReason`].
 pub(crate) const EXIT_INFRA: i32 = 2;
 
 /// Why the run loop stopped. Mapped to a distinct process exit code (above) and

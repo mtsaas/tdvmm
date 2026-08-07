@@ -2,16 +2,12 @@
 name: tdvmm_driverlab
 services:
   driver:
-    command:
-    - /app/driver.py
     depends_on:
     - peer
     environment:
       DRIVER_MODE: ${TDVMM_DRIVERMODE:-pass}
-    image: localhost/tdvmm-driverlab-driver@sha256:3f1be011211426f72c2cfc0ff79099a36478540bf31c5e4f3bf179ed942c2e78
+    image: localhost/tdvmm-driverlab-driver@sha256:f7587870cb370f3cc8334028031cee03e6d408c64ae43527d7f4e81d7c77cb12
     volumes:
-    - /var/lib/tdvmm-stack/binds/driver/tdvmm.py:/app/tdvmm.py:ro
-    - /var/lib/tdvmm-stack/binds/driver/driver.py:/app/driver.py:ro
     - /run/tdvmm/events:/run/tdvmm/events:rw
     - /run/tdvmm/ctl:/run/tdvmm/ctl:rw
   peer:

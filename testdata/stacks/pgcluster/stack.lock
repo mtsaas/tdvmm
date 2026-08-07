@@ -2,17 +2,18 @@
 stack     pgcluster
 project   tdvmm_pgcluster
 mem_mib   3072
-ram_estimate_mib  1864
-compose_lock_sha256  21b390328bbf44058bc215802c3668f3e838a57849d19c6f2bef8bde51c74303
-initramfs_sha256     3c1db9b9f40a773d2cba3f4f98487b2017dea5ab73758bf7ed8b0f1530e9615b  initramfs-alpine-pgcluster.cpio.gz
+ram_estimate_mib  1779
+compose_lock_sha256  a7294e018b8865c8854bc16aaceb3b4a1e9aa9bb2234f97b024a3b7544e26c27
+initramfs_sha256     a07c13612feb9b0e0043aa06865d7344a886aaa4cc71f7b56508ce05575e359e  initramfs-alpine-pgcluster.cpio.gz
 agent_sha256         9b548f2cbbae11a0d11e5bb18e7275f23f86b3a0d8b490a7ecf9eb7f9b790c51  tdvmm-agent
 builder_image        docker.io/library/alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
 builder_image        docker.io/library/debian:bookworm-slim@sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e
 builder_image        docker.io/library/rust:1.97-alpine3.22@sha256:b348cb409ac0a73de15065997a360063cf87465574a15e3e4469862cb8996f02
   build_base  service=driver  base=docker.io/library/alpine@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
-  image  policy=build   service=driver  tag=localhost/tdvmm-pgcluster-driver:corpus  content_id=sha256:1044bd39c2c945fac5ab49dc7d8e25be4a53b2ed79a8bc71394a10c20b473d82  size_mib=49
+  build_base  service=driver  base=docker.io/library/golang@sha256:457d8584db11412777c4196146b8060fdaabe0b0ba7b62c553d08e07d8c22bd3
+  image  policy=build   service=driver  tag=localhost/tdvmm-pgcluster-driver:corpus  content_id=sha256:57cd708233b56c3efd38417b23c4316029c653a85f651d1d0ac6c82f0b9e009e  size_mib=15
   image  policy=plain   upstream=docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616  diffid=sha256:0958e0fef2d6a31e1325b8bfecd99dead933363682d69850a7606599023751bc  size_mib=4
   image  policy=squash  upstream=docker.io/library/postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777  seed_tag=localhost/tdvmm-postgres-57c72fd2a128:baked  src_diffid=sha256:af5b54b4903175790ece7037a66fd16496658d7030a59e2e2360f66038d74c8c  size_mib=283  GATE=ok
   pin    upstream=docker.io/library/postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777  pinned=localhost/tdvmm-postgres-57c72fd2a128@sha256:cbf217007d0742829dc120c3ea9cd2621e90eb3adfeaf6684e87ce268a2ca368
-  pin    upstream=localhost/tdvmm-pgcluster-driver:corpus  pinned=localhost/tdvmm-pgcluster-driver@sha256:3db87a46068e1523369a95282897a3100cbd62826b83647e209058caa2e45b46
-tdvmm_sha256          071578a79baad7198a5526a34e6a94c32304ea77edc52e5ee03e359887dced06  pgcluster.tdvmm
+  pin    upstream=localhost/tdvmm-pgcluster-driver:corpus  pinned=localhost/tdvmm-pgcluster-driver@sha256:992d707510c614cc8b5957b87b53ce1ef802238139ff04dbe7243a9e5a25d01e
+tdvmm_sha256          de61d4c100bb9e9492a73a57a441cfe88a96aab5227471abb828f61bd57f7971  pgcluster.tdvmm

@@ -342,14 +342,12 @@ pub(crate) struct EffectiveConfig {
     pub(crate) max_jump_secs: f64,
     pub(crate) max_virtual_time_secs: Option<f64>,
     pub(crate) metrics_out: Option<String>,
-    /// Whether host-mediated egress is opened for this run. Set by the flag ALONE,
-    /// with DELIBERATELY no baked tier — an artifact must never gain network
-    /// access merely by being re-baked (see [`resolve`]).
+    /// Whether host-mediated egress is opened for this run. Set by the flag alone;
+    /// there is no baked tier, so re-baking never grants network access.
     pub(crate) allow_egress: bool,
     /// The formatted per-knob provenance, e.g.
     /// `mem=3072 (baked) ff=off (flag) horizon=36h (baked) ...`. Gains an
-    /// `egress=on (flag)` token ONLY when egress is opened, so a closed-world
-    /// run's line is byte-identical to before this feature.
+    /// `egress=on (flag)` token only when egress is opened.
     pub(crate) provenance: String,
 }
 
@@ -425,14 +423,11 @@ impl EffectiveConfig {
         // preamble records the proto version so a run log is self-describing.
         prov.push(format!("proto-schema={} (built-in)", tdvmm_proto::SCHEMA));
 
-        // allow-egress: the flag ALONE, with DELIBERATELY no baked tier. Egress
-        // opens the closed world to guest-initiated network I/O; an artifact must
-        // never gain that merely by being re-baked, so a baked default is
-        // intentionally unrepresentable here (there is no
-        // `RunDefaults.allow_egress` to consult).
+        // allow-egress: the flag alone, with no baked tier. Egress opens the
+        // closed world to guest-initiated network I/O, so re-baking must never
+        // grant it (there is no `RunDefaults.allow_egress` to consult).
         let allow_egress = f.allow_egress;
-        // Provenance token ONLY when opened, so a closed-world run's line is
-        // byte-identical to before this feature (INV-E0).
+        // Provenance token only when opened.
         if allow_egress {
             prov.push("egress=on (flag)".to_string());
         }

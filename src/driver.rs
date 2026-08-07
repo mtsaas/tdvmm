@@ -1,23 +1,14 @@
 //! Host-side driver-run state: the verdict a container declared over the guest
 //! control socket, and how it maps onto `tdvmm run`'s exit-code contract.
 //!
-//! ## A test is a run with a driver
+//! `tdvmm run` boots the stack. If a container connects to the control socket
+//! ([`tdvmm_proto::CONTROL_SOCKET_PATH`]) and calls [`tdvmm_proto::OP_FINISH`],
+//! the agent emits a `finish` event up ttyS1, this type records it, and the run
+//! ends with that verdict. A run no container drives is unaffected.
 //!
-//! There is no `test` verb. `tdvmm run` boots the stack; if some container
-//! connects to the guest control socket ([`tdvmm_proto::CONTROL_SOCKET_PATH`])
-//! and calls [`tdvmm_proto::OP_FINISH`], the agent emits a `finish` event up
-//! ttyS1, THIS type records it, and the run ends with that verdict. A run where
-//! no container ever does that is unaffected — it stops exactly as it does today
-//! (guest shutdown, or the virtual-time horizon).
-//!
-//! ## The exit-code mapping (the decision, stated)
-//!
-//! The driver's own exit code is NOT propagated verbatim, because `run` already
-//! owns 0/1/2/3 and a driver that exited 2 or 3 would be indistinguishable from
-//! "the tool broke" or "the horizon fired" — the two outcomes CI most needs to
-//! tell apart from a test failure. So the verdict is collapsed onto the existing
-//! contract, and the raw code is preserved where it is still useful (the run
-//! summary line and `--metrics-out`):
+//! The driver's raw exit code is not returned verbatim; it is collapsed onto
+//! `run`'s 0/1/2/3 contract, and the raw code is kept in the run summary and
+//! `--metrics-out`:
 //!
 //! | outcome | `run` exits |
 //! |---|---|
@@ -63,13 +54,13 @@ impl Verdict {
 
 /// Accumulates what the guest agent reports for a run: whether the agent came up,
 /// the control-socket command trace, and the terminal verdict. Inert until a
-/// container actually drives — a run with no driver never leaves the default.
+/// container drives.
 #[derive(Default)]
 pub(crate) struct DriverRun {
-    /// The hello arrived: the agent (and therefore the control socket) is live.
+    /// The hello arrived: the agent (and the control socket) is live.
     agent_ready: bool,
-    /// The FIRST `finish`. Later ones cannot occur (the agent refuses them), but
-    /// the guard here makes that independent of the guest's good behavior.
+    /// The FIRST `finish`. The guard makes "first finish wins" hold host-side even
+    /// if the agent were to emit a second.
     verdict: Option<Verdict>,
     /// Control-socket commands seen, for the end-of-run summary.
     commands: u64,
@@ -79,15 +70,11 @@ pub(crate) struct DriverRun {
 
 impl DriverRun {
     /// Fold one agent line (a [`Reply`] off ttyS1) into the run state. Returns
-    /// `true` once the run must STOP — i.e. a verdict has arrived.
-    ///
-    /// `now` is the virtual timestamp the line was observed at; it is what makes
-    /// the fault trace meaningful, because it is the instant the fault actually
-    /// landed in the guest's own timeline.
+    /// `true` once a verdict has arrived and the run must stop. `now_virtual_s` is
+    /// the virtual timestamp the line was observed at, used for the fault trace.
     pub(crate) fn on_agent_line(&mut self, line: &[u8], now_virtual_s: f64) -> bool {
         let Ok(reply) = decode_line::<Reply>(line) else {
-            // Non-JSON noise on ttyS1 (kernel chatter racing the agent): ignore,
-            // exactly as the control channel always has.
+            // Non-JSON noise on ttyS1 (kernel chatter): ignore.
             return false;
         };
         if reply.is_hello() {
@@ -116,9 +103,8 @@ impl DriverRun {
                     return true; // already decided; stay decided.
                 }
                 let verdict = Verdict {
-                    // A `finish` event with no `exit` is malformed (the agent
-                    // always sets it). Grade it as infra rather than inventing a
-                    // pass: "no news" must never become "good news".
+                    // A `finish` with no `exit` is malformed; grade it as infra,
+                    // never a pass.
                     code: ev.exit.unwrap_or(i64::from(EXIT_INFRA)),
                     message: Some(ev.name.clone()).filter(|m| !m.is_empty()),
                 };
@@ -151,8 +137,7 @@ impl DriverRun {
                         }
                     })
                     .unwrap_or_default();
-                // The fault trace: one line per command, stamped with the VIRTUAL
-                // time it landed. This is the run's evidence of what happened when.
+                // One trace line per command, stamped with the virtual time it landed.
                 crate::log_line(format_args!(
                     "[tdvmm][driver] t+{now_virtual_s:.1}s virtual: {}{target}{}",
                     ev.name,
@@ -170,9 +155,8 @@ impl DriverRun {
                 ));
                 false
             }
-            // Workload assertion events (schema 3) still flow; they are recorded
-            // for the summary but no longer decide anything — the driver's
-            // `finish` is the single verdict authority.
+            // Workload assertion events (schema 3) are ignored here; only `finish`
+            // decides the verdict.
             _ => false,
         }
     }
@@ -208,10 +192,9 @@ impl DriverRun {
 }
 
 impl DriverRun {
-    /// The `--metrics-out` block for a driven run: the RAW verdict code (which
-    /// the process exit code deliberately collapses, so this is the only place it
-    /// survives machine-readably) plus the command counts. Empty for an undriven
-    /// run, so a plain run's metrics file is byte-identical to before.
+    /// The `--metrics-out` block for a driven run: the raw verdict code (the only
+    /// place it survives, since the exit code collapses it) plus the command
+    /// counts. Empty for an undriven run.
     pub(crate) fn metrics_block(&self) -> String {
         if !self.was_driven() {
             return String::new();
