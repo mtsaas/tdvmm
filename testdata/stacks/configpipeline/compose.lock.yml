@@ -20,6 +20,7 @@ services:
     volumes:
     - state:/var/state:ro
     - /run/tdvmm/events:/run/tdvmm/events:rw
+    - /run/tdvmm/ctl:/run/tdvmm/ctl:rw
   worker:
     environment:
       INTERVAL_SECONDS: ${TDVMM_INTERVAL:-3600}
@@ -28,5 +29,6 @@ services:
     - /var/lib/tdvmm-stack/binds/worker/config:/etc/app:rw
     - state:/var/state
     - /run/tdvmm/events:/run/tdvmm/events:rw
+    - /run/tdvmm/ctl:/run/tdvmm/ctl:rw
 volumes:
   state: null

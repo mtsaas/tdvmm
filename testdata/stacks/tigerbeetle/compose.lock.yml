@@ -25,6 +25,7 @@ services:
     volumes:
     - /var/lib/tdvmm-stack/binds/client/client.sh:/scripts/client.sh:ro
     - /run/tdvmm/events:/run/tdvmm/events:rw
+    - /run/tdvmm/ctl:/run/tdvmm/ctl:rw
   replica0:
     entrypoint:
     - /bin/sh
@@ -39,6 +40,7 @@ services:
     volumes:
     - /var/lib/tdvmm-stack/binds/replica0/replica.sh:/scripts/replica.sh:ro
     - /run/tdvmm/events:/run/tdvmm/events:rw
+    - /run/tdvmm/ctl:/run/tdvmm/ctl:rw
   replica1:
     entrypoint:
     - /bin/sh
@@ -53,6 +55,7 @@ services:
     volumes:
     - /var/lib/tdvmm-stack/binds/replica1/replica.sh:/scripts/replica.sh:ro
     - /run/tdvmm/events:/run/tdvmm/events:rw
+    - /run/tdvmm/ctl:/run/tdvmm/ctl:rw
   replica2:
     entrypoint:
     - /bin/sh
@@ -67,3 +70,4 @@ services:
     volumes:
     - /var/lib/tdvmm-stack/binds/replica2/replica.sh:/scripts/replica.sh:ro
     - /run/tdvmm/events:/run/tdvmm/events:rw
+    - /run/tdvmm/ctl:/run/tdvmm/ctl:rw

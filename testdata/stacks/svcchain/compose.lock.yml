@@ -26,6 +26,7 @@ services:
     volumes:
     - /var/lib/tdvmm-stack/binds/backend/backend-loop.sh:/opt/tdvmm/backend-loop.sh:ro
     - /run/tdvmm/events:/run/tdvmm/events:rw
+    - /run/tdvmm/ctl:/run/tdvmm/ctl:rw
   db:
     environment:
       POSTGRES_DB: appdb
@@ -43,6 +44,7 @@ services:
     volumes:
     - /var/lib/tdvmm-stack/binds/db/schema.sql:/docker-entrypoint-initdb.d/10-schema.sql:ro
     - /run/tdvmm/events:/run/tdvmm/events:rw
+    - /run/tdvmm/ctl:/run/tdvmm/ctl:rw
   frontend:
     command:
     - /bin/sh
@@ -58,3 +60,4 @@ services:
     image: docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616
     volumes:
     - /run/tdvmm/events:/run/tdvmm/events:rw
+    - /run/tdvmm/ctl:/run/tdvmm/ctl:rw

@@ -1,10 +1,10 @@
 //! CLI surface: the clap arg structs for every `tdvmm` subcommand, plus
-//! `EffectiveConfig` — the resolved run configuration (baked < scenario < flag)
-//! every boot path hands to the vCPU loop.
+//! `EffectiveConfig` — the resolved run configuration (baked < flag) every boot
+//! path hands to the vCPU loop.
 
 use clap::{Args, Parser, Subcommand};
 
-use crate::{artifact, scenario};
+use crate::artifact;
 use crate::{DEFAULT_CMDLINE, DEFAULT_MAX_JUMP_SECS, DEFAULT_MEM_MIB};
 
 #[derive(Parser)]
@@ -14,13 +14,16 @@ use crate::{DEFAULT_CMDLINE, DEFAULT_MAX_JUMP_SECS, DEFAULT_MEM_MIB};
     long_about = "A single-vCPU, fast-forwardable KVM VMM. `run` boots a self-contained \
                   .tdvmm stack artifact (baked defaults, overridable by flags); `boot` is \
                   the low-level raw kernel+initramfs verb for VMM development.\n\n\
+                  A stack whose compose marks one service `x-tdvmm-driver: true` is a \
+                  TEST: that container drives the workload AND the harness (it injects \
+                  partitions/kills through the control socket), and its exit code decides \
+                  the run.\n\n\
                   Durations (--max-virtual-time): a bare number is seconds, or use a \
                   suffix (ms, s, m, h), e.g. 500ms, 30s, 5m, 2h.",
     after_help = "Examples:\n  \
                   tdvmm doctor\n  \
                   tdvmm build myapp ./compose.yml\n  \
                   tdvmm run myapp\n  \
-                  tdvmm test myapp --scenario ./scenario.yml\n  \
                   tdvmm ls",
     version
 )]
@@ -44,24 +47,25 @@ pub(crate) enum Cmd {
     /// The content-hash cache makes an unchanged stack near-instant to re-bake.
     #[command(after_help = "Example:\n  tdvmm build myapp ./compose.yml -o myapp.tdvmm")]
     Build(BuildCliArgs),
-    /// Run a .tdvmm stack (offline).
-    ///
-    /// Loads the artifact (a store name or a path), applies its baked run-defaults,
-    /// then boots. Flags override the baked defaults.
-    #[command(after_help = "Example:\n  tdvmm run insert-trim --ff on   (a store name, or a path to a .tdvmm)")]
-    Run(RunArgs),
-    /// Test a .tdvmm stack against a scenario.
+    /// Run a .tdvmm stack (offline). With a driver service, this IS the test.
     #[command(
-        long_about = "Test a .tdvmm stack against a scenario: drive virtual time, assert, \
-                      verdict.\n\nExit codes (the shared tdvmm 0-3 contract; `test` itself only \
-                      ever produces 0/1/2 — 3 is `build`/`boot`/`run`'s REJECTED/horizon code):\n  \
-                      0  PASS — every assertion held\n  \
-                      1  FAIL — a scenario assertion failed\n  \
-                      2  ERROR — test infrastructure fault: bad/rejected scenario (including \
-                      static validation before boot), agent unreachable, wall-clock timeout, ...",
-        after_help = "Example:\n  tdvmm test myapp.tdvmm --scenario ./scenario.yml"
+        long_about = "Run a .tdvmm stack. Loads the artifact (a store name or a path), \
+                      applies its baked run-defaults, then boots. Flags override the baked \
+                      defaults.\n\nIf the stack marks one service `x-tdvmm-driver: true`, \
+                      that container is the DRIVER: it alone gets the control socket \
+                      bind-mount, so it can inject faults (partition/kill/heal) into its own \
+                      cluster while its requests are in flight — and when it exits, the run \
+                      ends. A test is just a run with a driver.\n\nExit codes (the shared \
+                      tdvmm 0-3 contract):\n  \
+                      0  the driver exited 0 (PASS), or a driverless guest stopped cleanly\n  \
+                      1  FAIL — the driver exited nonzero (its own code is logged and written \
+                      to --metrics-out)\n  \
+                      2  ERROR — infrastructure fault: the artifact, the agent, the driver \
+                      watcher, or the wall-clock safety timeout\n  \
+                      3  the --max-virtual-time horizon fired first",
+        after_help = "Example:\n  tdvmm run insert-trim --ff on   (a store name, or a path to a .tdvmm)"
     )]
-    Test(TestArgs),
+    Run(RunArgs),
     /// List the .tdvmm artifacts in the local store.
     Ls(LsArgs),
     /// Print a .tdvmm artifact's manifest.
@@ -267,35 +271,13 @@ pub(crate) struct RunArgs {
     /// (graceful stop paths only). Off by default; opt-in developer output.
     #[arg(long, value_name = "DIR")]
     pub(crate) logs_dir: Option<String>,
-    #[command(flatten)]
-    pub(crate) common: CommonRunFlags,
-}
-
-#[derive(Args)]
-pub(crate) struct TestArgs {
-    /// A store name (e.g. `tigerbeetle`) or a path to a .tdvmm artifact.
-    #[arg(value_name = "stack")]
-    pub(crate) artifact: String,
-    /// The scenario YAML (steps + assertions).
-    #[arg(long, value_name = "PATH")]
-    pub(crate) scenario: String,
-    /// Skip the default-ON member-hash verification on load.
-    #[arg(long)]
-    pub(crate) no_verify: bool,
-    /// JSONL run-log path (default `<artifact>.jsonl`).
-    #[arg(long, value_name = "PATH")]
-    pub(crate) jsonl: Option<String>,
-    /// JSON report path (default `<artifact>.report.json`).
-    #[arg(long, value_name = "PATH")]
-    pub(crate) report: Option<String>,
-    /// Wall-clock safety timeout (seconds); a run exceeding it fails with exit 2.
-    #[arg(long, value_name = "SECS", default_value_t = 600)]
-    pub(crate) wall_timeout: u64,
-    /// Pull each service's container log into `<dir>/<service>.log` at scenario
-    /// finalize (after the verdict, before the VM stops). Off by default; a
-    /// sibling output that never affects the verdict, JSONL, or report.
-    #[arg(long, value_name = "DIR")]
-    pub(crate) logs_dir: Option<String>,
+    /// Wall-clock safety timeout (seconds); a run exceeding it stops with exit 2.
+    ///
+    /// Unset (the default) means no limit, so an ordinary long run is never cut
+    /// short. Set it for a DRIVEN run: it is the fallback that ends a test whose
+    /// driver died without calling `finish()`, since nothing else is watching.
+    #[arg(long, value_name = "SECS")]
+    pub(crate) wall_timeout: Option<u64>,
     #[command(flatten)]
     pub(crate) common: CommonRunFlags,
 }
@@ -360,14 +342,14 @@ pub(crate) struct EffectiveConfig {
     pub(crate) max_jump_secs: f64,
     pub(crate) max_virtual_time_secs: Option<f64>,
     pub(crate) metrics_out: Option<String>,
-    /// Whether host-mediated egress is opened for this run. Resolved with
-    /// precedence `scenario < flag` and DELIBERATELY no baked tier — an artifact
-    /// must never gain network access merely by being re-baked (see [`resolve`]).
+    /// Whether host-mediated egress is opened for this run. Set by the flag ALONE,
+    /// with DELIBERATELY no baked tier — an artifact must never gain network
+    /// access merely by being re-baked (see [`resolve`]).
     pub(crate) allow_egress: bool,
     /// The formatted per-knob provenance, e.g.
     /// `mem=3072 (baked) ff=off (flag) horizon=36h (baked) ...`. Gains an
-    /// `egress=on (flag|scenario)` token ONLY when egress is opened, so a
-    /// closed-world run's line is byte-identical to before this feature.
+    /// `egress=on (flag)` token ONLY when egress is opened, so a closed-world
+    /// run's line is byte-identical to before this feature.
     pub(crate) provenance: String,
 }
 
@@ -375,7 +357,7 @@ impl EffectiveConfig {
     /// Resolve for `tdvmm boot`: no baked defaults; each knob is a flag override of
     /// the binary default.
     pub(crate) fn from_boot(f: &CommonRunFlags) -> Result<EffectiveConfig, Box<dyn std::error::Error>> {
-        Self::resolve(f, None, None)
+        Self::resolve(f, None)
     }
 
     /// Resolve for `tdvmm run`: the artifact's baked run-defaults, each overridable
@@ -384,51 +366,37 @@ impl EffectiveConfig {
         f: &CommonRunFlags,
         baked: &artifact::RunDefaults,
     ) -> Result<EffectiveConfig, Box<dyn std::error::Error>> {
-        Self::resolve(f, Some(baked), None)
-    }
-
-    /// Resolve for `tdvmm test`: baked run-defaults, overridable by the scenario's
-    /// `run:` block, overridable by CLI flags. Precedence: baked < scenario < flag.
-    pub(crate) fn from_test(
-        f: &CommonRunFlags,
-        baked: &artifact::RunDefaults,
-        scn: &scenario::ScenarioRun,
-    ) -> Result<EffectiveConfig, Box<dyn std::error::Error>> {
-        Self::resolve(f, Some(baked), Some(scn))
+        Self::resolve(f, Some(baked))
     }
 
     fn resolve(
         f: &CommonRunFlags,
         baked: Option<&artifact::RunDefaults>,
-        scn: Option<&scenario::ScenarioRun>,
     ) -> Result<EffectiveConfig, Box<dyn std::error::Error>> {
         let mut prov: Vec<String> = Vec::new();
 
-        // mem: flag > scenario > baked > default.
-        let (mem_mib, mem_src) = match (f.mem, scn.and_then(|s| s.mem), baked) {
-            (Some(v), _, _) => (v, "flag"),
-            (None, Some(v), _) => (v, "scenario"),
-            (None, None, Some(b)) => (b.mem_mib, "baked"),
-            (None, None, None) => (DEFAULT_MEM_MIB, "default"),
+        // mem: flag > baked > default.
+        let (mem_mib, mem_src) = match (f.mem, baked) {
+            (Some(v), _) => (v, "flag"),
+            (None, Some(b)) => (b.mem_mib, "baked"),
+            (None, None) => (DEFAULT_MEM_MIB, "default"),
         };
         prov.push(format!("mem={mem_mib} ({mem_src})"));
 
         // cmdline
-        let (cmdline, cl_src) = match (&f.cmdline, scn.and_then(|s| s.cmdline.as_ref()), baked) {
-            (Some(v), _, _) => (v.clone(), "flag"),
-            (None, Some(v), _) => (v.clone(), "scenario"),
-            (None, None, Some(b)) => (b.cmdline.clone(), "baked"),
-            (None, None, None) => (DEFAULT_CMDLINE.to_string(), "default"),
+        let (cmdline, cl_src) = match (&f.cmdline, baked) {
+            (Some(v), _) => (v.clone(), "flag"),
+            (None, Some(b)) => (b.cmdline.clone(), "baked"),
+            (None, None) => (DEFAULT_CMDLINE.to_string(), "default"),
         };
         prov.push(format!("cmdline={cmdline:?} ({cl_src})"));
 
         // fast-forward
         let ff_explicit = f.ff.is_some();
-        let (fast_forward, ff_src) = match (f.ff, scn.and_then(|s| s.ff), baked) {
-            (Some(v), _, _) => (v, "flag"),
-            (None, Some(v), _) => (v, "scenario"),
-            (None, None, Some(b)) => (b.fast_forward, "baked"),
-            (None, None, None) => (true, "default"),
+        let (fast_forward, ff_src) = match (f.ff, baked) {
+            (Some(v), _) => (v, "flag"),
+            (None, Some(b)) => (b.fast_forward, "baked"),
+            (None, None) => (true, "default"),
         };
         prov.push(format!(
             "ff={} ({ff_src})",
@@ -436,15 +404,13 @@ impl EffectiveConfig {
         ));
 
         // max-virtual-time (horizon)
-        let scn_mvt = scn.and_then(|s| s.max_virtual_time.as_ref());
-        let (max_virtual_time_secs, mvt_disp, mvt_src) = match (&f.max_virtual_time, scn_mvt, baked) {
-            (Some(s), _, _) => (Some(parse_dur(s)?), s.clone(), "flag"),
-            (None, Some(s), _) => (Some(parse_dur(s)?), s.clone(), "scenario"),
-            (None, None, Some(b)) => match &b.max_virtual_time {
+        let (max_virtual_time_secs, mvt_disp, mvt_src) = match (&f.max_virtual_time, baked) {
+            (Some(s), _) => (Some(parse_dur(s)?), s.clone(), "flag"),
+            (None, Some(b)) => match &b.max_virtual_time {
                 Some(s) => (Some(parse_dur(s)?), s.clone(), "baked"),
                 None => (None, "unset".to_string(), "baked"),
             },
-            (None, None, None) => (None, "unset".to_string(), "default"),
+            (None, None) => (None, "unset".to_string(), "default"),
         };
         prov.push(format!("max-virtual-time={mvt_disp} ({mvt_src})"));
 
@@ -459,22 +425,16 @@ impl EffectiveConfig {
         // preamble records the proto version so a run log is self-describing.
         prov.push(format!("proto-schema={} (built-in)", tdvmm_proto::SCHEMA));
 
-        // allow-egress: precedence `scenario < flag`, with DELIBERATELY no baked
-        // tier. Egress opens the closed world to guest-initiated network I/O; an
-        // artifact must never gain that merely by being re-baked, so a baked
-        // default is intentionally unrepresentable here (there is no
-        // `RunDefaults.allow_egress` to consult). The `--allow-egress` presence
-        // flag can only turn it ON, never override a scenario's ON back to off.
-        let allow_egress = if f.allow_egress {
-            true // flag
-        } else {
-            scn.map(|s| s.allow_egress).unwrap_or(false) // scenario, else default off
-        };
+        // allow-egress: the flag ALONE, with DELIBERATELY no baked tier. Egress
+        // opens the closed world to guest-initiated network I/O; an artifact must
+        // never gain that merely by being re-baked, so a baked default is
+        // intentionally unrepresentable here (there is no
+        // `RunDefaults.allow_egress` to consult).
+        let allow_egress = f.allow_egress;
         // Provenance token ONLY when opened, so a closed-world run's line is
         // byte-identical to before this feature (INV-E0).
         if allow_egress {
-            let src = if f.allow_egress { "flag" } else { "scenario" };
-            prov.push(format!("egress=on ({src})"));
+            prov.push("egress=on (flag)".to_string());
         }
 
         Ok(EffectiveConfig {

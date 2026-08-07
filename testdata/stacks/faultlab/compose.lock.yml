@@ -15,6 +15,7 @@ services:
     image: localhost/tdvmm-postgres-57c72fd2a128@sha256:cbf217007d0742829dc120c3ea9cd2621e90eb3adfeaf6684e87ce268a2ca368
     volumes:
     - /run/tdvmm/events:/run/tdvmm/events:rw
+    - /run/tdvmm/ctl:/run/tdvmm/ctl:rw
   db:
     environment:
       POSTGRES_DB: appdb
@@ -23,3 +24,4 @@ services:
     shm_size: 256m
     volumes:
     - /run/tdvmm/events:/run/tdvmm/events:rw
+    - /run/tdvmm/ctl:/run/tdvmm/ctl:rw

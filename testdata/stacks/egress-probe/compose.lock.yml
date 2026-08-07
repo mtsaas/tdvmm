@@ -11,3 +11,4 @@ services:
     volumes:
     - /var/lib/tdvmm-stack/binds/probe/probe.sh:/opt/tdvmm/probe.sh:ro
     - /run/tdvmm/events:/run/tdvmm/events:rw
+    - /run/tdvmm/ctl:/run/tdvmm/ctl:rw
