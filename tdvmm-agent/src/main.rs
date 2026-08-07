@@ -1,37 +1,23 @@
 //! `tdvmm-agent` — the guest-side control-channel executor.
 //!
-//! A tiny STATIC (musl) binary baked into every `.tdvmm`, running OUTSIDE the
-//! workload containers. It is the guest end of the modeled control channel: the
-//! 2nd 16550 (COM2 / ttyS1). Protocol: line-delimited JSON ([`tdvmm_proto`]), one
-//! request per line in, one reply per line out.
-//!
-//! **Fast-forward transparency is the whole point of the transport:** the agent
-//! BLOCKS reading `/dev/ttyS1`. A blocked read arms no timer and generates no
-//! wakes, so an idle guest with the agent baked in fast-forwards exactly as it
-//! would without it. When the VMM delivers a command (at its scheduled virtual
-//! time) it raises IRQ3; the agent wakes, runs the command, writes one reply
-//! line, and blocks again.
+//! A static (musl) binary baked into every `.tdvmm`, running outside the workload
+//! containers. It speaks [`tdvmm_proto`] line-JSON over COM2/ttyS1 and blocks
+//! reading `/dev/ttyS1`; a blocked read arms no timer, so an idle guest with the
+//! agent baked in stays fast-forward-transparent. The VMM raises IRQ3 to deliver a
+//! command; the agent wakes, replies with one line, and blocks again.
 //!
 //! Ops: `ping`, `exec`, `containers`, `kill`, `stop`, `start`, `partition`,
-//! `heal`, `logs`. An unknown op is rejected. kill/stop/start WAIT for the
-//! container to reach its new state so a following census is deterministic.
-//! `logs` is a single BOUNDED read of a container's k8s-file log at a byte
-//! cursor — never a follow/tail (`-f` would defeat host fast-forward) — so the
-//! agent blocks again immediately after replying, exactly like every other op.
+//! `heal`, `logs`; an unknown op is rejected. `kill`/`stop`/`start` wait for the
+//! container to reach its new state; `logs` is a single bounded read at a byte
+//! cursor, never a follow/tail.
 //!
-//! ## The control socket (schema 4)
+//! The agent also serves [`tdvmm_proto::CONTROL_SOCKET_PATH`], the same line JSON
+//! over a unix socket bind-mounted into every container: a container injects the
+//! host's faults through the same [`agent::Agent`] dispatch while its own requests
+//! are in flight, and ends the run with `finish`.
 //!
-//! The agent also serves [`tdvmm_proto::CONTROL_SOCKET_PATH`]: the same
-//! [`tdvmm_proto::Request`]/[`tdvmm_proto::Reply`] line JSON, over a unix socket
-//! whose directory is bind-mounted into EVERY container, exactly like the events
-//! FIFO. A container therefore injects the very faults the host can, through the
-//! very same [`agent::Agent`] dispatch, and can do so WHILE its own requests to
-//! the cluster are in flight — the Jepsen shape: workload and fault are one
-//! program. `finish` ends the run with a verdict.
-//!
-//! Deps: `tdvmm-proto` + `serde_json` (+ `serde` derive, already transitive) +
-//! `std` ONLY. Raw-mode termios is done with a std-only inline-asm `ioctl`
-//! syscall — no `libc`.
+//! Deps: `tdvmm-proto` + `serde_json` + `std` only; raw-mode termios uses a
+//! std-only inline-asm `ioctl`, no `libc`.
 
 use std::fs::OpenOptions;
 use std::os::fd::AsRawFd;
@@ -59,9 +45,8 @@ pub(crate) const BUILD: &str = match option_env!("TDVMM_AGENT_BUILD") {
 };
 
 fn main() -> ExitCode {
-    // `tdvmm-agent forward` runs the egress SOCKS5h forwarder (COM4/ttyS3) instead
-    // of the control-channel loop. The guest init starts it as a SEPARATE process
-    // only on `tdvmm.egress=1`, so the default (no arg) path is unchanged.
+    // `tdvmm-agent forward` runs the egress forwarder (COM4/ttyS3) instead of the
+    // control-channel loop; the guest init starts it only on `tdvmm.egress=1`.
     if std::env::args().nth(1).as_deref() == Some("forward") {
         return forwarder::run();
     }
@@ -78,13 +63,10 @@ fn main() -> ExitCode {
         }
     };
 
-    // Raw mode is REQUIRED, not best-effort. The default tty line discipline ECHOes
-    // input, which would bounce every received command straight back to the VMM as
-    // spurious "reply" bytes and desync the line-delimited protocol; it also does
-    // canonical line-buffering and \n<->\r\n translation, so the bytes on the wire
-    // would no longer be what each side wrote. There is no usable fallback, so a
-    // failure here is fatal. (VMIN=1/VTIME=0 => a read blocks until >=1 byte, arming
-    // no timer, so it stays fast-forward-transparent.)
+    // Raw mode is required: the default line discipline would echo input back to
+    // the VMM as spurious reply bytes and rewrite the wire bytes (\n<->\r\n,
+    // canonical buffering), desyncing the protocol. VMIN=1/VTIME=0 keeps the read
+    // blocking with no timer armed. A failure here is fatal.
     if let Err(e) = sys::set_raw(file.as_raw_fd()) {
         eprintln!("tdvmm-agent: cannot set raw mode on {dev}: errno {e}");
         return ExitCode::FAILURE;
@@ -99,10 +81,9 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    // Event bridge (schema 3): a guest FIFO the workload containers write assertion
-    // events to. O_RDWR is load-bearing — the agent's open never blocks, a container
-    // `echo > fifo` never blocks, and poll never storms POLLHUP (the agent is always
-    // a writer). An absent FIFO degrades to control-only.
+    // Event bridge: a guest FIFO the workload containers write assertion events to.
+    // O_RDWR keeps the agent a writer, so its open never blocks and poll never
+    // storms POLLHUP. An absent FIFO degrades to control-only.
     let fifo_path = std::env::var("TDVMM_AGENT_FIFO")
         .unwrap_or_else(|_| tdvmm_proto::EVENT_FIFO_PATH.to_string());
     let fifo = match OpenOptions::new().read(true).write(true).open(&fifo_path) {
@@ -115,10 +96,8 @@ fn main() -> ExitCode {
 
     let mut agent = Agent::new();
 
-    // Control socket (schema 4): bound BEFORE the hello, so "agent ready" implies
-    // "socket ready" and a container that connects the instant it starts is never
-    // refused. Unconditional — there is no driver flag to gate on, because a run
-    // becomes a test simply by some container connecting and calling `finish`.
+    // Control socket: bound before the hello, so "agent ready" implies "socket
+    // ready" and a container connecting the instant it starts is never refused.
     let ctl = match bind_control_socket() {
         Ok(l) => {
             eprintln!(
@@ -128,9 +107,8 @@ fn main() -> ExitCode {
             Some(l)
         }
         Err(e) => {
-            // Without the socket no container can drive the harness. Report loudly
-            // and keep serving ttyS1: the console log then says exactly why a
-            // driver's connect failed.
+            // Without the socket no container can drive the harness; keep serving
+            // ttyS1 so the console log says why a driver's connect failed.
             eprintln!(
                 "tdvmm-agent: cannot bind {} ({e}); no container can control the harness",
                 tdvmm_proto::CONTROL_SOCKET_PATH
@@ -139,29 +117,22 @@ fn main() -> ExitCode {
         }
     };
 
-    // Proactive hello: the VMM's harness waits for this to mark the agent ready (no
-    // ping round-trip needed). Carries schema + build (the compat oracle). If it
+    // Proactive hello: the host waits for this to mark the agent ready. If it
     // cannot be written the control channel is already dead, so give up.
     if let Err(e) = write_line(&mut writer, &Reply::hello(AGENT_ID, BUILD)) {
         eprintln!("tdvmm-agent: cannot write hello on {dev}: {e}");
         return ExitCode::FAILURE;
     }
 
-    // One blocked poll over every source: ttyS1 (control), the event FIFO, and the
-    // control socket. An infinite-timeout poll arms no timer and generates no
-    // wakes, so fast-forward transparency holds no matter how many sources are
-    // attached.
+    // One blocked poll over every source: ttyS1, the event FIFO, and the control
+    // socket. An infinite-timeout poll arms no timer, keeping fast-forward
+    // transparent.
     run_loop(Sources { control: file, events: fifo, ctl }, &mut writer, &mut agent);
     ExitCode::SUCCESS
 }
 
-/// Create the control directory and bind the listener inside it.
-///
-/// The socket is world-read/write: the guest is a closed test world where every
-/// container already has the bind, and a container's image may well run as a
-/// non-root user that could not otherwise connect. `/run` is a fresh tmpfs each
-/// boot, so the unlink is belt-and-braces against a re-exec, not a real
-/// stale-socket case.
+/// Create the control directory and bind the listener inside it, world-read/write
+/// so a container running as a non-root user can still connect.
 fn bind_control_socket() -> std::io::Result<UnixListener> {
     std::fs::create_dir_all(tdvmm_proto::CONTROL_DIR)?;
     let _ = std::fs::remove_file(tdvmm_proto::CONTROL_SOCKET_PATH);

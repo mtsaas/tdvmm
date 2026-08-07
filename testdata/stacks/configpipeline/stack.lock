@@ -4,8 +4,8 @@ project   tdvmm_configpipeline
 mem_mib   3072
 ram_estimate_mib  1064
 compose_lock_sha256  c116fcef899a9fc3b095f587d39505802dd1e4e75fce4e063e8ad06ab3cb3ed1
-initramfs_sha256     e29f4c61abebbee4baa0bbb4021ada403694a0204d83172c5125cbb494f3e59e  initramfs-alpine-configpipeline.cpio.gz
-agent_sha256         9b548f2cbbae11a0d11e5bb18e7275f23f86b3a0d8b490a7ecf9eb7f9b790c51  tdvmm-agent
+initramfs_sha256     2003c8b834f830136aff6e99b8f5fd6861fb9a86a0921ef41078b5798667bf39  initramfs-alpine-configpipeline.cpio.gz
+agent_sha256         1e01d9ccc767b05de3e42b657a0240666d4c8daf83a329061c17d270bb63a7f0  tdvmm-agent
 builder_image        docker.io/library/alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
 builder_image        docker.io/library/debian:bookworm-slim@sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e
 builder_image        docker.io/library/rust:1.97-alpine3.22@sha256:b348cb409ac0a73de15065997a360063cf87465574a15e3e4469862cb8996f02
@@ -14,4 +14,4 @@ builder_image        docker.io/library/rust:1.97-alpine3.22@sha256:b348cb409ac0a
   image  policy=plain   upstream=docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616  diffid=sha256:0958e0fef2d6a31e1325b8bfecd99dead933363682d69850a7606599023751bc  size_mib=4
   image  policy=plain   upstream=docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616  diffid=sha256:0958e0fef2d6a31e1325b8bfecd99dead933363682d69850a7606599023751bc  size_mib=4
   pin    upstream=localhost/tdvmm-configpipeline-worker:corpus  pinned=localhost/tdvmm-configpipeline-worker@sha256:c05937c63df870e5f337543187d64a50975ec54794df45ed06e4182348dc4422
-tdvmm_sha256          424bd78c6dae6d4f7a7623d46d34fff71a9cd5d44f9f395fa6f3a17cd4675f07  configpipeline.tdvmm
+tdvmm_sha256          e084621b0e83c6ec27a14007bbfa09352bd7d7a608949bc9896715f29cfacc6c  configpipeline.tdvmm

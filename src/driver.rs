@@ -1,23 +1,17 @@
 //! Host-side driver-run state: the verdict a container declared over the guest
-//! control socket, and how it maps onto `tdvmm run`'s exit-code contract.
+//! control socket ([`tdvmm_proto::OP_FINISH`]), and its map onto `tdvmm run`'s
+//! exit code. Inert until a container drives; a plain `run` is unaffected.
 //!
-//! `tdvmm run` boots the stack. If a container connects to the control socket
-//! ([`tdvmm_proto::CONTROL_SOCKET_PATH`]) and calls [`tdvmm_proto::OP_FINISH`],
-//! the agent emits a `finish` event up ttyS1, this type records it, and the run
-//! ends with that verdict. A run no container drives is unaffected.
+//! The raw verdict code is collapsed onto the exit contract and kept verbatim in
+//! the run summary and `--metrics-out`:
 //!
-//! The driver's raw exit code is not returned verbatim; it is collapsed onto
-//! `run`'s 0/1/2/3 contract, and the raw code is kept in the run summary and
-//! `--metrics-out`:
-//!
-//! | outcome | `run` exits |
+//! | verdict | `run` exits |
 //! |---|---|
 //! | `finish(0)` | 0 — PASS |
 //! | `finish(n)`, n ≠ 0 | 1 — FAIL (raw `n` reported, not returned) |
-//! | `finish` with no usable verdict | 2 — the agent sent something malformed |
-//! | no `finish`, guest stopped cleanly | 0 — today's behavior, unchanged |
-//! | no `finish`, horizon fired | 3 — today's behavior, unchanged |
-//! | no `finish`, wall-clock timeout | 2 — the safety net for a wedged driver |
+//! | `finish` with no `exit` | 1 — FAIL; graded infra, never a pass |
+//!
+//! A run with no `finish` exits on its [`StopReason`](crate::exit::StopReason).
 
 use tdvmm_proto::{decode_line, GuestEvent, Reply};
 
@@ -33,7 +27,7 @@ pub(crate) struct Verdict {
 }
 
 impl Verdict {
-    /// This verdict as a process exit code — see the module doc's table.
+    /// This verdict as a process exit code: 0 for a passing verdict, else FAIL(1).
     pub(crate) fn exit_code(&self) -> i32 {
         if self.code == 0 {
             EXIT_PASS
@@ -189,12 +183,10 @@ impl DriverRun {
             if self.agent_ready { "ready" } else { "NEVER READY" },
         ))
     }
-}
 
-impl DriverRun {
     /// The `--metrics-out` block for a driven run: the raw verdict code (the only
-    /// place it survives, since the exit code collapses it) plus the command
-    /// counts. Empty for an undriven run.
+    /// place it survives the exit-code collapse) plus the command counts. Empty
+    /// for an undriven run.
     pub(crate) fn metrics_block(&self) -> String {
         if !self.was_driven() {
             return String::new();

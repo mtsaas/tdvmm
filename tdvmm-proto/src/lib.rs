@@ -1,36 +1,20 @@
-//! `tdvmm-proto` — the control-channel wire protocol, the ONE source of truth for
-//! the line-delimited JSON spoken over COM2/ttyS1 between the VMM host and the
-//! guest-side `tdvmm-agent`.
+//! `tdvmm-proto` — the control-channel wire protocol: the line-delimited JSON
+//! spoken between the VMM host and the guest-side `tdvmm-agent`. Protocol-only —
+//! the message types, the [`SCHEMA`] constant, the [`ErrorKind`] taxonomy, and the
+//! line-framing helpers; `serde` + `serde_json` are the only dependencies.
 //!
-//! Fable LOCKED this crate to be **protocol-only**: the request/response types
-//! (serde), the [`SCHEMA`] version constant, the error taxonomy as plain data
-//! ([`ErrorKind`]), and the **line-framing** encode/decode helpers (framing is
-//! part of the wire contract). Dependencies are `serde` + `serde_json` ONLY — no
-//! business logic, no I/O, no `anyhow`/`chrono`.
+//! One JSON object per line, `\n`-delimited, both directions:
 //!
-//! ## The transport
+//! * host → agent: a [`Request`]; an unknown `op` is rejected.
+//! * agent → host: a [`Reply`], covering both a command reply and the proactive
+//!   *hello* the agent emits on start (`agent`/`schema`/`build`, no `id`/`ok`),
+//!   which the host waits on to mark the agent ready. A hello is identified by
+//!   `id.is_none() && agent.is_some()`.
 //!
-//! One JSON object per line, `\n`-delimited, in both directions:
-//!
-//! * host → agent: a [`Request`] (`op` = `ping`/`exec`/`containers`/`kill`/
-//!   `stop`/`start`/`partition`/`heal`/`logs`; unknown `op` is rejected by the agent).
-//! * agent → host: a [`Reply`]. The agent also emits one **proactive** [`Reply`]
-//!   on start — the *hello* handshake (`agent`/`schema`/`build` set, no `id`/`ok`)
-//!   — which the host waits on to mark the agent ready. `ping` echoes the same
-//!   `schema` + `build`, so the handshake doubles as the compatibility oracle.
-//!
-//! A single permissive [`Reply`] type carries BOTH the hello and every command
-//! reply: `id`/`ok`/`op` are optional, so a hello (no `id`, no `ok`) and a
-//! command reply (both present) share one type. The host distinguishes a hello by
-//! `id.is_none() && agent.is_some()`.
-//!
-//! ## The control socket (schema 4)
-//!
-//! [`CONTROL_SOCKET_PATH`] carries the SAME [`Request`]/[`Reply`] line JSON over a
-//! unix-domain socket the agent serves in-guest, bind-mounted into every
-//! container. A container therefore injects faults through the very same op set
-//! and the very same handler as the host — and ends the run, with a verdict, via
-//! [`OP_FINISH`]. One wire contract, three speakers.
+//! [`CONTROL_SOCKET_PATH`] carries the same [`Request`]/[`Reply`] JSON over a unix
+//! socket the agent serves in-guest, bind-mounted into every container: any
+//! container injects the host's op set through the same handler, and ends the run
+//! with a verdict via [`OP_FINISH`].
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -40,58 +24,40 @@ use serde::{Deserialize, Serialize};
 /// [`egress::EGRESS_SCHEMA`].
 pub mod egress;
 
-/// The wire-protocol schema version. Embedded in the hello + `ping` reply and
-/// recorded in the run-log preamble. Bump on ANY change to the types below (a
-/// bump also requires regenerating the golden fixtures in the same commit).
-///
-/// * 1 — the original op set (`ping`/`exec`/`containers`/`kill`/`stop`/`start`/
-///   `partition`/`heal`).
-/// * 2 — adds the `logs` op (cursor-paged per-container k8s-file log fetch).
-/// * 3 — adds guest→host assertion events: unsolicited, id-less [`Reply`]s
-///   carrying a [`GuestEvent`], which the agent bridges from a guest FIFO.
-/// * 4 — the control socket ([`CONTROL_SOCKET_PATH`]): the agent serves
-///   [`Request`]s from any container over a unix socket, mirrors each as a `ctl`
-///   [`GuestEvent`], and turns the terminal `finish` op into a `finish` event
-///   carrying [`GuestEvent::exit`] — the run's verdict.
+/// The wire-protocol schema version, embedded in the hello + `ping` reply. Bump on
+/// any change to the types below; a bump requires regenerating the golden fixtures
+/// in the same commit.
 pub const SCHEMA: u32 = 4;
 
-/// Hard cap on a single `logs` reply's `data` payload: 128 KiB of raw k8s-file
-/// bytes. JSON-escaping can ~double that on the wire, which still stays well
-/// under the host's 1 MiB captured-TX drop threshold (`control.rs` TX_BUF_CAP) —
-/// so a reply is never silently dropped. The agent enforces this regardless of a
-/// larger requested `max_bytes`; the host loops via `next_cursor`/`eof` to read a
-/// log larger than one chunk.
+/// Hard cap on a single `logs` reply's `data` payload (128 KiB of raw k8s-file
+/// bytes); JSON-escaping stays under the host's captured-TX drop threshold. The
+/// agent enforces it regardless of a larger requested `max_bytes`; the host pages
+/// a larger log via `next_cursor`/`eof`.
 pub const MAX_LOGS_CHUNK_BYTES: u64 = 128 * 1024;
 
-/// The guest-side event-bridge FIFO path (schema 3). The single source of truth
-/// shared by the host (compose bind injection) and the agent (its read fd); the
-/// boot script's `mkfifo` literal must match this string.
+/// The guest-side event-bridge FIFO path: the source of truth shared by the host
+/// (compose bind injection), the agent (its read fd), and the boot script's
+/// `mkfifo`.
 pub const EVENT_FIFO_PATH: &str = "/run/tdvmm/events";
 
-/// The control-socket DIRECTORY (schema 4). Bind-mounted read-write into EVERY
-/// service, exactly like the events FIFO: the guest is a closed test world, so
-/// any container may drive the harness. The directory (not the socket file) is
-/// the bind unit, so the agent's `bind()` creates a fresh inode that every
-/// container sees through the mount.
+/// The control-socket directory, bind-mounted read-write into every service. The
+/// directory (not the socket file) is the bind unit, so the agent's `bind()`
+/// creates an inode every container sees through the mount.
 pub const CONTROL_DIR: &str = "/run/tdvmm/ctl";
 
-/// The control socket (schema 4): a unix-domain socket inside [`CONTROL_DIR`],
-/// served by the agent, speaking this crate's line JSON. The single source of
-/// truth shared by the host (compose bind injection), the agent (its listener),
-/// and the language SDKs (their connect path).
+/// The control socket: a unix-domain socket inside [`CONTROL_DIR`], served by the
+/// agent and speaking this crate's line JSON. The connect path shared by the agent
+/// and the language SDKs.
 pub const CONTROL_SOCKET_PATH: &str = "/run/tdvmm/ctl/sock";
 
-/// The terminal op: a container declares the run over and supplies its verdict
-/// ([`Request::exit`], plus an optional [`Request::message`]). The agent turns
-/// the FIRST one into a `finish` [`GuestEvent`] up ttyS1; the HOST ends the run
-/// on it. A run is a "test" purely because some container called this.
+/// The terminal op: a container declares the run over with a verdict
+/// ([`Request::exit`] + optional [`Request::message`]). The agent turns the first
+/// one into a `finish` [`GuestEvent`]; the host ends the run on it.
 pub const OP_FINISH: &str = "finish";
 
-/// [`GuestEvent`] kinds the AGENT alone may originate. A line carrying one of
-/// these that arrived over the shared events FIFO is rewritten to `invalid`, so
-/// the run's verdict and its fault trace can only come from the one place that
-/// actually served the command. Kept here (not in the agent) because it is part
-/// of the wire contract the host trusts.
+/// [`GuestEvent`] kinds only the agent may originate. A FIFO line claiming one is
+/// rewritten to `invalid`, so the verdict and the fault trace can come only from a
+/// command the agent served. Part of the wire contract, so it lives here.
 pub const RESERVED_EVENT_KINDS: [&str; 2] = [OP_FINISH, "ctl"];
 
 /// Whether `kind` is agent-originated only (see [`RESERVED_EVENT_KINDS`]).
@@ -103,11 +69,9 @@ pub fn is_reserved_event_kind(kind: &str) -> bool {
 // Messages
 // ============================================================================
 
-/// host → agent. One command line.
-///
-/// `op` is a free string (NOT an enum) on purpose: the agent must be able to
-/// deserialize an *unknown* op in order to reply with a structured `unknown_op`
-/// rejection, exactly like the original Go agent.
+/// host → agent. One command line. `op` is a free string, not an enum, so the
+/// agent can deserialize an unknown op and reply with a structured `unknown_op`
+/// rejection.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct Request {
     pub id: u64,
@@ -159,18 +123,14 @@ pub struct ContainerInfo {
     pub health: String,
 }
 
-/// A guest→host assertion/telemetry event (schema 3+). The agent bridges these
-/// from a guest FIFO and forwards each as an unsolicited, id-less [`Reply`]
-/// (`event` set, no `id`) — distinct from a command reply and from the hello.
+/// A guest→host assertion/telemetry event, forwarded as an unsolicited, id-less
+/// [`Reply`] (`event` set, no `id`). Two kinds are agent-originated only
+/// ([`RESERVED_EVENT_KINDS`]):
 ///
-/// Schema 4 adds two AGENT-ORIGINATED kinds ([`RESERVED_EVENT_KINDS`]), which the
-/// agent refuses to accept from the FIFO:
-///
-/// * `ctl` — one control-socket command mirrored to the host for the run trace:
-///   `name` = the op, `ok` = whether it succeeded, `details` = its target.
+/// * `ctl` — a control-socket command mirrored for the run trace: `name` = the op,
+///   `ok` = whether it succeeded, `details` = its target.
 /// * `finish` — a container called [`OP_FINISH`]; [`exit`](Self::exit) is the
-///   verdict it supplied, and `name` its optional message. The host ends the run
-///   on this event.
+///   verdict and `name` its optional message. The host ends the run on this.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct GuestEvent {
     /// `always` | `sometimes` | `fault` | `done` | `invalid` | `ctl` | `finish`.
@@ -192,13 +152,10 @@ pub struct GuestEvent {
     pub details: Option<serde_json::Value>,
 }
 
-/// agent → host. Serves BOTH the proactive *hello* and every command reply.
-///
-/// All discriminating fields are optional so one type covers the hello
-/// (`agent`/`schema`/`build`, no `id`/`ok`) and command replies (`id`/`ok` set).
-/// Empty string payloads are omitted on the wire (`skip_serializing_if`), mirror-
-/// ing the Go agent's `omitempty`; `exit` is present even when `0` (it is a real
-/// result, so `exec` always carries it).
+/// agent → host. Covers both the proactive *hello* and every command reply: all
+/// discriminating fields are optional, so a hello (`agent`/`schema`/`build`, no
+/// `id`/`ok`) and a command reply (`id`/`ok` set) share one type. Empty payloads
+/// are omitted on the wire; `exit` is kept even when `0`.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct Reply {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -354,8 +311,7 @@ pub fn trim_frame(line: &[u8]) -> &[u8] {
     &line[start..end]
 }
 
-/// Encode one message as a single framed wire line: canonical JSON + a trailing
-/// `\n`. This is the ONLY sanctioned way to put a message on the wire.
+/// Encode one message as a framed wire line: JSON + a trailing `\n`.
 pub fn encode_line<T: Serialize>(value: &T) -> Result<Vec<u8>, serde_json::Error> {
     let mut buf = serde_json::to_vec(value)?;
     buf.push(b'\n');

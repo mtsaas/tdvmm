@@ -217,7 +217,7 @@ pub(crate) struct BuildKernelArgs {
 
 /// Flags shared by `boot` and `run`. On `boot` the `Option`s fall back to the
 /// binary defaults; on `run` a `None` means "use the artifact's baked default"
-/// and `Some` means the flag overrides it (baked < flag, Fable-locked).
+/// and `Some` means the flag overrides it (baked < flag).
 #[derive(Args, Clone)]
 #[command(next_help_heading = "run options")]
 pub(crate) struct CommonRunFlags {
@@ -419,8 +419,8 @@ impl EffectiveConfig {
             None => (DEFAULT_MAX_JUMP_SECS, "default"),
         };
         prov.push(format!("max-jump-secs={max_jump_secs} ({mj_src})"));
-        // The control-channel wire schema (Fable §4): the effective-config
-        // preamble records the proto version so a run log is self-describing.
+        // The effective-config preamble records the control-channel wire schema
+        // so a run log is self-describing.
         prov.push(format!("proto-schema={} (built-in)", tdvmm_proto::SCHEMA));
 
         // allow-egress: the flag alone, with no baked tier. Egress opens the

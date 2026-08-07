@@ -4,11 +4,11 @@ project   tdvmm_tigerbeetle
 mem_mib   3072
 ram_estimate_mib  1104
 compose_lock_sha256  11f8e2d41603c106e186f734484346222eb9a32c3dae5146910240da1e437bde
-initramfs_sha256     9bf8f0c1faf6afd37e2742f5f3fd09d91aa0363cb82a24f816470845e9cdc7e5  initramfs-alpine-tigerbeetle.cpio.gz
-agent_sha256         9b548f2cbbae11a0d11e5bb18e7275f23f86b3a0d8b490a7ecf9eb7f9b790c51  tdvmm-agent
+initramfs_sha256     e1af5089e2cf0dbab32b00ae6dd5013aedb719199c6b66df33c26460826b066e  initramfs-alpine-tigerbeetle.cpio.gz
+agent_sha256         1e01d9ccc767b05de3e42b657a0240666d4c8daf83a329061c17d270bb63a7f0  tdvmm-agent
 builder_image        docker.io/library/alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
 builder_image        docker.io/library/debian:bookworm-slim@sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e
 builder_image        docker.io/library/rust:1.97-alpine3.22@sha256:b348cb409ac0a73de15065997a360063cf87465574a15e3e4469862cb8996f02
   image  policy=plain   upstream=docker.io/library/busybox@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616  diffid=sha256:0958e0fef2d6a31e1325b8bfecd99dead933363682d69850a7606599023751bc  size_mib=4
   image  policy=plain   upstream=ghcr.io/tigerbeetle/tigerbeetle@sha256:177d6fbd12a3dab1782212cdaf034b5f9cb1bf73804b66116980bfe1064cc3b6  diffid=sha256:bc5a3fe779ad9e705b6c5d7fb7a482d1bf8b633e4e3e72152ea3f8953460cda9sha256:93bb1811b71dbaaf723140abe2293f36e1822e9e881e3f191a12b40aa48d7181sha256:a45db8de3580946de982d2d817eb80d37e11a265e2ca9c27e84e20ecfb78af98  size_mib=28
-tdvmm_sha256          00da9c319aa42b5bb065822a6ddf846da5620c027c968d1373ef7f70d1fa3868  tigerbeetle.tdvmm
+tdvmm_sha256          ae880af8926389a60ef713f03d519dd5bc3fab158a809a97b0226009d771c90b  tigerbeetle.tdvmm

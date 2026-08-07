@@ -98,9 +98,9 @@ impl std::error::Error for AgentError {
     }
 }
 
-/// Which container of a service [`resolve_by_service`] should return: the running one
-/// (lifecycle / partition / logs) or a non-running one (to `start`, or to read a
-/// killed service's logs). Replaces a boolean so call sites read for themselves.
+/// Which container of a service [`resolve_by_service`] should return: the running
+/// one (lifecycle / partition / logs) or a non-running one (`start`, or a killed
+/// service's logs).
 #[derive(Clone, Copy)]
 enum Want {
     Running,
@@ -113,14 +113,11 @@ enum Want {
 
 pub(crate) struct Agent {
     /// Canonical unordered service-pair key -> the two container IPs to drop
-    /// between. The whole nft ruleset is rebuilt from this on every change, so the
-    /// installed rules are always exactly the active set. The `BTreeMap` iterates in
-    /// sorted key order, so the emitted ruleset is deterministic.
+    /// between. The nft ruleset is rebuilt from this on every change; the
+    /// `BTreeMap`'s sorted iteration keeps the emitted ruleset deterministic.
     partitions: BTreeMap<String, [String; 2]>,
-    /// The verdict of the FIRST [`tdvmm_proto::OP_FINISH`], once one has been
-    /// served. First finish wins: the run has exactly one outcome, so a second
-    /// caller is rejected rather than allowed to overwrite it (which would make
-    /// the verdict depend on a race between containers).
+    /// The verdict of the first [`tdvmm_proto::OP_FINISH`] served. First finish
+    /// wins: a second caller is rejected rather than overwriting the outcome.
     finished: Option<i64>,
 }
 
@@ -159,14 +156,9 @@ impl Agent {
         }
     }
 
-    /// The terminal op: a container declares the run over and supplies its
-    /// verdict. This does NOT stop anything in the guest — the agent only records
-    /// the outcome and answers; the run actually ends when the HOST sees the
-    /// `finish` event the bridge emits from this reply's acceptance.
-    ///
-    /// First finish wins. A second one is refused with the verdict already
-    /// recorded, so a container that calls it twice (or two containers racing)
-    /// gets a clear error instead of silently changing the run's outcome.
+    /// The terminal op: record the run's verdict and answer. This stops nothing in
+    /// the guest; the run ends when the host sees the `finish` event the bridge
+    /// emits. First finish wins — a second is refused with the recorded verdict.
     fn do_finish(&mut self, req: &Request) -> Reply {
         let verdict = req.exit.unwrap_or(0);
         match self.finished {

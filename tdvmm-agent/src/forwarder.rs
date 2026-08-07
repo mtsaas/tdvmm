@@ -1,59 +1,38 @@
 //! The guest-side egress forwarder: a SOCKS5h proxy that terminates each
-//! guest-initiated TCP connection and relays it over the COM4 / ttyS3 mux to the
-//! host-side `EgressBackend`. It is the guest peer of `crate::egress` on the host
-//! and the exact counterpart of the control-channel agent — but on the fourth
-//! UART and speaking the binary mux ([`tdvmm_proto::egress`]) instead of line
-//! JSON.
+//! guest-initiated TCP connection and relays it over the COM4/ttyS3 mux
+//! ([`tdvmm_proto::egress`]) to the host-side `EgressBackend`.
 //!
-//! Started by the guest init ONLY on `tdvmm.egress=1`. It listens on
-//! `0.0.0.0:1080`; workload containers reach it at their bridge gateway
-//! (`socks5h://<gateway>:1080`). SOCKS5**h** means the guest sends the destination
-//! *hostname* — the host resolves it — so the guest needs no resolver and the
-//! closed-world topology is preserved (egress leaves only through this one
-//! enumerable channel).
+//! Started by the guest init only on `tdvmm.egress=1`. It listens on
+//! `0.0.0.0:1080`; workloads reach it at their bridge gateway. SOCKS5**h**: the
+//! guest sends the destination hostname and the host resolves it, so the guest
+//! needs no resolver and egress leaves only through this one enumerable channel.
 //!
-//! ## Correct-by-construction framing (the malformed-frame obligation)
+//! ## Correct-by-construction framing
 //!
-//! A malformed mux frame is fatal on the host by design (a framing loss on a
-//! delimiter-free byte stream is unrecoverable), so the forwarder MUST NEVER emit
-//! one. Three properties guarantee it:
+//! A malformed mux frame is unrecoverable on the host, so the forwarder must never
+//! emit one. Three properties guarantee it:
 //!
-//! * **One writer.** Every byte toward ttyS3 goes through [`TtyWriter::send`],
-//!   which holds a mutex across a whole `encode`-then-`write_all`. Frames from
-//!   concurrent connections can never interleave on the wire.
-//! * **Whole frames only.** [`TtyWriter::send`] encodes one [`EgressFrame`] into a
-//!   scratch buffer and writes it in full — a partial write cannot leave a torn
-//!   header on the line.
-//! * **Every field is in range before encode.** A SOCKS domain length is a single
-//!   byte (≤ 255 = [`tdvmm_proto::egress::EGRESS_MAX_HOST_LEN`]); an IP literal
-//!   formats far shorter; and client bytes are chunked to
-//!   [`tdvmm_proto::egress::EGRESS_MAX_PAYLOAD`] before framing. So
-//!   [`tdvmm_proto::egress::encode`] never returns its length errors, and the only
-//!   remaining failure is a real I/O error on the UART — surfaced, never ignored.
+//! * One writer: every byte toward ttyS3 goes through [`TtyWriter::send`], which
+//!   holds a mutex across `encode`-then-`write_all`, so frames never interleave.
+//! * Whole frames only: `send` writes one encoded [`EgressFrame`] in full.
+//! * Every field is in range before encode — a host length ≤
+//!   [`tdvmm_proto::egress::EGRESS_MAX_HOST_LEN`], client bytes chunked to
+//!   [`tdvmm_proto::egress::EGRESS_MAX_PAYLOAD`] — so
+//!   [`tdvmm_proto::egress::encode`] never returns a length error and the only
+//!   remaining failure is a real UART I/O error.
 //!
-//! The bytes a container speaks to the SOCKS port are untrusted: the negotiator
-//! validates every field, bounds every read, and rejects a malformed handshake
-//! cleanly (a SOCKS error reply or a dropped connection) — it never panics and
-//! never turns bad client input into a bad mux frame.
+//! Client bytes on the SOCKS port are untrusted: the negotiator validates every
+//! field, bounds every read, and rejects a bad handshake cleanly.
 //!
 //! ## Threads and teardown
 //!
-//! No `libc`, no `epoll` (the agent's dependency rule) — the design is blocking
-//! std threads:
-//!
-//! * one **demux reader** owns the ttyS3 read side, decodes host→guest frames, and
-//!   routes each to its stream's channel (a torn-down stream's frames are dropped);
-//! * each accepted connection runs a handler that negotiates SOCKS, opens the mux
-//!   stream, then relays with an **up** thread (client → host `DATA`) while the
-//!   handler itself drains the **down** direction (host `DATA` → client).
-//!
-//! A stream is a request/response relay: when the remote closes its read side
-//! (host `CLOSE`) the response has been fully delivered, so the forwarder tears the
-//! whole stream down — half-closing toward the host with a `CLOSE`, which lets the
-//! host reach quiescence (both directions closed) and the phase gate re-engage
-//! fast-forward. Client bytes still queued in that instant are not forwarded; a
-//! client that keeps uploading after the server has responded and closed is not
-//! supported (documented cross-stream/HOL simplicity, matching the host).
+//! No `libc`/`epoll`: blocking std threads. A demux reader owns the ttyS3 read
+//! side and routes host→guest frames to each stream's channel; each connection
+//! runs a handler that negotiates SOCKS, opens the mux stream, then relays (an
+//! `up` thread for client → host `DATA`, the handler draining host `DATA` →
+//! client). A host `CLOSE` tears the whole stream down (half-closing toward the
+//! host), so the host reaches quiescence and the phase gate re-engages
+//! fast-forward. Client bytes still queued at that instant are not forwarded.
 
 use std::collections::HashMap;
 use std::fmt;

@@ -1,33 +1,12 @@
-//! The agent's I/O multiplexer: a `\n`-framing `LineReader` over any `Read`, a
-//! typed blocked-`poll` wrapper, and the `run_loop` that serves every source the
-//! agent owns under ONE blocked poll. Framing lives here, so no `BufReader` ever
-//! strands a complete line while `poll` blocks on the fd.
+//! The agent's I/O multiplexer: a `\n`-framing [`LineReader`], and the [`run_loop`]
+//! that serves every source under one blocked `poll`.
 //!
-//! ## The sources
-//!
-//! | source | direction | who writes it |
-//! |---|---|---|
-//! | ttyS1 (control) | host → agent | the VMM, at a scheduled virtual time |
-//! | the events FIFO | any container → agent | workloads, fire-and-forget |
-//! | the control socket | any container → agent | schema 4 |
-//!
-//! ## The infinite timeout is the crown jewel
-//!
-//! Every source above is an fd in ONE `poll` with a **`-1` (infinite) timeout**.
-//! A blocked poll arms no timer and generates no wakes, so an idle guest with the
-//! agent baked in fast-forwards exactly as it would without it. Adding sources
-//! must never add a timeout: a driver container that sleeps for a virtual day
-//! leaves the agent blocked here, the guest HLTed, and the host free to jump.
-//! Anything that needs periodic work would have to be delegated to a child
-//! process whose stdout becomes another fd in this set — never to a poll
-//! timeout.
-//!
-//! ## Single writer toward the host
-//!
-//! ttyS1 has exactly one writer: this loop. Command replies, bridged FIFO
-//! events, mirrored control-socket commands, and the terminal `finish` event are
-//! all emitted from here, in program order, so the host's view of the run is a
-//! totally ordered stream.
+//! Sources: ttyS1 (host → agent control), the events FIFO (container → agent,
+//! fire-and-forget), and the control socket (container → agent, schema 4). All
+//! are fds in one `poll` with a `-1` (infinite) timeout, which arms no timer, so
+//! an idle guest fast-forwards as it would without the agent. ttyS1 has exactly
+//! one writer — this loop — so command replies, bridged events, and the terminal
+//! `finish` reach the host in program order.
 
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -39,28 +18,24 @@ use tdvmm_proto::{decode_line, encode_line, ErrorKind, GuestEvent, Reply, Reques
 use crate::agent::Agent;
 use crate::sys::{poll, PollFd, EINTR, POLLERR, POLLHUP, POLLIN};
 
-/// PIPE_BUF: a FIFO write up to this size is POSIX-atomic, so a well-formed event
-/// never tears even with N concurrent container writers. Doubles as the per-event
-/// byte cap.
+/// Per-event byte cap: PIPE_BUF, so a FIFO write up to this size is POSIX-atomic
+/// and a well-formed event never tears across concurrent writers.
 const FIFO_EVENT_CAP: usize = 4096;
 
 /// Oversized-frame guard: an unterminated line past this is surfaced whole
-/// (truncated) so memory stays bounded and the malformed line is reported by the
-/// per-source handler, never silently dropped. Real frames are far smaller (control
-/// requests; events ≤ [`FIFO_EVENT_CAP`]).
+/// (truncated) so memory stays bounded and the handler reports it rather than
+/// dropping it silently.
 pub(crate) const RX_LINE_CAP: usize = 64 * 1024;
 
-/// Cap on concurrently open control-socket connections. Every container can
-/// reach the socket, so this is a runaway guard (a leaked connection per request
-/// must not exhaust the agent's fds), not a capacity plan. Further connects are
-/// accepted and closed immediately, which an SDK surfaces as a connect error.
+/// Cap on concurrently open control-socket connections: a leaked connection per
+/// request must not exhaust the agent's fds. Further connects are accepted and
+/// closed immediately.
 const MAX_CTL_CONNS: usize = 32;
 
-/// A `\n`-framing reader over any [`Read`] source. The buffer lives HERE, in code we
-/// control, so — unlike a `BufReader` — it never strands a complete line in a hidden
-/// read-ahead while `poll` blocks on the fd. Feed it one `read()` with [`fill`];
-/// drain complete frames by iterating (it is an [`Iterator`]); a partial tail waits
-/// for the next `fill`. Composable and testable over a `Cursor`/`&[u8]`, no fd needed.
+/// A `\n`-framing reader over any [`Read`]. The buffer lives here, so — unlike a
+/// `BufReader` — no complete line is stranded in hidden read-ahead while `poll`
+/// blocks on the fd. Feed one `read()` with [`fill`](Self::fill); drain complete
+/// frames by iterating; a partial tail waits for the next `fill`.
 pub(crate) struct LineReader<R> {
     rd: R,
     buf: Vec<u8>,
@@ -106,9 +81,8 @@ impl<R> Iterator for LineReader<R> {
 }
 
 /// Block until at least one of `fds` is ready, filling each entry's `revents`.
-/// The timeout is ALWAYS `-1` — see the module doc; this is the one place that
-/// could regress fast-forward transparency, and it takes no timeout parameter so
-/// that it cannot. EINTR retries.
+/// The timeout is always `-1` (infinite): a blocked poll arms no timer, keeping
+/// fast-forward transparent. EINTR retries.
 fn poll_blocking(fds: &mut [PollFd]) -> io::Result<()> {
     let nfds = fds.len() as u64;
     loop {
@@ -133,9 +107,8 @@ fn pollfd(fd: RawFd) -> PollFd {
     PollFd { fd, events: POLLIN, revents: 0 }
 }
 
-/// One live control-socket connection: its framing reader and the write half
-/// replies go back on. Both halves are dups of the same socket, so polling `fd`
-/// covers the connection.
+/// One live control-socket connection: its framing reader and the write half its
+/// replies go back on. Both are dups of the same socket, so polling `fd` covers it.
 struct Conn {
     fd: RawFd,
     rd: LineReader<UnixStream>,
@@ -143,19 +116,17 @@ struct Conn {
 }
 
 /// Everything the agent multiplexes. `control` is mandatory; the other two are
-/// optional so a degraded guest still serves what it can (an absent FIFO or an
-/// unbindable socket leaves the control channel working).
+/// optional so a degraded guest still serves what it can.
 pub(crate) struct Sources {
     pub(crate) control: File,
     pub(crate) events: Option<File>,
     pub(crate) ctl: Option<UnixListener>,
 }
 
-/// The agent's core: serve every source under one blocked `poll`, draining each as
-/// an iterator of complete lines. Control is served before events. A control
-/// EOF/error stops the agent — a dead control channel mid-run is the VM reaching
-/// end of life, not an agent fault, so the stop is quiet; a FIFO hiccup or a
-/// driver disconnect never stops it.
+/// Serve every source under one blocked `poll`, draining each as an iterator of
+/// complete lines. Control is served before events. A control EOF/error stops the
+/// agent (the VM reaching end of life); a FIFO hiccup or a driver disconnect never
+/// does.
 pub(crate) fn run_loop(src: Sources, writer: &mut File, agent: &mut Agent) {
     let control_fd = src.control.as_raw_fd();
     let mut control = LineReader::new(src.control);
@@ -238,23 +209,22 @@ pub(crate) fn run_loop(src: Sources, writer: &mut File, agent: &mut Agent) {
                 Ok(true) => {
                     let mut broken = false;
                     for line in c.rd.by_ref() {
-                        match handle_ctl_line(&line, &mut c.wr, agent) {
-                            // Mirror the command to the host for the run trace —
-                            // and, for the accepted `finish`, this IS the event
-                            // the host ends the run on.
-                            Ok(Some(ev)) => {
-                                seq += 1;
-                                if write_line(writer, &Reply::from_event(seq, ev)).is_err() {
-                                    return; // ttyS1 is dead: stop.
-                                }
+                        let outcome = handle_ctl_line(&line, &mut c.wr, agent);
+                        // Forward the mirror (and, for an accepted `finish`, the
+                        // verdict the host ends the run on) BEFORE checking the
+                        // driver connection: the verdict must reach the host even
+                        // if the driver vanished before reading its reply.
+                        if let Some(ev) = outcome.forward {
+                            seq += 1;
+                            if write_line(writer, &Reply::from_event(seq, ev)).is_err() {
+                                return; // ttyS1 is dead: stop.
                             }
-                            Ok(None) => {}
-                            // Writing to THIS driver connection failed: drop it,
-                            // but keep the agent (and the run) alive.
-                            Err(_) => {
-                                broken = true;
-                                break;
-                            }
+                        }
+                        // A failed write to THIS driver connection retires it, but
+                        // keeps the agent (and the run) alive.
+                        if !outcome.conn_alive {
+                            broken = true;
+                            break;
                         }
                     }
                     if broken {
@@ -289,8 +259,8 @@ pub(crate) fn run_loop(src: Sources, writer: &mut File, agent: &mut Agent) {
 }
 
 /// Handle one complete control (ttyS1) line: decode a [`Request`], dispatch, and
-/// write the reply. An empty (whitespace-only) frame is ignored. Returns the reply
-/// write's result so the caller can stop on a broken control channel.
+/// write the reply. An empty frame is ignored. Returns the reply write's result so
+/// the caller can stop on a broken control channel.
 fn handle_control_line(line: &[u8], writer: &mut File, agent: &mut Agent) -> io::Result<()> {
     if tdvmm_proto::trim_frame(line).is_empty() {
         return Ok(());
@@ -303,43 +273,50 @@ fn handle_control_line(line: &[u8], writer: &mut File, agent: &mut Agent) -> io:
     write_line(writer, &reply)
 }
 
-/// Handle one complete control-socket line. The request goes through the SAME
-/// [`Agent::handle`] as a host request — a container gets exactly the op set the
-/// host has, and fault injection is not reimplemented — and the reply goes back on
-/// THAT connection. Returns the event to forward to the host, or `None` for a
-/// frame that was not a request at all. `Err` means this connection's write failed
-/// (drop it); it never means the agent should stop.
+/// What serving one control-socket line produced. Separating the two outcomes is
+/// what keeps a verdict from being lost: [`forward`](Self::forward) reaches the
+/// host regardless of whether the reply to the driver's own connection succeeded.
+struct CtlOutcome {
+    /// The event to forward to the host: a `ctl` mirror, or the `finish` verdict
+    /// the host ends the run on. `None` for a frame that was not a request.
+    forward: Option<GuestEvent>,
+    /// `false` once a write to the driver's own connection failed; the caller
+    /// retires that connection but never stops the agent.
+    conn_alive: bool,
+}
+
+/// Handle one complete control-socket line. The request goes through the same
+/// [`Agent::handle`] as a host request, and the reply goes back on that
+/// connection.
 ///
-/// The reply is written BEFORE the caller forwards the event, so an accepted
-/// `finish` still answers its caller cleanly even though the host tears the run
-/// down the moment that event lands.
-fn handle_ctl_line(
-    line: &[u8],
-    conn: &mut UnixStream,
-    agent: &mut Agent,
-) -> io::Result<Option<GuestEvent>> {
+/// The event to forward is computed and returned BEFORE the reply write, and
+/// independent of its result: an accepted `finish` is the run's verdict, so it
+/// must reach the host even if the driver disconnects between sending `finish`
+/// and reading the reply. Losing that write must never launder into a missing
+/// verdict (which would end the run only via the wall-clock timeout).
+fn handle_ctl_line(line: &[u8], conn: &mut UnixStream, agent: &mut Agent) -> CtlOutcome {
     if tdvmm_proto::trim_frame(line).is_empty() {
-        return Ok(None);
+        return CtlOutcome { forward: None, conn_alive: true };
     }
     let req: Request = match decode_line(line) {
         Ok(r) => r,
         Err(e) => {
-            write_line(conn, &bad_request(e.to_string()))?;
-            return Ok(None);
+            let conn_alive = write_line(conn, &bad_request(e.to_string())).is_ok();
+            return CtlOutcome { forward: None, conn_alive };
         }
     };
     let reply = agent.handle(&req);
-    let event = if agent.accepted_finish(&req, &reply) {
+    let forward = Some(if agent.accepted_finish(&req, &reply) {
         finish_event(&req)
     } else {
         ctl_mirror(&req, &reply)
-    };
-    write_line(conn, &reply)?;
-    Ok(Some(event))
+    });
+    let conn_alive = write_line(conn, &reply).is_ok();
+    CtlOutcome { forward, conn_alive }
 }
 
-/// The terminal event: the run is over and here is its verdict. The host maps
-/// `exit` onto its own 0/1/2/3 contract and stops the VM.
+/// The terminal event carrying the run's verdict; the host maps `exit` onto its
+/// exit-code contract and stops the VM.
 fn finish_event(req: &Request) -> GuestEvent {
     GuestEvent {
         kind: tdvmm_proto::OP_FINISH.into(),
@@ -349,9 +326,9 @@ fn finish_event(req: &Request) -> GuestEvent {
     }
 }
 
-/// The host-facing mirror of one container command: what was asked, of whom, and
-/// whether it worked. This is the run's fault trace — the host stamps it with the
-/// virtual time it arrived, which is the instant the fault actually landed.
+/// The host-facing mirror of one container command: the op, its target, and
+/// whether it worked — the run's fault trace, stamped by the host with the virtual
+/// time it arrived.
 fn ctl_mirror(req: &Request, reply: &Reply) -> GuestEvent {
     let mut details = serde_json::Map::new();
     if let Some(c) = &req.container {
@@ -388,16 +365,13 @@ fn bad_request(detail: impl AsRef<str>) -> Reply {
 }
 
 /// Parse one FIFO line as a [`GuestEvent`]. A well-formed event with a non-empty
-/// `kind` passes through; anything malformed becomes a `kind:"invalid"` event with a
-/// truncated raw payload — recorded by the host, never silently dropped. The agent
-/// is transport only: it does not judge which `kind`s are meaningful.
+/// `kind` passes through; anything malformed becomes a `kind:"invalid"` event with
+/// a truncated raw payload, recorded rather than dropped.
 ///
-/// The ONE exception is [`tdvmm_proto::RESERVED_EVENT_KINDS`]. A verdict and a
-/// fault trace must come from a command the agent actually SERVED, not from a
-/// line anyone can echo into a pipe — otherwise `finish` would have two
-/// unrelated paths into the host, one of them unserved and unordered with respect
-/// to the commands it is supposed to conclude. Those kinds are agent-originated
-/// only, so a FIFO line claiming one is rewritten to `invalid` and reported.
+/// A line claiming a [`tdvmm_proto::RESERVED_EVENT_KINDS`] kind is also rewritten
+/// to `invalid`: those kinds are agent-originated only, so the verdict and the
+/// fault trace can come only from a command the agent actually served, not from a
+/// line echoed into the shared pipe.
 pub(crate) fn parse_event(line: &[u8]) -> GuestEvent {
     let trimmed = tdvmm_proto::trim_frame(line);
     let capped = &trimmed[..trimmed.len().min(FIFO_EVENT_CAP)];
@@ -420,9 +394,8 @@ pub(crate) fn parse_event(line: &[u8]) -> GuestEvent {
     }
 }
 
-/// Encode and write one framed reply line, flushing it. A serialize failure (a bug
-/// — every [`Reply`] is serializable) surfaces as an I/O error rather than being
-/// dropped, so no reply is ever silently lost.
+/// Encode and write one framed reply line, flushing it. A serialize failure
+/// surfaces as an I/O error rather than being dropped.
 pub(crate) fn write_line<W: Write>(w: &mut W, reply: &Reply) -> io::Result<()> {
     let bytes = encode_line(reply).map_err(io::Error::other)?;
     w.write_all(&bytes)?;
@@ -438,16 +411,17 @@ mod tests {
     use super::*;
     use std::io::BufRead;
 
-    /// Serve one request line on a socket pair through the real `handle_ctl_line`
-    /// path, and return `(reply, mirror)`.
+    /// Serve one request line on a live socket pair through the real
+    /// `handle_ctl_line` path, and return `(reply, forwarded event)`.
     fn serve(req: &Request, agent: &mut Agent) -> (Reply, Option<GuestEvent>) {
         let (mut client, mut server) = UnixStream::pair().expect("socketpair");
         let line = encode_line(req).unwrap();
-        let mirror = handle_ctl_line(&line, &mut server, agent).expect("write to the pair");
+        let outcome = handle_ctl_line(&line, &mut server, agent);
+        assert!(outcome.conn_alive, "a live socket pair accepts the reply write");
         drop(server);
         let mut out = String::new();
         std::io::BufReader::new(&mut client).read_line(&mut out).unwrap();
-        (decode_line(out.as_bytes()).expect("a framed reply line"), mirror)
+        (decode_line(out.as_bytes()).expect("a framed reply line"), outcome.forward)
     }
 
     #[test]
@@ -481,14 +455,14 @@ mod tests {
     fn a_malformed_frame_gets_a_structured_error_not_a_panic() {
         let mut agent = Agent::new();
         let (mut client, mut server) = UnixStream::pair().unwrap();
-        let mirror = handle_ctl_line(b"{not json\n", &mut server, &mut agent).unwrap();
+        let outcome = handle_ctl_line(b"{not json\n", &mut server, &mut agent);
         drop(server);
         let mut out = String::new();
         std::io::BufReader::new(&mut client).read_line(&mut out).unwrap();
         let reply: Reply = decode_line(out.as_bytes()).unwrap();
         assert_eq!(reply.ok, Some(false));
         assert!(reply.error.unwrap().starts_with("bad_request:"));
-        assert!(mirror.is_none(), "a non-request frame has nothing to mirror");
+        assert!(outcome.forward.is_none(), "a non-request frame has nothing to mirror");
     }
 
     #[test]
@@ -535,6 +509,33 @@ mod tests {
         );
         assert_eq!(reply2.ok, Some(false));
         assert_eq!(event2.unwrap().kind, "ctl");
+    }
+
+    #[test]
+    fn an_accepted_finish_reaches_the_host_even_if_the_driver_disconnected() {
+        // The driver sends `finish` then vanishes before reading the reply. The
+        // reply write fails, but the verdict must still reach the host — otherwise
+        // the run would end only via the wall-clock timeout (a dropped verdict must
+        // never become a false PASS).
+        let mut agent = Agent::new();
+        let (client, mut server) = UnixStream::pair().unwrap();
+        drop(client); // the driver is gone: the reply write will fail.
+        let line = encode_line(&Request {
+            id: 1,
+            op: "finish".into(),
+            exit: Some(1),
+            message: Some("replica never rejoined".into()),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let outcome = handle_ctl_line(&line, &mut server, &mut agent);
+
+        assert!(!outcome.conn_alive, "the dead driver connection is retired");
+        let ev = outcome.forward.expect("the finish verdict still reaches the host");
+        assert_eq!(ev.kind, "finish");
+        assert_eq!(ev.exit, Some(1), "the verdict is preserved despite the lost reply");
+        assert_eq!(ev.name, "replica never rejoined");
     }
 
     #[test]
