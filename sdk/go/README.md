@@ -130,6 +130,65 @@ the driver's fault calls.
 
 ## Example
 
-See `example_test.go` for the partition-during-in-flight-write pattern, and
-`testdata/stacks/pgcluster/` for the same experiment as a real Go driver
-(`driver/driver.go`, which uses `psql`) against a two-node Postgres cluster.
+Kill Postgres and check the committed row survives the restart.
+
+`compose.yml`:
+
+```yaml
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_HOST_AUTH_METHOD: trust
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      retries: 10
+
+  driver:
+    build: { context: ./driver }
+    depends_on:
+      db: { condition: service_healthy }
+```
+
+`driver/driver.go`:
+
+```go
+package main
+
+import (
+	"strings"
+	"time"
+
+	tdvmm "github.com/mtsaas/tdvmm/sdk/go"
+)
+
+func main() {
+	h, _ := tdvmm.Connect() // the harness socket, mounted into every service
+	defer h.Close()
+
+	h.WaitForServices([]string{"db"}, time.Minute)
+	h.ExecShell("db", `psql -U postgres -c "create table t (x int); insert into t values (1)"`)
+
+	h.Kill("db")  // crash Postgres
+	h.Start("db") // restart it
+	h.WaitForServices([]string{"db"}, time.Minute)
+
+	r, _ := h.ExecShell("db", `psql -U postgres -tAc "select count(*) from t"`)
+	if strings.TrimSpace(*r.Stdout) == "1" {
+		h.Finish(0, "") // the row survived
+	} else {
+		h.Fail("row lost across restart")
+	}
+}
+```
+
+Run:
+
+```
+tdvmm build pgtest ./compose.yml
+tdvmm run pgtest --wall-timeout 300
+echo $?     # 0 = pass
+```
+
+Build files (`go.mod`, `Containerfile`) mirror `testdata/stacks/pgcluster/driver/`.
