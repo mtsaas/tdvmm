@@ -2,6 +2,8 @@
 
 Drive the tdvmm test harness from inside one of your own containers.
 
+> Prefer Go? The [Go SDK](../go/README.md) speaks the same wire protocol.
+
 ## The idea
 
 A tdvmm guest runs your compose stack in a single-vCPU VM whose idle time is
